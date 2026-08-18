@@ -5,11 +5,6 @@
 
 **0.0.1** · 33 crate · **2200+ tests** · Apache-2.0
 
-> 注:交互式 TUI 已拆分至独立仓库
-> [Reflect-TUI](https://cnb.cool/Demon1019/Reflect-CLI)。本仓库的 `reflect` 二进制
-> **不含** `tui` 子命令;TUI 二进制由独立仓库提供,二者通过同一套
-> Submission / Event 协议与本运行时对接。
-
 ## 特性
 
 | 能力 | 实现 |
