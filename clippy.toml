@@ -1,0 +1,4 @@
+# M1 宽松 lint —— 等 CI 基线覆盖建立后在 M2 收紧。
+# 这些 pedantic 风格 lint 在初始实现阶段会产生大量误报;
+# 随代码逐步稳定,再渐进式重新启用。
+avoid-breaking-exported-api = false

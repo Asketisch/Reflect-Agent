@@ -1,0 +1,22 @@
+[package]
+name = "reflect-integration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reflect: 集成层 stub 与安全扫描(cargo audit、通知 webhook、ACP 等)"
+
+[dependencies]
+anyhow           = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+tokio            = { workspace = true }
+tracing          = { workspace = true }
+reqwest          = { workspace = true, optional = true }
+
+[features]
+default = []
+# 启用后 `WebhookNotifier` 可真正 POST webhook URL。
+webhook = ["dep:reqwest"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

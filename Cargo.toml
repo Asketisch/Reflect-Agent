@@ -1,0 +1,207 @@
+[workspace]
+resolver = "2"
+members = [
+    # ── protocol ── 底层契约(被所有层依赖)
+    "crates/protocol/reflect-protocol",
+
+    # ── abilities ── 能力原语层
+    "crates/abilities/reflect-llm",
+    "crates/abilities/reflect-tools",
+    "crates/abilities/reflect-hooks",
+    "crates/abilities/reflect-skills",
+    "crates/abilities/reflect-memory",
+    "crates/abilities/reflect-agent-def",
+    "crates/abilities/reflect-prompt",
+    "crates/abilities/reflect-compact",
+    "crates/abilities/reflect-recovery",
+    "crates/abilities/reflect-notes",
+    "crates/abilities/reflect-sanitize",
+
+    # ── resources ── 配置/权限/插件/可观测性
+    "crates/resources/reflect-config",
+    "crates/resources/reflect-permissions",
+    "crates/resources/reflect-plugin",
+    "crates/resources/reflect-rollout",
+    "crates/resources/reflect-telemetry",
+    "crates/resources/reflect-sandbox",
+    "crates/resources/reflect-ast",
+
+    # ── orchestration ── 多 agent 编排层
+    "crates/orchestration/reflect-subagent",
+    "crates/orchestration/reflect-discussion",
+    "crates/orchestration/reflect-task",
+    "crates/orchestration/reflect-pipeline",
+    "crates/orchestration/reflect-goal",
+
+    # ── integrations ── 外部协议/平台集成
+    "crates/integrations/reflect-mcp",
+    "crates/integrations/reflect-lsp",
+    "crates/integrations/reflect-integration",
+    "crates/integrations/reflect-stream",
+
+    # ── runtime ── 运行时与入口
+    # 注:reflect-tui 已拆分至独立仓库 Reflect-TUI(https://cnb.cool/Demon1019/Reflect-CLI),
+    # 核心仓库的 `reflect` 二进制不再含 TUI 子命令。TUI 二进制由 Reflect-TUI 仓库提供。
+    "crates/runtime/reflect-core",
+    "crates/runtime/reflect-exec",
+    "crates/runtime/reflect-cli",
+    "crates/runtime/reflect",
+    "crates/runtime/reflect-py",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/CNB/Reflect"
+
+[workspace.dependencies]
+# ── protocol ── 底层契约
+reflect-protocol = { path = "crates/protocol/reflect-protocol" }
+
+# ── abilities ── 能力原语层
+reflect-llm        = { path = "crates/abilities/reflect-llm" }
+reflect-tools      = { path = "crates/abilities/reflect-tools" }
+reflect-hooks      = { path = "crates/abilities/reflect-hooks" }
+reflect-skills     = { path = "crates/abilities/reflect-skills" }
+reflect-memory     = { path = "crates/abilities/reflect-memory" }
+reflect-agent-def  = { path = "crates/abilities/reflect-agent-def" }
+reflect-prompt     = { path = "crates/abilities/reflect-prompt" }
+reflect-compact    = { path = "crates/abilities/reflect-compact" }
+reflect-recovery   = { path = "crates/abilities/reflect-recovery" }
+reflect-notes      = { path = "crates/abilities/reflect-notes" }
+reflect-sanitize   = { path = "crates/abilities/reflect-sanitize" }
+
+# ── resources ── 配置/权限/插件/可观测性
+reflect-config      = { path = "crates/resources/reflect-config" }
+reflect-permissions = { path = "crates/resources/reflect-permissions" }
+reflect-plugin      = { path = "crates/resources/reflect-plugin" }
+reflect-rollout     = { path = "crates/resources/reflect-rollout" }
+reflect-telemetry   = { path = "crates/resources/reflect-telemetry" }
+reflect-sandbox     = { path = "crates/resources/reflect-sandbox" }
+reflect-ast         = { path = "crates/resources/reflect-ast" }
+
+# ── orchestration ── 多 agent 编排层
+reflect-subagent    = { path = "crates/orchestration/reflect-subagent" }
+reflect-discussion  = { path = "crates/orchestration/reflect-discussion" }
+reflect-task        = { path = "crates/orchestration/reflect-task" }
+reflect-pipeline    = { path = "crates/orchestration/reflect-pipeline" }
+reflect-goal        = { path = "crates/orchestration/reflect-goal" }
+
+# ── integrations ── 外部协议/平台集成
+reflect-mcp         = { path = "crates/integrations/reflect-mcp" }
+reflect-lsp         = { path = "crates/integrations/reflect-lsp" }
+reflect-integration = { path = "crates/integrations/reflect-integration" }
+reflect-stream      = { path = "crates/integrations/reflect-stream" }
+
+# ── runtime ── 运行时与入口
+reflect-core = { path = "crates/runtime/reflect-core" }
+reflect-exec = { path = "crates/runtime/reflect-exec" }
+reflect-cli  = { path = "crates/runtime/reflect-cli" }
+reflect      = { path = "crates/runtime/reflect" }
+reflect-py   = { path = "crates/runtime/reflect-py" }
+
+# 公共外部依赖
+tokio              = { version = "1", features = ["full"] }
+tokio-util         = "0.7"
+serde              = { version = "1", features = ["derive"] }
+serde_json         = "1"
+serde_yaml         = "0.9"
+toml               = "0.8"
+async-trait        = "0.1"
+anyhow             = "1"
+thiserror          = "1"
+clap               = { version = "4", features = ["derive"] }
+# S2:TUI 反射 `TaskManager::list_tasks`(async)—— 用 pollster 在 sync 上下文
+# block_on,免去给整个 App 套 tokio runtime。pollster 无依赖、~200 LOC。
+pollster           = "0.4"
+pyo3               = "0.23"
+reqwest            = { version = "0.12", features = ["json", "stream", "gzip", "rustls-tls"] }
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+futures            = "0.3"
+
+# MCP (v0.3+)
+rmcp               = { version = "=1.7.0", features = [
+    "client",
+    "transport-child-process",
+    "transport-streamable-http-client-reqwest",
+] }
+
+# LSP (v0.5) — 只取类型,JSON-RPC peer 自己在 `reflect-lsp/transport.rs` 手写
+# (对齐项目风格:mock_mcp_server 也是自己手写 JSON-RPC)。
+lsp-types         = { version = "=0.97", default-features = false }
+globset           = "0.4"
+url               = "2"
+
+# 协议
+schemars = "0.8"
+uuid     = { version = "1", features = ["v4", "v7", "serde"] }
+
+# LLM
+eventsource-stream = "0.2"
+
+# 工具
+walkdir = "2"
+ignore  = "0.4"
+similar = "2"
+regex   = "1"
+rankfns = "0.1"
+# v1.0.0-rc4: `web_fetch` builtin —— HTML 转 Markdown。
+htmd        = "0.5"
+# 通用 lazy container(`WebSearchTool` 等延迟初始化的场景)。
+once_cell   = "1"
+
+# Prompt 构建
+minijinja = "2"
+
+# Rollout 回放
+chrono = { version = "0.4", features = ["serde"] }
+
+# 记忆(M4 可能切换到 rusqlite)
+sled = "0.34"
+
+# 并发原语
+parking_lot = "0.12"
+# v1.0.0-rc3:`read_before_edit` hook 测试可控 mtime 漂移。
+filetime    = "0.2"
+
+# v1.3 analytics 遥测:OTLP/HTTP 导出 + tracing bridge
+opentelemetry         = "0.27"
+opentelemetry_sdk     = { version = "0.27", features = ["rt-tokio"] }
+opentelemetry-otlp    = { version = "0.27", features = ["http-proto", "reqwest-client", "trace"] }
+tracing-opentelemetry = "0.28"
+
+# 测试(M1)
+wiremock = "0.6"
+insta    = { version = "1", features = ["yaml"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+# 快速开发 profile:无 LTO,高并行度。
+# 本地迭代用;发布分发时切换到 `release`。
+[profile.release-fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+opt-level = 2
+incremental = true
+
+# ── dev profile ─────────────────────────────────────────
+# 关掉 incremental:cargo 不会 GC `target/debug/incremental/`,
+# 不开 incremental 模式下该目录根本不会生成,长期占用可控。
+# 代价是首次 cargo build 略慢(同源码改动重编依赖关系需重计算),
+# 但收益是 `make gc` 不再是刚需、磁盘不再无界膨胀。
+# debug 字段保持默认(=2 完整变量名信息),TUI 单步调试体验不受影响。
+[profile.dev]
+incremental = false
+
+# ── test profile ──────────────────────────────────────
+# 加速测试二进制编译(测试通常无需单步调试)。
+[profile.test]
+debug = 1            # 仅行号信息,减小测试产物体积、加速编译与链接
+codegen-units = 256  # 高并行度(cargo 默认值,显式声明便于后续调优)

@@ -1,0 +1,12 @@
+[package]
+name = "ime-test"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "ime-test"
+path = "src/main.rs"
+
+[dependencies]
+crossterm = { version = "0.28", features = ["event-stream", "bracketed-paste"] }
+ratatui = "0.29"

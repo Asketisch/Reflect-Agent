@@ -1,0 +1,19 @@
+[package]
+name = "reflect-agent-def"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reflect: Markdown + frontmatter agent definitions"
+
+[dependencies]
+reflect-protocol = { workspace = true }
+reflect-memory    = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+serde_yaml         = { workspace = true }
+thiserror          = { workspace = true }
+toml               = { workspace = true }
+tracing            = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

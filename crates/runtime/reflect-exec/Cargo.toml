@@ -1,0 +1,72 @@
+[package]
+name = "reflect-exec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reflect: headless executable (JSONL Event stream)"
+# v0.4 起,顶层 `reflect` 二进制通过 `reflect_exec::run` 进程内转发 —— 关掉
+# `src/main.rs` 的 implicit binary,使其不再作为独立 binary 编译。
+autobins = false
+
+[lib]
+name = "reflect_exec"
+path = "src/lib.rs"
+
+# v0.4 起,`reflect-exec` 二进制由顶层 `reflect` 路由进程内转发,
+# 此处不再声明 [[bin]]。`src/main.rs` 保留作为 archaeology,
+# 不再编译为可执行文件 —— 所有调用走 `reflect_exec::run`。
+
+[dependencies]
+reflect-core      = { workspace = true }
+reflect-llm       = { workspace = true }
+reflect-protocol  = { workspace = true }
+reflect-tools     = { workspace = true }
+reflect-compact   = { workspace = true }
+reflect-memory    = { workspace = true }
+reflect-skills    = { workspace = true }
+reflect-agent-def = { workspace = true }
+reflect-prompt    = { workspace = true }
+reflect-rollout   = { workspace = true }
+reflect-telemetry = { workspace = true }
+reflect-subagent  = { workspace = true }
+reflect-config    = { workspace = true }
+reflect-notes     = { workspace = true }
+reflect-recovery  = { workspace = true }
+reflect-hooks     = { workspace = true }
+reflect-mcp       = { workspace = true }
+reflect-lsp       = { workspace = true }
+reflect-ast       = { workspace = true }
+reflect-task      = { workspace = true }
+reflect-plugin    = { workspace = true }
+reflect-permissions = { workspace = true }
+reflect-stream      = { workspace = true }
+anyhow              = { workspace = true }
+async-trait         = { workspace = true }
+chrono              = { workspace = true }
+clap                = { workspace = true }
+parking_lot         = { workspace = true }
+serde_json          = { workspace = true }
+tokio               = { workspace = true }
+tokio-util          = { workspace = true }
+tracing                = { workspace = true }
+tracing-subscriber     = { workspace = true }
+# v1.3 analytics 遥测:init_tracing 里挂 OpenTelemetryLayer
+opentelemetry         = { workspace = true }
+opentelemetry_sdk     = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+uuid                   = { workspace = true }
+
+[dev-dependencies]
+tempfile  = "3"
+tokio     = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+async-trait = { workspace = true }
+futures     = { workspace = true }
+parking_lot = { workspace = true }
+reflect-mcp      = { workspace = true }
+reflect-tools    = { workspace = true }
+reflect-llm      = { workspace = true }
+
+# v0.4 起,`mock_mcp_server` 二进制仅由 `reflect-mcp` crate 声明;
+# `reflect-exec` 集成测试通过 workspace 路径推算定位该 binary。
+# cargo 在 build reflect-exec 时会先 build reflect-mcp(dependency),
+# 所以 `target/{debug,release}/mock_mcp_server` 总在 test 运行前就生成。

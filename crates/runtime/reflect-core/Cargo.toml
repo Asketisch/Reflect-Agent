@@ -1,0 +1,39 @@
+[package]
+name = "reflect-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reflect: AgentThread, 4-node StateGraph and ThreadManager"
+
+[dependencies]
+reflect-protocol = { workspace = true }
+reflect-llm      = { workspace = true }
+reflect-tools    = { workspace = true }
+reflect-hooks    = { workspace = true }
+reflect-compact  = { workspace = true }
+reflect-memory   = { workspace = true }
+reflect-skills   = { workspace = true }
+reflect-agent-def = { workspace = true }
+reflect-prompt   = { workspace = true }
+reflect-notes    = { workspace = true }
+reflect-recovery = { workspace = true }
+reflect-permissions = { workspace = true }
+reflect-telemetry = { workspace = true }
+reflect-goal = { workspace = true }
+async-trait        = { workspace = true }
+futures            = { workspace = true }
+parking_lot        = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+thiserror          = { workspace = true }
+tokio              = { workspace = true }
+tokio-util         = { workspace = true }
+tracing            = { workspace = true }
+uuid               = { workspace = true }
+anyhow             = { workspace = true }
+chrono             = { workspace = true }
+
+[dev-dependencies]
+async-stream = "0.3"
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

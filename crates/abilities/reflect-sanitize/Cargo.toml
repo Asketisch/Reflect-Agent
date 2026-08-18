@@ -1,0 +1,16 @@
+[package]
+name = "reflect-sanitize"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reflect: 轻量级密钥脱敏叶 crate(默认 10 类 pattern,供 rollout/telemetry 落盘脱敏复用)"
+
+[features]
+default = []
+
+[dependencies]
+once_cell  = { workspace = true }
+regex      = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

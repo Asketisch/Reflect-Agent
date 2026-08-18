@@ -1,0 +1,34 @@
+[package]
+name = "reflect-hooks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reflect: 5-event hook engine and built-in hooks"
+
+[dependencies]
+reflect-protocol = { workspace = true }
+reflect-config   = { workspace = true }
+async-trait        = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+parking_lot        = { workspace = true }
+tokio              = { workspace = true }
+tokio-util         = { workspace = true }
+tracing            = { workspace = true }
+thiserror          = { workspace = true }
+toml               = { workspace = true }
+reqwest            = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# bash 命令安全分类(classify_command)原在 reflect-tools,但
+# `PlanModeGate`(本 crate)要在 Plan 模式下据命令只读性放行 bash,
+# 而 reflect-tools → reflect-hooks 是单向依赖(循环禁止)。故把纯函数
+# `classify_command` 下沉到本 crate,reflect-tools 通过 re-export 保持
+# 对外 API 不变。
+once_cell          = { workspace = true }
+regex              = { workspace = true }
+
+[dev-dependencies]
+tokio      = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+serde_json = { workspace = true }
+# `read_before_edit` 测试用 `filetime::set_file_mtime` 制造 mtime
+# 漂移,免去 `std::thread::sleep` 不可靠等待。
+filetime   = { workspace = true }

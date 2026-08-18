@@ -1,0 +1,22 @@
+[package]
+name = "reflect-permissions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Reflect: persistent tool-permission rules and approval resolver (v1.x S5a)"
+
+[dependencies]
+reflect-protocol = { workspace = true }
+async-trait        = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+toml               = { workspace = true }
+thiserror          = { workspace = true }
+tracing            = { workspace = true }
+parking_lot        = { workspace = true }
+globset            = { workspace = true }
+
+[dev-dependencies]
+tokio    = { workspace = true }
+tempfile = "3"

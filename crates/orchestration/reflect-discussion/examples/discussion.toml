@@ -1,0 +1,35 @@
+# discussion.toml — Reflect v0.2.3 多 Agent 讨论示例配置
+#
+# 跑法:
+#   ./target/release/reflect discussion run -c crates/reflect-discussion/examples/discussion.toml
+#   ./target/release/reflect discussion run -c crates/reflect-discussion/examples/discussion.toml -o out.json
+#
+# 或者用 cli::run() 直接调:
+#   cargo run -p reflect --example discussion_demo
+#
+# v0.2.3 起:真实 LLM 模式需要 OPENAI_API_KEY 或 ANTHROPIC_API_KEY,无 key
+# 时 CLI 静默 fallback 到 run_noop(offline / CI 友好)。allowed_tools 缺
+# 三个 comm_tools 时 build_context 会 tracing::warn! 并自动 append。
+
+[discussion]
+mode = "concurrent"
+topic = "Decide whether to use Rust async or sync for the new CLI parser"
+consensus_window = 1
+max_rounds = 5
+mailbox_capacity = 64
+
+# 三个 participant(都是 reflect-subagent 已注册的角色)
+[[agents]]
+role = "advocate"
+system_prompt = "You are the advocate for Rust async. Argue that async is the right choice for the new CLI parser because of the parallelism benefits, future composability with other async tools, and the fact that LLM streaming is already async-native."
+allowed_tools = ["send_message", "read_messages", "finish_discussion"]
+
+[[agents]]
+role = "skeptic"
+system_prompt = "You are the skeptic. Challenge the advocate by pointing out that async in Rust has steep learning curve, cancellation safety is non-trivial, sync CLI is simpler to reason about, and tokio runtime startup cost is non-zero."
+allowed_tools = ["send_message", "read_messages", "finish_discussion"]
+
+[[agents]]
+role = "moderator"
+system_prompt = "You are the moderator. Look for common ground between advocate and skeptic. When consensus emerges, call finish_discussion with a summary."
+allowed_tools = ["send_message", "read_messages", "finish_discussion"]

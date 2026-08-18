@@ -1,0 +1,20 @@
+[package]
+name = "reflect-compact"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reflect: context compaction strategies (microcompact / smart_prune / summarize / hybrid)"
+
+[dependencies]
+reflect-protocol = { workspace = true }
+reflect-llm      = { workspace = true }
+reflect-telemetry = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+thiserror          = { workspace = true }
+async-trait        = { workspace = true }
+tokio              = { workspace = true }
+tokio-util         = { workspace = true }
+futures            = { workspace = true }
+tracing            = { workspace = true }
+parking_lot        = { workspace = true }

@@ -1,0 +1,22 @@
+[package]
+name = "reflect-goal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reflect: 目标模式(参考设计),LLM 自校验 + 可选命令"
+
+[dependencies]
+reflect-protocol = { workspace = true }
+reflect-llm = { workspace = true }
+reflect-telemetry = { workspace = true }
+chrono             = { workspace = true }
+tokio              = { workspace = true, features = ["process", "io-util", "macros", "rt", "time"] }
+tokio-util         = { workspace = true }
+futures            = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+thiserror          = { workspace = true }
+tracing            = { workspace = true }
+async-trait        = { workspace = true }
+parking_lot        = { workspace = true }
+anyhow             = { workspace = true }

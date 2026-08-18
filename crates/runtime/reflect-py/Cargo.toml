@@ -1,0 +1,20 @@
+[package]
+name = "reflect-py"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reflect: PyO3 Python bindings for ReflectBuilder"
+
+[lib]
+name = "reflect_py"
+crate-type = ["rlib"]
+
+[dependencies]
+reflect = { workspace = true }
+pyo3 = { workspace = true }
+
+[features]
+extension-module = ["pyo3/extension-module"]
+
+[dev-dependencies]
+pyo3 = { workspace = true, features = ["auto-initialize"] }

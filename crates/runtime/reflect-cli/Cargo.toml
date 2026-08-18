@@ -1,0 +1,39 @@
+[package]
+name = "reflect-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reflect: top-level CLI router (produces the `reflect` binary)"
+
+[[bin]]
+name = "reflect"
+path = "src/main.rs"
+
+[dependencies]
+reflect-exec       = { workspace = true }
+reflect-discussion = { workspace = true }
+reflect-rollout    = { workspace = true }
+reflect-config     = { workspace = true }
+reflect-mcp        = { workspace = true }
+reflect-stream      = { workspace = true }
+reflect-integration = { workspace = true }
+reflect-plugin     = { workspace = true }
+reflect-protocol   = { workspace = true }
+reflect-task       = { workspace = true }
+reflect-pipeline   = { workspace = true }
+reflect-subagent   = { workspace = true }
+reflect-tools      = { workspace = true }
+reflect-llm        = { workspace = true }
+reflect-telemetry  = { workspace = true }
+anyhow         = { workspace = true }
+clap           = { workspace = true }
+tokio          = { workspace = true }
+tokio-util     = { workspace = true }
+toml           = { workspace = true }
+serde_json     = { workspace = true }
+uuid           = { workspace = true }
+tracing        = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+wiremock = { workspace = true }

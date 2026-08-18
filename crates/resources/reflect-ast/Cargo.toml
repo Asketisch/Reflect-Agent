@@ -1,0 +1,91 @@
+[package]
+name = "reflect-ast"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reflect: tree-sitter backed AST search / rewrite tool"
+
+[dependencies]
+reflect-protocol = { workspace = true }
+reflect-tools    = { workspace = true }
+tokio            = { workspace = true }
+tokio-util       = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+async-trait      = { workspace = true }
+thiserror        = { workspace = true }
+tracing          = { workspace = true }
+ignore           = { workspace = true }
+regex            = { workspace = true }
+similar          = { workspace = true }
+
+# tree-sitter runtime + 默认 5 个 grammar。grammar 全部 feature-gated,
+# `lang-all` 一次启用全部 19 个语言。runtime 用 0.26;grammar 各异,
+# ABI 兼容(tree-sitter C ABI 在 minor 内稳定)。
+#
+# 注意:grammar crate 版本号分布从 0.3 到 0.26 不等(各 grammar
+# 维护节奏不同),这里逐个 pin 到 crates.io 上能找到的最新 stable。
+# 启用扩展 grammar 后,需要在 grid.rs 里补对应 LanguageSpec(目前
+# 仅默认 5 个语言有 spec;扩展是 P1+ follow-up)。
+tree-sitter             = "0.26"
+tree-sitter-rust        = { version = "0.24", optional = true }
+tree-sitter-typescript  = { version = "0.23", optional = true }
+tree-sitter-javascript  = { version = "0.25", optional = true }
+tree-sitter-python      = { version = "0.25", optional = true }
+tree-sitter-go          = { version = "0.25", optional = true }
+
+# 扩展 grammar(P1+ 启用时需要在 grid.rs 补 LanguageSpec)。
+tree-sitter-java        = { version = "0.23", optional = true }
+tree-sitter-cpp         = { version = "0.23", optional = true }
+tree-sitter-c           = { version = "0.24", optional = true }
+tree-sitter-ruby        = { version = "0.23", optional = true }
+tree-sitter-bash        = { version = "0.25", optional = true }
+tree-sitter-html        = { version = "0.23", optional = true }
+tree-sitter-css         = { version = "0.25", optional = true }
+tree-sitter-json        = { version = "0.24", optional = true }
+tree-sitter-toml        = { version = "0.20", optional = true }
+tree-sitter-yaml        = { version = "0.7",  optional = true }
+tree-sitter-markdown    = { version = "0.7",  optional = true }
+tree-sitter-swift       = { version = "0.7",  optional = true }
+tree-sitter-kotlin      = { version = "0.3",  optional = true }
+tree-sitter-c-sharp     = { version = "0.23", optional = true }
+tree-sitter-scala       = { version = "0.26", optional = true }
+tree-sitter-haskell     = { version = "0.23", optional = true }
+tree-sitter-elixir      = { version = "0.3",  optional = true }
+tree-sitter-php         = { version = "0.24", optional = true }
+
+[features]
+default = ["lang-rust", "lang-typescript", "lang-python", "lang-go", "lang-javascript"]
+lang-rust        = ["dep:tree-sitter-rust"]
+lang-typescript  = ["dep:tree-sitter-typescript"]
+lang-python      = ["dep:tree-sitter-python"]
+lang-go          = ["dep:tree-sitter-go"]
+lang-javascript  = ["dep:tree-sitter-javascript"]
+lang-java        = ["dep:tree-sitter-java"]
+lang-cpp         = ["dep:tree-sitter-cpp"]
+lang-c           = ["dep:tree-sitter-c"]
+lang-ruby        = ["dep:tree-sitter-ruby"]
+lang-bash        = ["dep:tree-sitter-bash"]
+lang-html        = ["dep:tree-sitter-html"]
+lang-css         = ["dep:tree-sitter-css"]
+lang-json        = ["dep:tree-sitter-json"]
+lang-toml        = ["dep:tree-sitter-toml"]
+lang-yaml        = ["dep:tree-sitter-yaml"]
+lang-markdown    = ["dep:tree-sitter-markdown"]
+lang-swift       = ["dep:tree-sitter-swift"]
+lang-kotlin      = ["dep:tree-sitter-kotlin"]
+lang-csharp      = ["dep:tree-sitter-c-sharp"]
+lang-scala       = ["dep:tree-sitter-scala"]
+lang-haskell     = ["dep:tree-sitter-haskell"]
+lang-elixir      = ["dep:tree-sitter-elixir"]
+lang-php         = ["dep:tree-sitter-php"]
+# 全部 19 个 grammar 一次开;CI / 容器里用。
+lang-all = [
+    "lang-java", "lang-cpp", "lang-c", "lang-ruby", "lang-bash",
+    "lang-html", "lang-css", "lang-json", "lang-toml", "lang-yaml",
+    "lang-markdown", "lang-swift", "lang-kotlin", "lang-csharp",
+    "lang-scala", "lang-haskell", "lang-elixir", "lang-php",
+]
+
+[dev-dependencies]
+tempfile = "3"

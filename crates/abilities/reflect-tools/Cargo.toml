@@ -1,0 +1,42 @@
+[package]
+name = "reflect-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reflect: Tool trait, builtin tools, ToolExecutionQueue"
+
+[dependencies]
+reflect-protocol = { workspace = true }
+reflect-prompt   = { workspace = true }
+reflect-hooks    = { workspace = true }
+# S5a:`ApprovalGate` 注入 `PermissionResolver` 短路 Allow/Deny(详见
+# `approval.rs::ask_tool` 入口)。`reflect-permissions` 不反向依赖
+# `reflect-tools`,单向注入即可。
+reflect-permissions = { workspace = true }
+# v1.2 P0-1:`OsSandbox`(macOS Seatbelt / Linux Landlock)给 `BashTool`
+# 提供真实 OS 沙箱。`reflect-sandbox` 不反向依赖 `reflect-tools`,无环。
+reflect-sandbox    = { workspace = true }
+async-trait        = { workspace = true }
+futures            = { workspace = true }
+htmd               = { workspace = true }
+ignore             = { workspace = true }
+once_cell          = { workspace = true }
+parking_lot        = { workspace = true }
+regex              = { workspace = true }
+rankfns            = { workspace = true }
+reqwest            = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+similar            = { workspace = true }
+thiserror          = { workspace = true }
+tokio              = { workspace = true }
+tokio-util         = { workspace = true }
+tracing            = { workspace = true }
+url                = { workspace = true }
+uuid               = { workspace = true }
+
+[dev-dependencies]
+# Phase 7 `read_before_edit_e2e.rs` 用 `filetime::set_file_mtime` 模拟
+# 外部 mtime 漂移(无需 `std::thread::sleep` 不可靠等待)。
+filetime = { workspace = true }
+tempfile = "3"

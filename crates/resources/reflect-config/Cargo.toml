@@ -1,0 +1,30 @@
+[package]
+name = "reflect-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reflect: unified TOML config loader with hot reload"
+
+[dependencies]
+reflect-llm  = { workspace = true }
+reflect-permissions = { workspace = true }
+serde          = { workspace = true }
+serde_json     = { workspace = true }
+toml           = { workspace = true }
+thiserror      = { workspace = true }
+anyhow         = { workspace = true }
+tracing        = { workspace = true }
+tracing-subscriber = { workspace = true }
+tokio          = { workspace = true, features = ["sync", "rt-multi-thread", "macros", "time"] }
+notify         = "6"
+parking_lot    = { workspace = true }
+# v1.3 analytics 遥测:OTLP/HTTP 导出 + tracing bridge
+opentelemetry         = { workspace = true }
+opentelemetry_sdk     = { workspace = true }
+opentelemetry-otlp    = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+wiremock = { workspace = true }
+tokio    = { workspace = true, features = ["macros", "rt-multi-thread"] }

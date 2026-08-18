@@ -1,0 +1,29 @@
+[package]
+name = "reflect-task"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reflect: 结构化任务与团队管理 (TaskCreate/Get/Update/List/Stop/Output + TeamCreate/Delete + TodoWrite + Coordinator)"
+
+[dependencies]
+reflect-protocol = { workspace = true }
+reflect-hooks    = { workspace = true }
+reflect-tools    = { workspace = true }
+reflect-subagent = { workspace = true }
+reflect-config   = { workspace = true }
+reflect-prompt   = { workspace = true }
+async-trait        = { workspace = true }
+parking_lot        = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+thiserror          = { workspace = true }
+tokio              = { workspace = true }
+tokio-util         = { workspace = true }
+tracing            = { workspace = true }
+
+[dev-dependencies]
+reflect-llm       = { workspace = true }
+reflect-tools     = { workspace = true }
+parking_lot       = { workspace = true }
+tempfile = "3"
+tokio     = { workspace = true, features = ["macros", "rt-multi-thread", "time", "fs"] }

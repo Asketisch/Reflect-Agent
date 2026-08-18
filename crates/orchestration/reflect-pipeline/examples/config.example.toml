@@ -1,0 +1,34 @@
+# reflect-pipeline 配置示例 —— 4 阶段预设(plan → prd → exec → verify)。
+#
+# 使用方法:
+#   1. 先 `reflect task team create plan prd exec verify`(建 4 个 team)。
+#   2. `reflect pipeline run -c config.example.toml --topic "build a CLI todo app"`
+#
+# 字段语义:
+#   - [pipeline].failure_policy: "abort"(默认)/ "continue_collect"
+#   - [nodes.<label>].team: 必须与 ~/.reflect/teams/<team>.json 的 name 对齐
+#   - [nodes.<label>].template: 支持 {{topic}} / {{input.X}} / {{nodes.L.outputs.F}}
+
+[pipeline]
+name = "team-build"
+failure_policy = "abort"
+
+[nodes.plan]
+team = "plan"
+template = "Plan for: {{topic}}"
+depends_on = []
+
+[nodes.prd]
+team = "prd"
+template = "PRD from plan: {{nodes.plan.outputs.result}}"
+depends_on = ["plan"]
+
+[nodes.exec]
+team = "exec"
+template = "Implement: {{nodes.prd.outputs.result}}"
+depends_on = ["prd"]
+
+[nodes.verify]
+team = "verify"
+template = "Verify: {{nodes.exec.outputs.result}}"
+depends_on = ["exec"]

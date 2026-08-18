@@ -1,0 +1,11 @@
+---
+source: crates/reflect-llm/tests/snapshots.rs
+expression: v
+---
+max_tokens: 256
+messages:
+  - content: hi
+    role: user
+model: gpt-4o
+reasoning_effort: medium
+stream: true

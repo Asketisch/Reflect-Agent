@@ -1,0 +1,18 @@
+---
+source: crates/reflect-llm/tests/snapshots.rs
+expression: v
+---
+max_tokens: 256
+messages:
+  - content:
+      - text: hi
+        type: text
+    role: user
+model: gpt-4o
+stream: true
+system:
+  - cache_control:
+      ttl: 1h
+      type: ephemeral
+    text: 1h-cached
+    type: text

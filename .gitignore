@@ -1,0 +1,45 @@
+# ── Rust ──
+/target/
+**/target/
+Cargo.lock.bak
+
+# ── IDE ──
+.idea/
+.vscode/
+.zed
+*.swp
+*.swo
+*~
+
+# ── OS ──
+.DS_Store
+Thumbs.db
+
+# ── Local config / runtime ──
+.reflect/
+*.local.toml
+
+# ── Coverage / profiling ──
+*.profraw
+lcov.info
+
+# ── 工具产物 / 本地环境 ──
+graphify-out/               # graphify 工具产物（不入仓）
+crates/graphify-out/        # 嵌套副本
+.zcode/                     # AI 规划会话
+.opencode/                  # opencode 工具配置
+__pycache__/                # Python 字节码缓存
+*.pyc
+
+# ── 临时文件 ──
+*.log
+*.pid
+*.bak
+*.partial
+graphify-out
+dist
+
+__pycache__
+.opencode
+.github
+.cargo

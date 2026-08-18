@@ -1,0 +1,23 @@
+[package]
+name = "reflect-skills"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reflect: SKILL.md scanner, loader and dynamic tool activation"
+
+[dependencies]
+reflect-protocol = { workspace = true }
+reflect-llm      = { workspace = true }
+reflect-tools    = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+serde_yaml         = { workspace = true }
+thiserror          = { workspace = true }
+async-trait        = { workspace = true }
+parking_lot        = { workspace = true }
+tracing            = { workspace = true }
+globset            = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+tokio    = { workspace = true }

@@ -1,0 +1,15 @@
+[package]
+name = "reflect-prompt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reflect: layered system prompt and Anthropic cache_control injection"
+
+[dependencies]
+reflect-protocol = { workspace = true }
+reflect-llm      = { workspace = true }
+minijinja          = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+sha1               = "0.10"
+thiserror          = { workspace = true }
