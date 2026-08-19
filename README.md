@@ -1,7 +1,12 @@
 # Reflect
 
-> Rust 编写的 AI agent 运行时:4 节点 StateGraph 引擎、23 内置工具、8 hook 事件、
-> 多 LLM provider、MCP / LSP 集成、JSONL rollout 持久化,产出单一 `reflect` CLI 二进制。
+> Rust 编写的 AI agent 运行时**框架**:33 crate workspace(6 层架构)、
+> 4 节点 StateGraph 引擎、23 内置工具、8 hook 事件、多 LLM provider、
+> MCP / LSP 集成、JSONL rollout 持久化。
+>
+> 本仓库是**纯框架层**:主接口为 `reflect` 库门面(Builder + 60+ re-exports)
+> 与 Rust / Python 集成入口;`reflect-cli` 只是附带产出的薄 headless 入口
+> (单一 `reflect` 二进制)。
 
 **0.0.1** · 33 crate · **2200+ tests** · Apache-2.0
 
@@ -32,7 +37,7 @@
 ```bash
 # 1. 构建(需要 Rust 1.85+,rust-toolchain.toml 已锁定)
 git clone https://cnb.cool/Demon1019/Reflect-Agent && cd Reflect-Agent
-cargo build --release            # 或 make build
+cargo build --release            # 全 workspace(库 + 二进制);make build 仅构建 CLI
 
 # 2. 设置 API key(三选一)
 export OPENAI_API_KEY=sk-...
@@ -41,20 +46,18 @@ export ANTHROPIC_API_KEY=sk-ant-...
 # 或写入 config
 ./target/release/reflect login --provider anthropic --api-key sk-ant-...
 
-# 3. headless 单轮对话(JSONL Event 流到 stdout,日志走 stderr)
+# 3. Rust 库集成 —— 框架主接口(Builder 一行启动)
+cargo run -p reflect --example headless_run -- "say hi"
+# 更多示例:custom_tool / multi_turn / custom_provider / hook_listener / discussion_demo
+
+# 4. headless 单轮对话(薄 CLI 入口;JSONL Event 流到 stdout,日志走 stderr)
 ./target/release/reflect exec "what is 2+2?" | jq -c '.msg.type'
 
-# 4. 续上次 session
+# 5. 续上次 session
 ./target/release/reflect exec -c
 
-# 5. Plan mode —— 只读调研模式
+# 6. Plan mode —— 只读调研模式
 ./target/release/reflect exec --plan-mode "summarize the auth module"
-
-# 6. Rust 库集成
-cargo run -p reflect --example headless_run -- "say hi"
-
-# 7. 交互式 TUI —— 使用独立仓库的产物
-#    https://cnb.cool/Demon1019/Reflect-CLI
 ```
 
 离线开发:examples 与 e2e 脚本用 `REFLECT_MODEL=mock` 跳过真实 LLM 网络调用。
@@ -158,9 +161,6 @@ agent 调研完成后调 `ExitPlanMode` 产出计划并退出 Plan 模式。
 reflect exec --plan-mode "refactor X"   # headless 调研(只读)
 ```
 
-交互式场景(TUI)下的 `/plan` slash 命令与 plan approval modal 由
-[Reflect-TUI](https://cnb.cool/Demon1019/Reflect-CLI) 仓库提供。
-
 ## Examples
 
 | 示例 | 演示 | 命令 |
@@ -233,8 +233,8 @@ crates/
     └── reflect-py              PyO3 Python 绑定
 ```
 
-`reflect` 是**唯一对外二进制**。TUI 二进制由独立仓库
-[Reflect-TUI](https://cnb.cool/Demon1019/Reflect-CLI) 提供。
+`reflect` 二进制由 `reflect-cli` crate 产出,是本仓库的**薄 headless 入口**;
+框架消费方的主接口是 `reflect` 库门面(Builder / re-exports)。
 
 ## 文档
 
@@ -263,11 +263,6 @@ make gc                                   # 清理 target/ 中 cargo 不 GC 的�
 ## 路线图
 
 未来计划包括 MCP OAuth、PostgreSQL 会话存储、IDE 插件等。
-
-## 致谢
-
-- [开源 AI coding 工具参考](https://github.com/openai/codex) — 架构参考
-- Python 原型实现 — 功能参考
 
 ## License
 

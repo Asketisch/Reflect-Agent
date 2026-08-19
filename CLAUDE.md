@@ -1,12 +1,13 @@
 ## 项目概览
 
-Reflect — Rust 编写的 AI agent 运行时:4 节点 StateGraph 引擎、内置工具 + hooks、
-多 LLM provider、MCP/LSP 集成、JSONL rollout 持久化,产出单一 `reflect` CLI 二进制。
+Reflect — Rust 编写的 AI agent 运行时**框架**:4 节点 StateGraph 引擎、内置工具 + hooks、
+多 LLM provider、MCP/LSP 集成、JSONL rollout 持久化。本仓库是**纯框架层**:
+主接口为 `reflect` 库门面(Builder + 60+ re-exports)与 Rust / Python 集成入口;
+`reflect-cli` 只是附带产出的薄 headless CLI 入口(单一 `reflect` 二进制,
+**不含** `tui` 子命令)。
 
 - Rust stable,edition 2024,MSRV 1.85(rust-toolchain.toml 锁定)
 - 33 crate workspace,按 6 层分组于 `crates/<layer>/<crate>/`
-- 注:TUI 已拆分至独立仓库 Reflect-TUI,本仓库的 `reflect` 二进制**不含** `tui` 子命令
-  (README 中 `reflect tui` 相关段落已过时)
 
 ## 常用命令
 
