@@ -20,6 +20,7 @@ mod headless;
 mod jsonl;
 mod reload;
 mod runtime_config;
+pub mod serve;
 
 #[cfg(test)]
 mod tests;

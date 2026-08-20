@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use reflect_exec::ExecArgs;
+use reflect_exec::serve::ServeArgs;
 use reflect_plugin::state::PluginScope;
 
 mod config;
@@ -32,7 +33,7 @@ mod test_home;
 #[command(
     name = "reflect",
     version,
-    about = "Reflect — Rust agent runtime CLI (subcommands: exec, discussion, login, mcp, config, session, traces, doctor, plugin, lsp, task, pipeline, security, workspace, update, version). 交互式 TUI 见独立仓库 Reflect-TUI.",
+    about = "Reflect — Rust agent runtime CLI (subcommands: exec, serve, discussion, login, mcp, config, session, traces, doctor, plugin, lsp, task, pipeline, security, workspace, update, version). 交互式 TUI 见独立仓库 Reflect-TUI.",
     propagate_version = true
 )]
 struct Cli {
@@ -52,6 +53,12 @@ enum Command {
     Exec {
         #[command(flatten)]
         args: ExecArgs,
+    },
+    /// v1.3 SDK:常驻 stdio JSONL 会话服务(Python / TS SDK 的协议入口)。
+    /// stdin 逐行读 Submission,stdout 逐行写 Event;多轮共享同一 session。
+    Serve {
+        #[command(flatten)]
+        args: ServeArgs,
     },
     /// 按 TOML 配置文件运行多 agent 讨论。
     Discussion {
@@ -619,6 +626,7 @@ fn main() -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     match command {
         Command::Exec { args } => reflect_exec::run(args),
+        Command::Serve { args } => reflect_exec::serve::run_serve(args),
         Command::Discussion { action } => match action {
             DiscussionAction::Run { config, output } => rt
                 .block_on(reflect_discussion::cli::run(&config, output.as_deref()))
