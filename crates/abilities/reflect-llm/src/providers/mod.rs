@@ -2,6 +2,7 @@
 
 pub mod anthropic;
 pub mod context_window;
+pub mod mock;
 pub mod ollama;
 pub mod openai;
 pub mod pricing;
@@ -10,6 +11,9 @@ pub mod responses;
 
 pub use self::anthropic::{AnthropicClient, AnthropicConfig};
 pub use self::context_window::context_window_for;
+pub use self::mock::{
+    DEFAULT_MOCK_MODEL, DEFAULT_MOCK_REPLY, ENV_MOCK_SCRIPT, MockClient, MockReply,
+};
 pub use self::ollama::{OllamaClient, OllamaConfig};
 pub use self::openai::{OpenAIClient, OpenAIConfig};
 pub use self::pricing::{ModelPricing, cumulative_cost_usd, is_priced, price};

@@ -558,3 +558,47 @@ fn mcp_server_configs_results_are_sorted_by_name() {
     let names: Vec<&str> = cfgs.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(names, vec!["alpha", "mid", "zeta"]);
 }
+
+// ── v1.3 SDK:mock provider 接线 ─────────────────────────────────────
+// 走纯函数核心(`active_provider_inner` / `model_for_inner`)断言,
+// 不改写进程 env,避免与并行测试竞态。
+
+/// mock 的三种 opt-in 路径与 model 前缀剥离。
+#[test]
+fn mock_provider_opt_in_paths_and_model_resolution() {
+    let cfg = ReflectConfig::default();
+    // `REFLECT_PROVIDER=mock` 显式 opt-in。
+    assert_eq!(cfg.active_provider_inner(Some("mock"), None), Some("mock"));
+    assert_eq!(cfg.active_provider_inner(Some("MOCK"), None), Some("mock"));
+    // `REFLECT_MODEL` 完整 spec / 裸 mock 均可 opt-in。
+    assert_eq!(
+        cfg.active_provider_inner(None, Some("mock/mock-1")),
+        Some("mock")
+    );
+    assert_eq!(
+        cfg.active_provider_inner(None, Some(" mock ")),
+        Some("mock")
+    );
+    // 非 mock 的 REFLECT_MODEL 不触发(回退后续优先级链)。
+    assert_eq!(cfg.active_provider_inner(None, Some("gpt-4o")), None);
+    // provider 优先于 model。
+    assert_eq!(
+        cfg.active_provider_inner(Some("anthropic"), Some("mock/mock-1")),
+        Some("anthropic")
+    );
+    // model 解析:剥前缀 / 裸 mock 回退默认 / 未设回退默认。
+    assert_eq!(cfg.model_for_inner("mock", Some("mock/mock-1")), "mock-1");
+    assert_eq!(cfg.model_for_inner("mock", Some("mock")), "mock-1");
+    assert_eq!(cfg.model_for_inner("mock", None), "mock-1");
+}
+
+/// 显式真实 provider 时 mock 不参与 active 选择。
+#[test]
+fn mock_not_active_for_real_provider_config() {
+    let cfg = cfg_with_anthropic("sk-a");
+    assert_eq!(
+        cfg.active_provider_inner(Some("anthropic"), None),
+        Some("anthropic")
+    );
+    assert_eq!(cfg.active_provider_inner(None, None), Some("anthropic"));
+}

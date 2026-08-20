@@ -43,10 +43,11 @@ pub use error::LlmError;
 pub use event::ChatEvent;
 pub use policy::{Role, RoutingPolicy, SpecSlot};
 pub use providers::{
-    AnthropicClient, AnthropicConfig, KimiQuotaProvider, MinimaxQuotaProvider, ModelPricing,
-    OllamaClient, OllamaConfig, OpenAIClient, OpenAIConfig, OpenAIResponsesClient,
-    OpenAIResponsesConfig, QuotaError, QuotaProvider, QuotaSnapshot, ZenmuxQuotaProvider,
-    ZhipuQuotaProvider, context_window_for, cumulative_cost_usd, is_priced, price,
+    AnthropicClient, AnthropicConfig, DEFAULT_MOCK_MODEL, DEFAULT_MOCK_REPLY, ENV_MOCK_SCRIPT,
+    KimiQuotaProvider, MinimaxQuotaProvider, MockClient, MockReply, ModelPricing, OllamaClient,
+    OllamaConfig, OpenAIClient, OpenAIConfig, OpenAIResponsesClient, OpenAIResponsesConfig,
+    QuotaError, QuotaProvider, QuotaSnapshot, ZenmuxQuotaProvider, ZhipuQuotaProvider,
+    context_window_for, cumulative_cost_usd, is_priced, price,
 };
 pub use quota::{CredentialKey, QuotaConfig, QuotaSource, QuotaTracker, SharedQuotaTracker};
 pub use registry::{CredentialPool, ModelRegistry, NextClient, PoolEntry, SharedModelRegistry};

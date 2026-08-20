@@ -15,9 +15,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use reflect_llm::{
-    AnthropicClient, AnthropicConfig, CredentialPool, ModelClient, ModelRegistry, OllamaClient,
-    OllamaConfig, OpenAIClient, OpenAIConfig, OpenAIResponsesClient, OpenAIResponsesConfig,
-    PoolEntry,
+    AnthropicClient, AnthropicConfig, CredentialPool, MockClient, ModelClient, ModelRegistry,
+    OllamaClient, OllamaConfig, OpenAIClient, OpenAIConfig, OpenAIResponsesClient,
+    OpenAIResponsesConfig, PoolEntry,
 };
 
 use crate::error::ConfigError;
@@ -76,14 +76,50 @@ impl ReflectConfig {
         if let Some(pool) = build_ollama_pool(self.ollama.as_ref())? {
             registry.register_pool("ollama", pool);
         }
+        // v1.3 SDK:mock provider —— `REFLECT_PROVIDER=mock` 或
+        // `REFLECT_MODEL` 形如 `mock` / `mock/...` 时注册(离线测试用,
+        // 免 key、零网络)。显式 opt-in,不作为无 key 时的静默兜底。
+        if matches!(self.active_provider(), Some("mock")) {
+            registry.register_pool(
+                "mock",
+                CredentialPool {
+                    entries: vec![PoolEntry {
+                        client: Arc::new(MockClient::from_env()),
+                        label: "default".into(),
+                        weight: 1,
+                    }],
+                },
+            );
+        }
         Ok(())
     }
 
     /// 选定的 provider 名;返回 `None` 表示未配置任何可用 provider。
     pub fn active_provider(&self) -> Option<&'static str> {
-        if let Ok(p) = std::env::var(ENV_REFLECT_PROVIDER) {
-            if let Some(name) = canonical_provider(&p) {
+        self.active_provider_inner(
+            std::env::var(ENV_REFLECT_PROVIDER).ok().as_deref(),
+            std::env::var(ENV_REFLECT_MODEL).ok().as_deref(),
+        )
+    }
+
+    /// `active_provider` 的纯函数核心(env 值由调用方注入,便于单测并行
+    /// 运行而不必改写进程 env)。
+    fn active_provider_inner(
+        &self,
+        env_provider: Option<&str>,
+        env_model: Option<&str>,
+    ) -> Option<&'static str> {
+        if let Some(p) = env_provider {
+            if let Some(name) = canonical_provider(p) {
                 return Some(name);
+            }
+        }
+        // v1.3 SDK:`REFLECT_MODEL` 以完整 spec 形式(`mock/mock-1`)或裸
+        // `mock` 显式指定 mock 时优先选中 —— 优先级在 TOML `[active]`
+        // 之前,让"用户明确要 mock"总能赢过配置文件里的真实 provider。
+        if let Some(m) = env_model.map(str::trim) {
+            if m == "mock" || m.starts_with("mock/") {
+                return Some("mock");
             }
         }
         if let Some(p) = &self.active.provider {
@@ -116,10 +152,27 @@ impl ReflectConfig {
 
     /// 给定 provider 选出最终 model 字符串:env > TOML section > 内置默认值。
     pub fn model_for(&self, provider: &str) -> String {
-        if let Ok(m) = std::env::var(ENV_REFLECT_MODEL) {
-            if !m.is_empty() {
-                return m;
+        self.model_for_inner(provider, std::env::var(ENV_REFLECT_MODEL).ok().as_deref())
+    }
+
+    /// `model_for` 的纯函数核心(env 值由调用方注入,便于单测)。
+    fn model_for_inner(&self, provider: &str, env_model: Option<&str>) -> String {
+        // v1.3 SDK:mock provider 的 model 取 `mock/` 前缀后的部分
+        // (`REFLECT_MODEL=mock/mock-1` → `mock-1`),裸 `mock` / 未设 →
+        // `mock-1`。不能走下面的通用 env 分支,否则会把完整 spec
+        // (`mock/mock-1`)原样当 model 名拼出 `mock/mock/mock-1`。
+        if provider == "mock" {
+            if let Some(m) = env_model.map(str::trim) {
+                if let Some(stripped) = m.strip_prefix("mock/") {
+                    if !stripped.is_empty() {
+                        return stripped.to_string();
+                    }
+                }
             }
+            return reflect_llm::DEFAULT_MOCK_MODEL.to_string();
+        }
+        if let Some(m) = env_model.filter(|m| !m.is_empty()) {
+            return m.to_string();
         }
         let section_override = match provider {
             "anthropic" => self.anthropic.as_ref().and_then(|s| s.model.clone()),
@@ -430,6 +483,8 @@ fn canonical_provider(raw: &str) -> Option<&'static str> {
         "anthropic" | "claude" => Some("anthropic"),
         "openai" | "gpt" => Some("openai"),
         "ollama" | "local" => Some("ollama"),
+        // v1.3 SDK:离线 mock provider(e2e / SDK 集成测试用)。
+        "mock" | "fake" => Some("mock"),
         _ => None,
     }
 }
