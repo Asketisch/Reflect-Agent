@@ -826,31 +826,30 @@ mod tests {
             ),
         ];
         let (_guard, id) = write_session(&records);
-        // SAFETY: 测试单线程运行,临时改 HOME 隔离 session 目录。
-        unsafe {
-            std::env::set_var("HOME", _guard.path());
-        }
-
-        let bundle = bootstrap_resume(&id).await.unwrap();
-        assert_eq!(bundle.initial_messages.len(), 2);
-        // User → Text block
-        match &bundle.initial_messages[0] {
-            reflect_llm::ChatMessage::User(uc) => {
-                assert_eq!(uc.blocks.len(), 1);
-                match &uc.blocks[0] {
-                    reflect_llm::ContentBlock::Text { text } => assert_eq!(text, "hi"),
-                    other => panic!("expected Text block, got {other:?}"),
+        let home = _guard.path().to_path_buf();
+        with_isolated_home(&home, || async move {
+            let bundle = bootstrap_resume(&id).await.unwrap();
+            assert_eq!(bundle.initial_messages.len(), 2);
+            // User → Text block
+            match &bundle.initial_messages[0] {
+                reflect_llm::ChatMessage::User(uc) => {
+                    assert_eq!(uc.blocks.len(), 1);
+                    match &uc.blocks[0] {
+                        reflect_llm::ContentBlock::Text { text } => assert_eq!(text, "hi"),
+                        other => panic!("expected Text block, got {other:?}"),
+                    }
                 }
+                other => panic!("expected User, got {other:?}"),
             }
-            other => panic!("expected User, got {other:?}"),
-        }
-        // Assistant → text field
-        match &bundle.initial_messages[1] {
-            reflect_llm::ChatMessage::Assistant(ac) => {
-                assert_eq!(ac.text.as_deref(), Some("hello"));
+            // Assistant → text field
+            match &bundle.initial_messages[1] {
+                reflect_llm::ChatMessage::Assistant(ac) => {
+                    assert_eq!(ac.text.as_deref(), Some("hello"));
+                }
+                other => panic!("expected Assistant, got {other:?}"),
             }
-            other => panic!("expected Assistant, got {other:?}"),
-        }
+        })
+        .await;
     }
 
     /// v1.2 P2:新格式(Value::Array ContentBlocks)—— user 消息完整还原。
@@ -873,25 +872,24 @@ mod tests {
             ),
         ];
         let (_guard, id) = write_session(&records);
-        // SAFETY: 测试单线程运行,临时改 HOME 隔离 session 目录。
-        unsafe {
-            std::env::set_var("HOME", _guard.path());
-        }
-
-        let bundle = bootstrap_resume(&id).await.unwrap();
-        assert_eq!(bundle.initial_messages.len(), 1);
-        match &bundle.initial_messages[0] {
-            reflect_llm::ChatMessage::User(uc) => {
-                assert_eq!(uc.blocks.len(), 1);
-                match &uc.blocks[0] {
-                    reflect_llm::ContentBlock::Text { text } => {
-                        assert_eq!(text, "what is 2+2?")
+        let home = _guard.path().to_path_buf();
+        with_isolated_home(&home, || async move {
+            let bundle = bootstrap_resume(&id).await.unwrap();
+            assert_eq!(bundle.initial_messages.len(), 1);
+            match &bundle.initial_messages[0] {
+                reflect_llm::ChatMessage::User(uc) => {
+                    assert_eq!(uc.blocks.len(), 1);
+                    match &uc.blocks[0] {
+                        reflect_llm::ContentBlock::Text { text } => {
+                            assert_eq!(text, "what is 2+2?")
+                        }
+                        other => panic!("expected Text block, got {other:?}"),
                     }
-                    other => panic!("expected Text, got {other:?}"),
                 }
+                other => panic!("expected User, got {other:?}"),
             }
-            other => panic!("expected User, got {other:?}"),
-        }
+        })
+        .await;
     }
 
     /// v1.2 P2:新格式 assistant —— Text + ToolUse + ToolResult 完整还原,
@@ -933,36 +931,64 @@ mod tests {
             ),
         ];
         let (_guard, id) = write_session(&records);
-        // SAFETY: 测试单线程运行,临时改 HOME 隔离 session 目录。
-        unsafe {
-            std::env::set_var("HOME", _guard.path());
-        }
+        let home = _guard.path().to_path_buf();
+        with_isolated_home(&home, || async move {
+            let bundle = bootstrap_resume(&id).await.unwrap();
+            // ToolResult 拆出独立 Tool 消息,所以是 2 条:Assistant(含 tool_calls) + Tool
+            assert_eq!(
+                bundle.initial_messages.len(),
+                2,
+                "got {:?}",
+                bundle.initial_messages
+            );
+            // 第一条:Assistant,含 text + tool_calls
+            match &bundle.initial_messages[0] {
+                reflect_llm::ChatMessage::Assistant(ac) => {
+                    assert_eq!(ac.text.as_deref(), Some("let me check"));
+                    assert_eq!(ac.tool_calls.len(), 1);
+                    assert_eq!(ac.tool_calls[0].id, "call_1");
+                    assert_eq!(ac.tool_calls[0].name, "read_file");
+                }
+                other => panic!("expected Assistant, got {other:?}"),
+            }
+            // 第二条:Tool(ToolResult),call_id 配对
+            match &bundle.initial_messages[1] {
+                reflect_llm::ChatMessage::Tool(tr) => {
+                    assert_eq!(tr.call_id, "call_1");
+                    assert!(!tr.is_error);
+                }
+                other => panic!("expected Tool, got {other:?}"),
+            }
+        })
+        .await;
+    }
 
-        let bundle = bootstrap_resume(&id).await.unwrap();
-        // ToolResult 拆出独立 Tool 消息,所以是 2 条:Assistant(含 tool_calls) + Tool
-        assert_eq!(
-            bundle.initial_messages.len(),
-            2,
-            "got {:?}",
-            bundle.initial_messages
-        );
-        // 第一条:Assistant,含 text + tool_calls
-        match &bundle.initial_messages[0] {
-            reflect_llm::ChatMessage::Assistant(ac) => {
-                assert_eq!(ac.text.as_deref(), Some("let me check"));
-                assert_eq!(ac.tool_calls.len(), 1);
-                assert_eq!(ac.tool_calls[0].id, "call_1");
-                assert_eq!(ac.tool_calls[0].name, "read_file");
-            }
-            other => panic!("expected Assistant, got {other:?}"),
+    /// resume 测试改写全局 `HOME` 隔离 session 目录,并行执行会互相踩
+    /// (`bootstrap_resume` 读到别的测试的临时 HOME → 0 条消息)。
+    /// 互斥锁把这三个测试串行化;结束时还原原 HOME。用 tokio Mutex:
+    /// 锁要横跨测试体的 await 点,std Mutex 会触发
+    /// `clippy::await_holding_lock`。
+    static HOME_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    async fn with_isolated_home<F, Fut>(home: &std::path::Path, f: F)
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let _lock = HOME_MUTEX.lock().await;
+        let orig = std::env::var("HOME").ok();
+        // SAFETY: 已持锁串行化;测试 runtime 为 current_thread,
+        // 无其他线程在本测试改写 HOME 期间读取。
+        unsafe {
+            std::env::set_var("HOME", home);
         }
-        // 第二条:Tool(ToolResult),call_id 配对
-        match &bundle.initial_messages[1] {
-            reflect_llm::ChatMessage::Tool(tr) => {
-                assert_eq!(tr.call_id, "call_1");
-                assert!(!tr.is_error);
+        f().await;
+        // SAFETY: 同上,仍持锁。
+        unsafe {
+            match orig {
+                Some(h) => std::env::set_var("HOME", h),
+                None => std::env::remove_var("HOME"),
             }
-            other => panic!("expected Tool, got {other:?}"),
         }
     }
 }
