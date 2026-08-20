@@ -113,6 +113,8 @@ impl Tool for ToolSearchTool {
                 // v1.3:`ToolSource::Mcp` 新增;搜索结果中标注 MCP 工具
                 // 的来源,便于区分。
                 ToolSource::Mcp => "mcp",
+                // v1.3 SDK:客户端注册的远程自定义工具。
+                ToolSource::Remote => "remote",
             };
             lines.push(format!("{name} [{src}]: {desc}"));
         }

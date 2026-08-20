@@ -32,6 +32,11 @@ pub enum ToolSource {
     /// v1.3:Registered from an MCP server. 安全基线与 Plugin / Runtime
     /// 相同:不显式声明权限时默认 `Prompt`。
     Mcp,
+    /// v1.3 SDK:由 serve 客户端(Python / TS)注册的远程自定义工具。
+    /// 实现在**客户端进程**内执行 —— 客户端注册即信任,执行环境是
+    /// 客户端自己的机器而非本进程,core 侧审批没有保护对象,故不视为
+    /// 外部工具(floor = `Auto`)。
+    Remote,
 }
 
 impl Default for ToolSource {
