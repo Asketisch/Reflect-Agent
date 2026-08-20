@@ -1,5 +1,7 @@
 # Reflect
 
+[简体中文](README.md) | **English**([README_EN.md](README_EN.md))
+
 > Rust 编写的 AI agent 运行时**框架**:33 crate workspace(6 层架构)、
 > 4 节点 StateGraph 引擎、23 内置工具、8 hook 事件、多 LLM provider、
 > MCP / LSP 集成、JSONL rollout 持久化。
