@@ -3,10 +3,16 @@
 //! 对齐 `vim/` 模式(同级 `tests.rs`)。被测项已在 crate 根 re-export,
 //! 因此 `use crate::*` 路径继续可用。
 
+use std::sync::Arc;
+
 use crate::*;
+use reflect_core::AgentConfig;
+use reflect_llm::ModelRegistry;
 use reflect_protocol::{
     AgentMessageDelta, Event, EventMsg, SessionConfiguredEvent, TurnId, TurnStartedEvent,
 };
+use reflect_tools::ToolRegistry;
+use tokio::sync::mpsc;
 
 /// v0.3.1: 加 `[ollama]` 段 → `diff_sections` 报告 `"ollama"`,
 /// `ConfigReloaded.sections_changed` 命中 reload 测试断言。
