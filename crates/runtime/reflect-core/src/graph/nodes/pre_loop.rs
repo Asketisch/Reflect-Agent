@@ -48,13 +48,17 @@ pub async fn pre_loop(state: &mut AgentState, ctx: &NodeContext) -> Option<Graph
         state.history_seeded = true;
     }
 
-    // 2. Compact。M8:把上一轮 LLM 上报的 `input_tokens` 透传,使之
-    // 优先于本地 `estimate_messages` 启发式(见
-    // `Compactor::compact_with_prior_and_tokens`)。首轮
-    // `state.total_usage.input_tokens == 0`,等同于 `None`,
-    // 仅以本地估算为唯一信号。
-    let llm_reported =
-        (state.total_usage.input_tokens > 0).then_some(state.total_usage.input_tokens);
+    // 2. Compact。M8:把**最近一次** LLM 调用上报的 `input_tokens` 透传,
+    // 使之优先于本地 `estimate_messages` 启发式(见
+    // `Compactor::compact_with_prior_and_tokens`)。
+    //
+    // 注意:必须用 `last_llm_input_tokens`(最近一次调用的输入,即权威
+    // 上下文大小),**不能**用 `total_usage.input_tokens`(turn 内逐次
+    // model_call 的累计值)—— 累计值随迭代数线性增长,长 turn 下会在
+    // 每次迭代都误触发 compaction(默认阈值 10k,3 次调用 × ~5k 输入
+    // 即越线),导致 microcompact / smart_prune / LLM 摘要反复空转。
+    // turn 首次 pre_loop 时尚无先验调用(`None`),仅以本地估算为信号。
+    let llm_reported = state.last_llm_input_tokens.filter(|n| *n > 0);
     // v1.2 P1-12(已有-B):`/compact` 手动触发 —— 读 + 清零
     // `force_compact_next`,若为 true 则把 `llm_reported` 强制成 `u32::MAX`
     // 让 `before_tokens` 超过任何阈值,compactor 必然运行(microcompact /
@@ -84,8 +88,8 @@ pub async fn pre_loop(state: &mut AgentState, ctx: &NodeContext) -> Option<Graph
         let strategy = evt.strategy;
         let removed_count = evt.removed_messages;
 
-// 从压缩后的消息列表里抽取 LLM 生成的摘要
-// (它是带 `<summary>...</summary>` 的 System 消息)。
+        // 从压缩后的消息列表里抽取 LLM 生成的摘要
+        // (它是带 `<summary>...</summary>` 的 System 消息)。
         let summary_text = compacted.iter().find_map(|m| match m {
             ChatMessage::System(s) if s.contains("<summary>") => Some(s.clone()),
             _ => None,
@@ -239,7 +243,7 @@ pub async fn pre_loop(state: &mut AgentState, ctx: &NodeContext) -> Option<Graph
         }
     }
 
-// v1.x Plan mode: 仅注入 plan 文件目录这一运行时信息。PlanWrite → ExitPlanMode
+    // v1.x Plan mode: 仅注入 plan 文件目录这一运行时信息。PlanWrite → ExitPlanMode
     // 的收尾指引已由 `compose_ephemeral_with_mode` 在 plan mode 下写入「## Important」
     // 段,这里不再重复,避免两处措辞漂移。
     // `PlanWrite` 在 Plan mode 白名单内且 `required_permission = Auto`,

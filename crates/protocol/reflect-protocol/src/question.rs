@@ -65,10 +65,10 @@ pub struct Question {
 impl Question {
     /// 构造一个新问题,带选项数量校验。
     ///
-/// # 错误
-///
-/// - `header` 长度:超过 12 字符(`header.chars().count() > 12`)           # 头部过长
-/// - `options` 数量:不在 2-4 之间(`options.len() < 2 || options.len() > 4`)  # 选项数错
+    /// # 错误
+    ///
+    /// - `header` 长度:超过 12 字符(`header.chars().count() > 12`)           # 头部过长
+    /// - `options` 数量:不在 2-4 之间(`options.len() < 2 || options.len() > 4`)  # 选项数错
     pub fn new(
         header: impl Into<String>,
         question: impl Into<String>,

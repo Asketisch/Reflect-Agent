@@ -163,6 +163,17 @@ fn headers_to_hashmap(h: &std::collections::BTreeMap<String, String>) -> HashMap
 mod tests {
     use super::*;
 
+    /// `health::CURRENT` 是进程级全局单例:`cargo test` 并行跑多个用例时,
+    /// 「写 → 读」窗口若被别的用例的写入跨越(如邻居的 `set_disabled`
+    /// 覆盖 `Degraded`),断言会被污染。此处用锁串行化断言全局的用例
+    /// 临界区。
+    static HEALTH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 容忍锁中毒:前序用例 panic 过也照常拿到锁。
+    fn lock_health() -> std::sync::MutexGuard<'static, ()> {
+        HEALTH_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     #[test]
     fn status_disabled_by_default() {
         assert!(status_line(None).contains("disabled"));
@@ -213,6 +224,7 @@ mod tests {
 
     #[test]
     fn init_exporter_disabled_returns_none() {
+        let _h = lock_health();
         let s = AnalyticsSection {
             enabled: Some(false),
             endpoint: Some("http://localhost:1/v1/traces".into()),
@@ -224,6 +236,7 @@ mod tests {
 
     #[test]
     fn init_exporter_empty_endpoint_returns_none_and_marks_degraded() {
+        let _h = lock_health();
         let s = AnalyticsSection {
             enabled: Some(true),
             endpoint: Some(String::new()),

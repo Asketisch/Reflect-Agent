@@ -27,7 +27,7 @@ pub mod hook;
 
 pub use abort::HookAbortSignal;
 pub use bash_classify::{BashCommandClass, classify_command};
-pub use decision::{HookDecision, SystemMessage};
+pub use decision::{HookDecision, ResolvedDecision, SystemMessage};
 pub use engine::HookEngine;
 pub use event::{HookContext, HookEvent, HookEventKind, StopReason};
 pub use file_read_state::{DenyReason, FileReadStateTracker, ReadRecord, SharedFileReadState};

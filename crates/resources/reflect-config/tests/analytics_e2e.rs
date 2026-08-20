@@ -11,6 +11,12 @@ use std::collections::BTreeMap;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+/// 下列三个用例都会写入并断言 `health::CURRENT` 进程级全局单例,
+/// 并行执行时彼此的「写 → 读」窗口会互相污染(例如 disabled 用例的
+/// `set_disabled` 恰好落在 degraded 用例的断言前)。用锁串行化整个用例。
+static HEALTH_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
 fn make_section(endpoint: String) -> AnalyticsSection {
     let mut headers = BTreeMap::new();
     headers.insert("x-api-key".into(), "test-token".into());
@@ -25,6 +31,7 @@ fn make_section(endpoint: String) -> AnalyticsSection {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn exporter_posts_spans_to_mock_otlp() {
+    let _health_guard = HEALTH_LOCK.lock().await;
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/traces"))
@@ -56,6 +63,7 @@ async fn exporter_posts_spans_to_mock_otlp() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn exporter_disabled_returns_none() {
+    let _health_guard = HEALTH_LOCK.lock().await;
     let section = AnalyticsSection {
         enabled: Some(false),
         endpoint: Some("http://does-not-matter/v1/traces".into()),
@@ -66,6 +74,7 @@ async fn exporter_disabled_returns_none() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn exporter_empty_endpoint_returns_none_and_marks_degraded() {
+    let _health_guard = HEALTH_LOCK.lock().await;
     let section = AnalyticsSection {
         enabled: Some(true),
         endpoint: Some(String::new()),

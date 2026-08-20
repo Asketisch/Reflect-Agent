@@ -31,8 +31,17 @@ pub struct AgentState {
     pub compact_triggered: bool,
     /// 本 turn 累积的文件 diff(M5 中用于 commit 消息)。
     pub file_diffs: HashMap<std::path::PathBuf, String>,
-    /// 本 session 累计 token 用量。
+    /// 本 turn 累计 token 用量(`AgentState` 每 turn 新建,故实为 turn 级;
+    /// 会话级累计见 `NodeContext::session_usage`)。
     pub total_usage: TokenUsage,
+    /// M8:最近一次 LLM 调用上报的 `input_tokens`(权威上下文大小信号)。
+    /// `pre_loop` 把它透传给 compactor 作 `llm_reported_input_tokens`。
+    /// 此前误用 `total_usage.input_tokens`(turn 内逐次 model_call 的
+    /// **累计**值)—— 累计值随迭代数线性增长,长 turn 下(默认阈值
+    /// 10k,3 次调用 × ~5k 即越线)compactor 会在每次迭代都误触发
+    /// microcompact / smart_prune。由 `model_call` 在每次成功调用后置位,
+    /// 每 turn 经 `AgentState::default()` 重置。
+    pub last_llm_input_tokens: Option<u32>,
     /// LLM 近期输出的 content blocks(文本 + 工具调用)。
     pub latest_content: Vec<ContentBlock>,
     /// v1.x M2-fix:本回合内 `pre_loop` 一旦已用 `ctx.messages`(初始用户

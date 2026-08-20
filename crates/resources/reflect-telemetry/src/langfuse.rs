@@ -28,10 +28,10 @@ use crate::model::TraceEvent;
 pub struct LangfuseConfig {
     /// 例 `https://cloud.langfuse.com`。不带尾斜杠。
     pub endpoint: String,
-/// 公钥(`pk-lf-...`)。
-pub public_key: String,
-/// 私钥(`sk-lf-...`)。
-pub secret_key: String,
+    /// 公钥(`pk-lf-...`)。
+    pub public_key: String,
+    /// 私钥(`sk-lf-...`)。
+    pub secret_key: String,
     /// 单批最大事件数(默认 64)。
     pub batch_size: usize,
 }

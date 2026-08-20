@@ -53,7 +53,7 @@ pub fn classify_command(cmd: &str) -> BashCommandClass {
         return BashCommandClass::Safe;
     }
 
-// 动态 shell 求值、解释器、复杂语法以及敏感路径永远不会被视为 Safe,
+    // 动态 shell 求值、解释器、复杂语法以及敏感路径永远不会被视为 Safe,
     // 即便首条命令看起来只读。
     //
     // 注意:链式操作符 (`&&` / `||` / `;`) 故意不在本集合 —— 它们是合法复合语法,

@@ -175,7 +175,7 @@ impl LayeredPrompt {
         out
     }
 
-/// 与 [`compose_ephemeral`](Self::compose_ephemeral) 相同,但额外接收当前
+    /// 与 [`compose_ephemeral`](Self::compose_ephemeral) 相同,但额外接收当前
     /// [`PermissionMode`](reflect_protocol::PermissionMode),用于在 Plan mode 下
     /// 改写「## Important」收尾段。
     ///

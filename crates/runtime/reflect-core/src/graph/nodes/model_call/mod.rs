@@ -391,6 +391,9 @@ pub async fn model_call(state: &mut AgentState, ctx: &NodeContext) -> Option<Gra
             .total_tokens
             .saturating_add(usage.total_tokens),
     };
+    // M8:记录本次调用的输入 token 数,供下一次 pre_loop 的 compaction
+    // 触发判定使用(权威上下文大小,区别于 turn 级累计的 total_usage)。
+    state.last_llm_input_tokens = Some(usage.input_tokens);
     {
         let mut su = ctx.session_usage.write();
         su.input_tokens = su.input_tokens.saturating_add(usage.input_tokens);

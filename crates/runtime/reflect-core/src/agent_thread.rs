@@ -119,8 +119,16 @@ impl AgentThread {
     pub async fn submit(&self, sub: Submission) -> TurnHandle {
         let (tx, rx) = mpsc::channel::<Event>(64);
         self.turn_subs.lock().insert(sub.id.clone(), tx);
-        // 转发 submission;若循环已退出,channel 将关闭。
-        let _ = self.sub_tx.send(sub).await;
+        // 转发 submission;若循环已退出(如 `Op::Shutdown` 已处理,
+        // `sub_rx` 已 drop),send 立即返回 Err。
+        let sub_id = sub.id.clone();
+        if self.sub_tx.send(sub).await.is_err() {
+            // 移除刚插入的 turn 条目并 drop 其 `Sender`:否则 map 中残留的
+            // Sender 会让 per-turn channel 永不关闭,调用方在
+            // `TurnHandle::next()` 上永久等待(典型触发路径:Shutdown 后
+            // cron driver 仍经 `submission_sender()` 注入新 submission)。
+            self.turn_subs.lock().remove(&sub_id);
+        }
         TurnHandle::new(rx)
     }
 

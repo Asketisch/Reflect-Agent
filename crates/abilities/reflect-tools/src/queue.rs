@@ -292,77 +292,55 @@ impl ToolExecutionQueue {
             .await;
 
         // 应用决策。
+        //
+        // 决策经 `resolve()` 展开:hook 可返回 `Combined([InjectMessage, Deny])`
+        // 等多叶形态,`HookEngine::dispatch` 的合并产物对这种输入仍是含 `Deny`
+        // 叶子的 `Combined`。此前 `Combined` 分支重新 `merge` 后只 `match`
+        // 单个变体,`[InjectMessage, Deny]` 落进 `_ => {}` —— hook 的否决被
+        // 静默丢弃,被拒工具照常执行(安全边界失效)。现在按叶子统一处理,
+        // `Deny` 恒优先。
         let mut effective_args = call.args.clone();
         // hook 发出的 Ask reason;处理完简单分支后,若 gate 存在则走 gate。
-        // 由 Ask 分支或包含 Ask 的 Combined 分支设置。
         let mut hook_ask_reason: Option<String> = None;
-        match pre_decision {
-            reflect_hooks::HookDecision::Allow => {}
-            reflect_hooks::HookDecision::Deny { reason } => {
-                return ToolResult {
-                    call_id: call.id,
-                    content: vec![ContentBlock::text(format!("Denied by hook: {reason}"))],
-                    is_error: true,
-                    elapsed_ms: 0,
-                    metadata: serde_json::json!({"hook": "deny"}),
-                };
-            }
-            reflect_hooks::HookDecision::Ask { reason } => {
-                hook_ask_reason = Some(reason);
-            }
-            reflect_hooks::HookDecision::ModifyArgs(new_args) => {
-                effective_args = new_args;
-            }
-            reflect_hooks::HookDecision::PermissionOverride(mode) => {
-                ctx.permission_mode = mode;
-            }
-            reflect_hooks::HookDecision::InjectMessage(m) => {
-                // 把 reminder 追加到 metadata,模型下一次调用时能看到
-                // (M3 v0:暂存到 metadata;M4 可能会迁到独立的 system-reminder 通道)。
-                let prev = std::mem::replace(
-                    &mut ctx.metadata,
-                    serde_json::Value::Object(Default::default()),
-                );
-                let mut obj = prev.as_object().cloned().unwrap_or_default();
-                obj.insert(
-                    "system_reminder".into(),
-                    serde_json::Value::String(m.content),
-                );
-                ctx.metadata = serde_json::Value::Object(obj);
-            }
-            reflect_hooks::HookDecision::Combined(parts) => {
-                // 依次应用每个叶子决策。Deny 仍然优先。
-                let merged =
-                    reflect_hooks::HookEngine::merge(vec![reflect_hooks::HookDecision::Combined(
-                        parts,
-                    )]);
-                match merged {
-                    reflect_hooks::HookDecision::Deny { reason } => {
-                        return ToolResult {
-                            call_id: call.id,
-                            content: vec![ContentBlock::text(format!("Denied by hook: {reason}"))],
-                            is_error: true,
-                            elapsed_ms: 0,
-                            metadata: serde_json::json!({"hook": "deny"}),
-                        };
-                    }
-                    reflect_hooks::HookDecision::Ask { reason } => {
-                        hook_ask_reason = Some(reason);
-                    }
-                    reflect_hooks::HookDecision::ModifyArgs(new_args) => {
-                        effective_args = new_args;
-                    }
-                    reflect_hooks::HookDecision::InjectMessage(m) => {
-                        let mut obj = ctx.metadata.as_object().cloned().unwrap_or_default();
-                        obj.insert(
-                            "system_reminder".into(),
-                            serde_json::Value::String(m.content),
-                        );
-                        ctx.metadata = serde_json::Value::Object(obj);
-                    }
-                    _ => {}
-                }
-            }
+        let resolved = pre_decision.resolve();
+        if let Some(mode) = resolved.permission_override {
+            ctx.permission_mode = mode;
+        }
+        if let Some(new_args) = resolved.modified_args {
+            effective_args = new_args;
+        }
+        if !resolved.injected.is_empty() {
+            // 把 reminder 追加到 metadata,模型下一次调用时能看到
+            // (M3 v0:暂存到 metadata;M4 可能会迁到独立的 system-reminder 通道)。
+            // 多个注入按序拼接,避免后者覆盖前者。
+            let combined = resolved
+                .injected
+                .iter()
+                .map(|m| m.content.clone())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let prev = std::mem::replace(
+                &mut ctx.metadata,
+                serde_json::Value::Object(Default::default()),
+            );
+            let mut obj = prev.as_object().cloned().unwrap_or_default();
+            obj.insert(
+                "system_reminder".into(),
+                serde_json::Value::String(combined),
+            );
+            ctx.metadata = serde_json::Value::Object(obj);
+        }
+        if let Some(reason) = resolved.ask_reason {
+            hook_ask_reason = Some(reason);
+        }
+        if let Some(reason) = resolved.deny_reason {
+            return ToolResult {
+                call_id: call.id,
+                content: vec![ContentBlock::text(format!("Denied by hook: {reason}"))],
+                is_error: true,
+                elapsed_ms: 0,
+                metadata: serde_json::json!({"hook": "deny"}),
+            };
         }
 
         // M6:审批 gate。两类触发:
@@ -667,6 +645,70 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].call_id, "1");
         assert_eq!(out[1].call_id, "2");
+    }
+
+    /// 回归:PreToolUse hook 返回 `Combined([InjectMessage, Deny])` 时,
+    /// 工具仍必须被拒绝(is_error + "Denied by hook"),而不是照常执行。
+    ///
+    /// 修复前:`Combined` 分支重新 `merge` 后只 `match` 四种叶子形态
+    /// (Deny/Ask/ModifyArgs/InjectMessage);当合并产物仍是含 Deny 叶子的
+    /// `Combined`(如内置 hook 的 `Combined([InjectMessage, Deny])`)时落进
+    /// `_ => {}`,Deny 被静默丢弃,工具照常运行。
+    #[tokio::test]
+    async fn pretooluse_combined_inject_and_deny_still_denies() {
+        use reflect_hooks::{Hook, HookDecision, HookError, HookEventKind, SystemMessage};
+
+        struct CombinedDenyHook;
+        #[async_trait]
+        impl Hook for CombinedDenyHook {
+            fn name(&self) -> &str {
+                "combined-deny-test"
+            }
+            fn events(&self) -> &[HookEventKind] {
+                &[HookEventKind::PreToolUse]
+            }
+            async fn handle(
+                &self,
+                _e: &reflect_hooks::HookEvent,
+            ) -> Result<HookDecision, HookError> {
+                Ok(HookDecision::Combined(vec![
+                    HookDecision::InjectMessage(SystemMessage::new("tests failing: 2 failed")),
+                    HookDecision::Deny {
+                        reason: "tests failing".into(),
+                    },
+                ]))
+            }
+        }
+
+        let reg = Arc::new(ToolRegistry::default());
+        reg.register(Arc::new(StubTool {
+            name: "stub".into(),
+            safe: true,
+        }));
+        let engine = Arc::new(HookEngine::new());
+        engine.register(CombinedDenyHook);
+        let q = ToolExecutionQueue::with_defaults(reg, engine, ctx());
+        let out = q
+            .execute_all(vec![ToolCallRequest {
+                id: "1".into(),
+                name: "stub".into(),
+                args: serde_json::json!({}),
+            }])
+            .await;
+        assert_eq!(out.len(), 1, "应有一条结果");
+        assert!(
+            out[0].is_error,
+            "含 Deny 叶子的 Combined 必须拒绝工具,实际: {:?}",
+            out[0].content
+        );
+        assert!(
+            out[0]
+                .content
+                .iter()
+                .any(|c| matches!(c, ContentBlock::Text { text } if text.contains("Denied by hook: tests failing"))),
+            "拒绝原因应透传到工具结果: {:?}",
+            out[0].content
+        );
     }
 
     /// v1.0.0-rc2:StubTool 输出含假 AWS key,经过 queue 走完后应是脱敏后版本。

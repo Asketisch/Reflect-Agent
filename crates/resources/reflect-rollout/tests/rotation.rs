@@ -68,10 +68,7 @@ async fn current_file_is_small_after_rotation() {
     });
     assert!(!sizes.is_empty(), "应存在当前文件");
     let cur = *sizes.iter().max().unwrap();
-    assert!(
-        cur < 256 * 1024,
-        "轮转后当前文件应 < 256 KiB,实际 {cur}"
-    );
+    assert!(cur < 256 * 1024, "轮转后当前文件应 < 256 KiB,实际 {cur}");
 }
 
 fn walk<F: FnMut(&std::path::Path)>(root: &std::path::Path, f: &mut F) {
