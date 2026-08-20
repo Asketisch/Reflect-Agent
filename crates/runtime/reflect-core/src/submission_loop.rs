@@ -850,6 +850,17 @@ pub async fn submission_loop(
                 }
                 tracing::info!("goal mode exited");
             }
+            // v1.3 SDK:`RegisterTools` / `ToolExecutionResponse` 是 serve
+            // 模式的**进程内控制 Op**,由 `reflect serve` 的 stdin 循环就
+            // 地处理,正常不进 submission_loop。误入时(如 exec 转发 /
+            // 未来其它入口)安全忽略并留审计日志,不影响 turn 状态。
+            reflect_protocol::Op::RegisterTools { .. }
+            | reflect_protocol::Op::ToolExecutionResponse { .. } => {
+                tracing::debug!(
+                    op = sub.op.discriminant(),
+                    "serve-local op reached core loop; ignored"
+                );
+            }
         }
 
         drop(turn_tx);

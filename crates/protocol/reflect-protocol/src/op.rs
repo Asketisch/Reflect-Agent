@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::item::{
-    PlanApprovalChoice, ReasoningEffortMirror, ReviewDecision, ThreadSettingsOverrides,
+    PlanApprovalChoice, ReasoningEffortMirror, ReviewDecision, ThreadSettingsOverrides, ToolOutput,
     UserInputItem,
 };
 use crate::question::AskUserAnswer;
@@ -130,6 +130,31 @@ pub enum Op {
     /// v1.2 P1:退出目标模式(`/goal clear`)。submission_loop 收到后清空
     /// `NodeContext.goal`,停止自动续作。
     ExitGoalMode,
+
+    /// v1.3 SDK:客户端(serve 模式)注册跨语言自定义工具。
+    ///
+    /// 工具的**实现留在客户端进程**(Python / TS 函数):core 侧为每个
+    /// spec 注册一个 `RemoteTool`,LLM 调用时 core emit
+    /// `EventMsg::ToolExecutionRequest`,客户端本地执行后以
+    /// `Op::ToolExecutionResponse` 回执。serve 进程在 stdin 循环里就地
+    /// 处理本 Op(不进 submission_loop)。
+    RegisterTools { tools: Vec<RemoteToolSpec> },
+
+    /// v1.3 SDK:客户端对 `EventMsg::ToolExecutionRequest` 的回执,
+    /// `call_id` 与请求配对,`output` 为本地执行结果。
+    ToolExecutionResponse { call_id: String, output: ToolOutput },
+}
+
+/// v1.3 SDK:客户端注册的自定义工具声明(spec 由客户端提供,
+/// 实现也在客户端 —— core 侧只持有 `RemoteTool` 适配器)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteToolSpec {
+    /// 工具名(LLM 看到的调用名;建议 snake_case,避免与内置工具撞名)。
+    pub name: String,
+    /// 人 / 模型可读的用途描述。
+    pub description: String,
+    /// 入参 JSON Schema(原样透传给 LLM)。
+    pub parameters: serde_json::Value,
 }
 
 impl Op {
@@ -161,6 +186,8 @@ impl Op {
             Op::CyclePermissionMode => "cycle_permission_mode",
             Op::EnterGoalMode { .. } => "enter_goal_mode",
             Op::ExitGoalMode => "exit_goal_mode",
+            Op::RegisterTools { .. } => "register_tools",
+            Op::ToolExecutionResponse { .. } => "tool_execution_response",
         }
     }
 }
@@ -388,6 +415,62 @@ mod tests {
         let back: Op = serde_json::from_str(&json).unwrap();
         assert!(matches!(back, Op::ExitGoalMode));
         assert_eq!(op.discriminant(), "exit_goal_mode");
+    }
+
+    #[test]
+    fn serde_roundtrip_register_tools() {
+        // v1.3 SDK:RegisterTools 携带 RemoteToolSpec 列表,往返序列化测试。
+        let op = Op::RegisterTools {
+            tools: vec![RemoteToolSpec {
+                name: "get_weather".into(),
+                description: "查询城市天气".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"]
+                }),
+            }],
+        };
+        let json = serde_json::to_string(&op).unwrap();
+        assert!(json.contains(r#""type":"register_tools""#), "got: {json}");
+        let back: Op = serde_json::from_str(&json).unwrap();
+        match back {
+            Op::RegisterTools { tools } => {
+                assert_eq!(tools.len(), 1);
+                assert_eq!(tools[0].name, "get_weather");
+                assert_eq!(tools[0].parameters["required"][0], "city");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+        assert_eq!(op.discriminant(), "register_tools");
+    }
+
+    #[test]
+    fn serde_roundtrip_tool_execution_response() {
+        // v1.3 SDK:回执携带完整 ToolOutput(与 ToolCallEndEvent.output 同构)。
+        let op = Op::ToolExecutionResponse {
+            call_id: "call-42".into(),
+            output: ToolOutput {
+                content: vec![crate::item::ContentBlock::text("sunny")],
+                is_error: false,
+                metadata: serde_json::json!({}),
+                elapsed_ms: 3,
+            },
+        };
+        let json = serde_json::to_string(&op).unwrap();
+        assert!(
+            json.contains(r#""type":"tool_execution_response""#),
+            "got: {json}"
+        );
+        let back: Op = serde_json::from_str(&json).unwrap();
+        match back {
+            Op::ToolExecutionResponse { call_id, output } => {
+                assert_eq!(call_id, "call-42");
+                assert!(!output.is_error);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+        assert_eq!(op.discriminant(), "tool_execution_response");
     }
 
     #[test]

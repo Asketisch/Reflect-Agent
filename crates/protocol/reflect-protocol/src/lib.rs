@@ -38,8 +38,8 @@ pub use event_msg::{
     PlanApprovedEvent, PlanDraftUpdatedEvent, PlanReadyEvent, PlanRejectedEvent, PlanRequestEvent,
     PlanStepEvent, PlanStepStatus, PluginLoadedEvent, QuotaExhaustedEvent, RoutingEvent,
     RoutingEventKind, StreamErrorEvent, ThinkingDelta, TokenCountEvent, TokenUsage,
-    ToolCallBeginEvent, ToolCallEndEvent, TriedCredential, TurnAbortedEvent, TurnCompleteEvent,
-    TurnRewoundEvent, TurnStartedEvent, TurnStatus,
+    ToolCallBeginEvent, ToolCallEndEvent, ToolExecutionRequestEvent, TriedCredential,
+    TurnAbortedEvent, TurnCompleteEvent, TurnRewoundEvent, TurnStartedEvent, TurnStatus,
 };
 pub use item::{
     ApprovalPolicy, ContentBlock, PermissionMode, PlanApprovalChoice, PlanId,
@@ -47,7 +47,7 @@ pub use item::{
     ThreadId, ThreadSettingsOverrides, ToolError, ToolOutput, TurnId, UserInputItem,
     is_edit_tool_name,
 };
-pub use op::Op;
+pub use op::{Op, RemoteToolSpec};
 pub use question::{
     Answer, AskUserAnswer, AskUserQuestionEvent, MAX_HEADER_CHARS, MAX_OPTIONS, MAX_QUESTIONS,
     MIN_OPTIONS, Question, QuestionError, QuestionOption,
