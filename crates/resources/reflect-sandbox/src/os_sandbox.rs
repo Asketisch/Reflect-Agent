@@ -29,6 +29,11 @@
 //! 验证标准(gap doc):sandbox 内执行 `rm -rf /` 应被阻止。
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// seatbelt 临时 profile 文件序号:同一进程内并发调用 `seatbelt_argv`
+/// 时 pid 相同,必须靠自增序号区分(见 `seatbelt_argv` 内注释)。
+static SEATBELT_PROFILE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// 沙箱后端状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -355,7 +360,16 @@ impl OsSandbox {
         let profile = self.seatbelt_profile(workspace);
         // 写临时 .sb 文件(sandbox-exec -f 比 -p 更稳:profile 不进 argv,
         // 不受 ARG_MAX / 转义影响)。
-        let tmp = std::env::temp_dir().join(format!("reflect-sandbox-{}.sb", std::process::id()));
+        // 文件名必须**每次调用唯一**:同一进程内并发调用(如并行工具执行、
+        // 并行测试)若共用 `reflect-sandbox-<pid>.sb`,fs::write 截断重写的
+        // 窗口内另一线程的 sandbox-exec 会读到半截 profile → 编译失败,
+        // 子进程根本不启动(表现为 stdout 空);或读到他人完整 profile,
+        // workspace 写白名单错乱。pid + 原子自增序号保证互不踩踏。
+        let seq = SEATBELT_PROFILE_SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp = std::env::temp_dir().join(format!(
+            "reflect-sandbox-{}-{seq}.sb",
+            std::process::id()
+        ));
         std::fs::write(&tmp, &profile)?;
         Ok((
             "/usr/bin/sandbox-exec".to_string(),
@@ -693,6 +707,19 @@ mod tests {
         assert_eq!(args[3], "sh");
         assert_eq!(args[4], "-c");
         assert_eq!(args[5], "rm -rf /");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_argv_temp_profiles_are_unique_per_call() {
+        // 回归:同一进程内两次调用必须生成不同的 .sb 临时文件。旧实现
+        // 共用 `reflect-sandbox-<pid>.sb`,并发调用在 fs::write 截断重写
+        // 窗口内互相踩踏(sandbox-exec 读到半截 profile 编译失败,子进程
+        // 不启动),曾致 rm_rf_root_is_blocked_in_sandbox 并发跑必挂。
+        let s = OsSandbox::enabled(Vec::new());
+        let (_, a) = s.seatbelt_argv(Path::new("/tmp"), "true").unwrap();
+        let (_, b) = s.seatbelt_argv(Path::new("/tmp"), "true").unwrap();
+        assert_ne!(a[1], b[1], "profile temp file must be unique per call");
     }
 
     #[cfg(target_os = "macos")]
