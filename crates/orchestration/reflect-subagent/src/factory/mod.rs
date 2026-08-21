@@ -3,9 +3,11 @@
 //! 以 `Arc<SubAgentFactory>` 形式挂在 `NodeContext` 上,这样任意工具都能
 //! 提交子 `Submission`,无需直接访问父级的 submission channel。
 //!
-//! 深度限制在此处执行:factory 持有一个 `AtomicU8` 计数器,每次 `spawn()`
-//! 递增,达到 [`crate::MAX_DEPTH`] 时拒绝 spawn。计数器与子 factory 共享,
-//! 这样嵌套的孙级 subagent 也共用同一深度预算。
+//! 并发上限在此处执行:factory 持有一个 `AtomicU8` 计数器表示当前
+//! in-flight(同时存活)的 spawn 数,每次 `spawn()` 递增,达到
+//! [`crate::MAX_DEPTH`] 时拒绝 spawn。`SpawnedChild` 析构或
+//! `collect_result` 终态时递减,保证长 session 不会累积到上限。
+//! 计数器与子 factory 共享,这样嵌套的孙级 subagent 也共用同一深度预算。
 //!
 //! v0.2.2 起 `default_model` 用 `parking_lot::Mutex<String>` 包裹,允许
 //! `reflect-exec::handle_reload` 在用户编辑 `~/.reflect/config.toml` 时
@@ -33,10 +35,12 @@ use crate::error::SubAgentError;
 use crate::spec::SubAgentSpec;
 use crate::worker_registry::build_worker_tool_registry;
 
-/// 共享 factory:克隆成本低,所有克隆体共享同一深度计数器。
+/// 共享 factory:克隆成本低,所有克隆体共享同一并发计数器。
 pub struct SubAgentFactory {
-    /// 共享的深度计数器;每次 `spawn()` 递增。
-    depth: Arc<AtomicU8>,
+    /// 共享的并发 in-flight 计数器;每次 `spawn()` 递增,`SpawnedChild`
+    /// 析构或 `collect_result` 完成时递减。达到 [`crate::MAX_DEPTH`]
+    /// 时 `spawn` 拒绝。
+    in_flight: Arc<AtomicU8>,
     /// 父 thread id(用于 `RolloutRecord::Fork` 的 `parent_session_id`)。
     parent_session_id: ThreadId,
     /// 父级模型规格 —— `spec.model` 为 `None` 时用作默认值。
@@ -116,7 +120,7 @@ impl std::fmt::Debug for SubAgentFactory {
         f.debug_struct("SubAgentFactory")
             .field("parent_session_id", &self.parent_session_id)
             .field("default_model", &self.default_model.lock().clone())
-            .field("depth", &self.depth.load(Ordering::Relaxed))
+            .field("in_flight", &self.in_flight.load(Ordering::Relaxed))
             .finish()
     }
 }
@@ -133,7 +137,7 @@ impl SubAgentFactory {
         recorder: Option<Arc<dyn reflect_protocol::RolloutRecorder>>,
     ) -> Self {
         Self {
-            depth: Arc::new(AtomicU8::new(0)),
+            in_flight: Arc::new(AtomicU8::new(0)),
             parent_session_id,
             default_model: Mutex::new(default_model.into()),
             registry,
@@ -153,9 +157,10 @@ impl SubAgentFactory {
         }
     }
 
-    /// 当前深度值(父级为 0,每次 spawn +1)。
+    /// 当前并发 in-flight 数(父级为 0,每次 spawn +1,
+    /// `SpawnedChild` 析构 / `collect_result` 完成时 -1)。
     pub fn depth(&self) -> u8 {
-        self.depth.load(Ordering::SeqCst)
+        self.in_flight.load(Ordering::SeqCst)
     }
 
     /// 父 session 的 thread id —— coordinator scratchpad 路径与 reload 复用。
@@ -380,7 +385,7 @@ impl SubAgentFactory {
     /// 由 [`spawn`] 使用 —— 让子 agent 拥有相同深度预算,从而其 spawn 也被计入。
     pub fn child_factory(&self) -> Self {
         Self {
-            depth: self.depth.clone(),
+            in_flight: Arc::clone(&self.in_flight),
             parent_session_id: self.parent_session_id,
             default_model: Mutex::new(self.default_model.lock().clone()),
             registry: self.registry.clone(),
@@ -428,11 +433,11 @@ impl SubAgentFactory {
     ) -> Result<SpawnedChild, SubAgentError> {
         spec.validate().map_err(SubAgentError::SpecInvalid)?;
 
-        // 原子地预留一个深度槽位;若已到上限则拒绝。
-        let prev = self.depth.fetch_add(1, Ordering::SeqCst);
+        // 原子地预留一个并发槽位;若已到上限则拒绝。
+        let prev = self.in_flight.fetch_add(1, Ordering::SeqCst);
         if prev >= crate::MAX_DEPTH {
             // 回滚计数,避免卡在上限处无法恢复。
-            self.depth.fetch_sub(1, Ordering::SeqCst);
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
             return Err(SubAgentError::MaxDepthExceeded {
                 max: crate::MAX_DEPTH,
             });
@@ -578,6 +583,7 @@ impl SubAgentFactory {
             session_id: child_thread_id,
             handle,
             data_transfer: spec.data_transfer,
+            in_flight: Some(Arc::clone(&self.in_flight)),
         })
     }
 }
@@ -608,10 +614,47 @@ pub(crate) fn build_spawn_user_input(
 
 /// [`SubAgentFactory::spawn`] 返回的句柄 —— 调用方从 `handle` 排空事件,
 /// 并将其传给 [`crate::data_transfer::extract_result`]。
+///
+/// 析构时自动递减 factory 的 in-flight 计数器(即便调用方忘记
+/// `collect_result` 也保证释放槽位),同时 `collect_result_with_usage`
+/// 在终态主动释放作为冗余保护。
 pub struct SpawnedChild {
     pub session_id: ThreadId,
     pub handle: reflect_core::TurnHandle,
     pub data_transfer: DataTransferConfig,
+    /// 父 factory 的并发计数器句柄。`Drop` 中释放,确保长 session
+    /// 即便漏调 `collect_result` 也不会累积到 [`crate::MAX_DEPTH`]。
+    ///
+    /// 用 `Option<Arc<...>>` 而非裸 `Arc<...>`:让 `collect_result_with_usage`
+    /// 可以通过 `Option::take` 安全地把所有权从 `self` 移走,避免
+    /// `ManuallyDrop + ptr::read` 的内存泄漏风险;`Drop` 检查 `Some`
+    /// 才 fetch_sub,已被 `take` 的句柄不会重复减。
+    in_flight: Option<Arc<AtomicU8>>,
+}
+
+impl std::fmt::Debug for SpawnedChild {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpawnedChild")
+            .field("session_id", &self.session_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for SpawnedChild {
+    fn drop(&mut self) {
+        if let Some(arc) = self.in_flight.take() {
+            // `fetch_sub` 自然下溢到 0 是合法的 u8 —— 但若有代码 bug 让
+            // 计数器减到 0 以下会静默 wrap,这里 saturating 防御。
+            let prev = arc.fetch_update(
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+                |cur| Some(cur.saturating_sub(1)),
+            );
+            if let Ok(prev) = prev {
+                debug_assert!(prev > 0, "in_flight underflow: counter already 0");
+            }
+        }
+    }
 }
 
 impl SpawnedChild {
@@ -633,11 +676,21 @@ impl SpawnedChild {
     ///
     /// 都不存在时 `token_usage = None`,调用方应当 fallback 到 `Default`。
     pub async fn collect_result_with_usage(self) -> Result<SpawnedResult, SubAgentError> {
-        let SpawnedChild {
-            mut handle,
-            data_transfer,
-            ..
-        } = self;
+        // `SpawnedChild` 实现了 `Drop`,Rust 不允许部分 move。我们用
+        // `Option::take` 安全地移走 `in_flight` Arc,然后用 `ManuallyDrop`
+        // + `ptr::read` 拆出剩余字段(handle / data_transfer / session_id)。
+        // 这样:
+        // 1. in_flight Arc 的所有权被显式接管,函数末尾 drop(fetch_sub)。
+        // 2. ManuallyDrop 包裹下,`SpawnedChild::drop` 不会被自动调,避免
+        //    双重 fetch_sub —— 因为 in_flight 已被 Option::take 走了,
+        //    即使 Drop 真跑了,`Some` 检查会跳过。
+        use std::mem::ManuallyDrop;
+        let mut me = ManuallyDrop::new(self);
+        // 安全:Option::take 把 Some 替换为 None,后续字段单独 read。
+        let in_flight_arc = me.in_flight.take(); // Option<Arc<AtomicU8>> → None
+        let mut handle = unsafe { std::ptr::read(&me.handle) };
+        let data_transfer = unsafe { std::ptr::read(&me.data_transfer) };
+        let _session_id = unsafe { std::ptr::read(&me.session_id) };
         let started_at = Instant::now();
         let mut events = Vec::new();
         // 跟踪当前见过最权威的 usage 来源。
@@ -673,6 +726,10 @@ impl SpawnedChild {
         let text = crate::data_transfer::extract_result(&events, &data_transfer.result_extractor)
             .ok_or_else(|| SubAgentError::SpawnFailed("no result extractable".into()))?;
         let token_usage = usage_from_turn_complete.or(usage_from_token_count);
+        // 释放 in_flight Arc(fetch_sub 一次),让 in-flight 槽位归位。
+        if let Some(arc) = in_flight_arc {
+            arc.fetch_sub(1, Ordering::SeqCst);
+        }
         Ok(SpawnedResult {
             text,
             token_usage,

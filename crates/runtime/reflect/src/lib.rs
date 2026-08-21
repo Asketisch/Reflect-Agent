@@ -34,6 +34,7 @@
 //! 门面映射关系见 `docs/architecture.md §8`。
 
 pub mod builder;
+pub mod m4_bootstrap;
 pub mod stream;
 
 // ── Core(保持原状)─────────────────────────────────────────────────────────

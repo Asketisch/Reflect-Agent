@@ -3,15 +3,19 @@ name = "reflect-py"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Reflect: PyO3 Python bindings for ReflectBuilder"
+description = "Reflect: PyO3 Python bindings for ReflectBuilder + sync run API"
 
 [lib]
 name = "reflect_py"
 crate-type = ["rlib"]
 
 [dependencies]
-reflect = { workspace = true }
-pyo3 = { workspace = true }
+reflect          = { workspace = true }
+reflect-core     = { workspace = true }
+reflect-protocol = { workspace = true }
+pyo3             = { workspace = true }
+anyhow           = { workspace = true }
+tokio            = { workspace = true }
 
 [features]
 extension-module = ["pyo3/extension-module"]

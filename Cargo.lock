@@ -2271,17 +2271,23 @@ dependencies = [
  "reflect-agent-def",
  "reflect-ast",
  "reflect-compact",
+ "reflect-config",
  "reflect-core",
  "reflect-discussion",
  "reflect-hooks",
  "reflect-llm",
  "reflect-memory",
+ "reflect-notes",
+ "reflect-prompt",
  "reflect-protocol",
+ "reflect-recovery",
  "reflect-rollout",
  "reflect-skills",
  "reflect-subagent",
+ "reflect-task",
  "reflect-tools",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-util",
  "tracing",
@@ -2771,8 +2777,12 @@ dependencies = [
 name = "reflect-py"
 version = "0.0.1"
 dependencies = [
+ "anyhow",
  "pyo3",
  "reflect",
+ "reflect-core",
+ "reflect-protocol",
+ "tokio",
 ]
 
 [[package]]
