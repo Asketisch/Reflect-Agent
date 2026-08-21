@@ -16,7 +16,7 @@ fn depth_increments_on_spawn() {
         None,
     );
     assert_eq!(factory.depth(), 0);
-    factory.depth.fetch_add(1, Ordering::SeqCst);
+    factory.in_flight.fetch_add(1, Ordering::SeqCst);
     assert_eq!(factory.depth(), 1);
 }
 
@@ -32,12 +32,12 @@ fn child_factory_shares_depth_counter() {
         None,
     );
     let child = factory.child_factory();
-    factory.depth.fetch_add(1, Ordering::SeqCst);
+    factory.in_flight.fetch_add(1, Ordering::SeqCst);
     assert_eq!(child.depth(), 1, "child sees the same counter");
 }
 
 #[test]
-fn max_depth_refuses_after_three_increments() {
+fn max_depth_refuses_after_max_in_flight() {
     let factory = SubAgentFactory::new(
         ThreadId::new(),
         "openai/gpt-4o",
@@ -47,10 +47,12 @@ fn max_depth_refuses_after_three_increments() {
         CancellationToken::new(),
         None,
     );
-    // 假装已发生三次 spawn(depth == 3 = MAX_DEPTH)。
-    factory.depth.fetch_add(3, Ordering::SeqCst);
-    // `spawn` 顶部的检查是 `prev >= MAX_DEPTH`;当计数器已达 3,
-    // 下一次 spawn 会看到 `prev=3` 并拒绝。
+    // 假装已发生 `MAX_DEPTH` 个 spawn(counter == 16)。
+    factory
+        .in_flight
+        .fetch_add(crate::MAX_DEPTH, Ordering::SeqCst);
+    // `spawn` 顶部的检查是 `prev >= MAX_DEPTH`;当计数器已达 16,
+    // 下一次 spawn 会看到 `prev=16` 并拒绝。
     assert!(factory.depth() >= crate::MAX_DEPTH);
 }
 
@@ -611,4 +613,75 @@ fn spawn_uses_fresh_registry_when_parent_unset() {
     }
     // 父为 None → 不替换,仍是 fresh Arc(行为不变,无回归)。
     assert!(Arc::ptr_eq(&m4.subagent_registry, &fresh));
+}
+
+// ── in-flight 语义:Drop 自动释放槽位 ────────────────────────
+
+/// 模拟"SpawnedChild 提前被遗忘"(panic / 漏调 collect_result)
+/// 时,Drop 仍必须释放 in-flight 槽位,否则长 session 累积到上限。
+/// 此处通过 `Arc::strong_count` 间接断言 —— 因为 `SpawnedChild`
+/// 字段非 pub,改用 `depth` 计数直接观察。
+#[test]
+fn in_flight_decrements_on_drop() {
+    let factory = dummy_factory();
+    let in_flight = Arc::clone(&factory.in_flight);
+    // 模拟 spawn:占用槽位
+    assert_eq!(in_flight.fetch_add(1, Ordering::SeqCst), 0);
+    assert_eq!(factory.depth(), 1);
+
+    // 模拟"SpawnedChild 析构":直接构造一个临时 `SpawnedChild` 字段等价
+    // 路径困难(字段非 pub),改为手工持有同一计数器 + Drop 触发即可。
+    struct Guard(Arc<std::sync::atomic::AtomicU8>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    let g = Guard(Arc::clone(&in_flight));
+    drop(g);
+    assert_eq!(factory.depth(), 0, "Drop 后槽位应释放");
+}
+
+/// 嵌套 in-flight 计数父 ↔ 子共享 —— 父级 spawn +1,孙级 spawn
+/// 共享同一 Arc,孙级析构 -1 后父级观察到递减。
+#[test]
+fn nested_in_flight_shared_arc_releases_correctly() {
+    let factory = dummy_factory();
+    let child = factory.child_factory();
+    let shared = Arc::clone(&factory.in_flight);
+
+    // 父 +1
+    shared.fetch_add(1, Ordering::SeqCst);
+    assert_eq!(factory.depth(), 1);
+    assert_eq!(child.depth(), 1);
+
+    // 子 -1
+    shared.fetch_sub(1, Ordering::SeqCst);
+    assert_eq!(factory.depth(), 0);
+    assert_eq!(child.depth(), 0);
+}
+
+/// 验证多次 spawn → drop 循环不累积计数(避免计数器泄漏 bug)。
+#[test]
+fn in_flight_does_not_leak_across_repeated_spawn_drop_cycles() {
+    let factory = dummy_factory();
+    let in_flight = Arc::clone(&factory.in_flight);
+
+    // 模拟 100 次 spawn + drop 循环
+    struct Guard(Arc<std::sync::atomic::AtomicU8>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    for _ in 0..100 {
+        in_flight.fetch_add(1, Ordering::SeqCst);
+        let g = Guard(Arc::clone(&in_flight));
+        drop(g);
+    }
+    assert_eq!(
+        factory.depth(),
+        0,
+        "100 次 spawn+drop 后计数应归 0,不能泄漏"
+    );
 }

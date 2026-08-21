@@ -605,7 +605,14 @@ mod tests {
             captured_c.lock().push(agent.0.clone());
         }
 
-        assert_eq!(factory.depth(), 3, "depth advances by 1 per spawn");
+        // v0.x:in-flight 语义下,每次 `prompt_for` 调用内 spawn 后立即
+        // collect_result,槽位同步释放。3 次连续调用终态 in-flight = 0
+        // (而非旧语义下累积到 3)。
+        assert_eq!(
+            factory.depth(),
+            0,
+            "3 spawns + 3 collect_results → in-flight 归 0"
+        );
         assert_eq!(
             spawns.load(Ordering::SeqCst),
             3,

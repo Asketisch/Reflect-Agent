@@ -19,6 +19,11 @@ reflect-compact    = { workspace = true }
 reflect-rollout    = { workspace = true }
 reflect-subagent   = { workspace = true }
 reflect-discussion = { workspace = true }
+reflect-config     = { workspace = true }
+reflect-prompt     = { workspace = true }
+reflect-recovery   = { workspace = true }
+reflect-notes      = { workspace = true }
+reflect-task       = { workspace = true }
 async-trait          = { workspace = true }
 anyhow               = { workspace = true }
 tokio                = { workspace = true }
@@ -33,3 +38,4 @@ anyhow     = { workspace = true }
 tokio      = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
 tokio-util = { workspace = true }
 serde_json = { workspace = true }
+tempfile   = "3"

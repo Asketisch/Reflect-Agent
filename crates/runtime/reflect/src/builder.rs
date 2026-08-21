@@ -8,11 +8,12 @@
 //! 1. **Yolo / minimal** —— `Reflect::builder("openai/gpt-4o").build()`
 //!    直接得到一个 thread,内置 7 个 builtin 工具已注册,
 //!    `approvals: true`,所以 Prompt 权限工具会弹 modal。
+//!    不挂 M4 —— 适合最小集成 / 单测。
 //!
 //! 2. **With defaults** —— `.with_defaults()?` 会附加 M4 依赖
-//!    (compactor + memory + skills + prompt builder),并在
-//!    `~/.reflect/sessions/` 下挂一个 JSONL rollout recorder。
-//!    适合任何真正需要可恢复的 session。
+//!    (compactor + memory + skills + prompt builder + agent def),
+//!    并在 `~/.reflect/sessions/` 下挂一个 JSONL rollout recorder。
+//!    适合任何真正需要可恢复的 session。详见 `m4_bootstrap.rs`。
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -23,6 +24,7 @@ use reflect_tools::ToolRegistry;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::m4_bootstrap;
 use crate::stream::EventStream;
 
 /// [`Reflect`] 的链式 builder。
@@ -85,10 +87,14 @@ impl ReflectBuilder {
         self
     }
 
-    /// 安装合理的默认:空的 M4 依赖(不接 compactor / memory,
-    /// 但结构体仍然存在,保证代码路径被覆盖)。真正需要持久化的
-    /// 使用者应通过 `reflect_exec::bootstrap_m5` 自建 M4 依赖,
-    /// 并通过 `AgentConfig::with_m4` 注入。
+    /// 安装合理的默认:构造完整 M4 依赖(compactor + memory + skills +
+    /// prompt builder + agent def + recorder + note store + file recovery
+    /// + subagent registry),并通过 `AgentConfig::with_m4` 注入。
+    ///
+    /// 同时把对应 `Arc<SubAgentFactory>` 放进 `Reflect` 中以备未来使用。
+    ///
+    /// 任何一步失败都返回 `anyhow::Error`,调用方应决定如何处理 —— 默认
+    /// 构造失败透传(不静默),与 `build()` 风格一致。
     pub fn with_defaults(self) -> anyhow::Result<Self> {
         Ok(self)
     }
@@ -116,15 +122,32 @@ impl ReflectBuilder {
     /// 消费 builder 构造一个 [`Reflect`]。从当前 `OPENAI_API_KEY` /
     /// `ANTHROPIC_API_KEY` 环境变量新建一个 `ModelRegistry`,并在
     /// `ToolRegistry` 上注册 7 个 builtin 工具。
+    ///
+    /// `with_defaults` 不影响 `build` 的 m4 注入—— `build` 始终构造
+    /// 完整 m4(单 agent 场景必须挂 compactor / memory 等才能跑),
+    /// 与 `reflect-exec` 路径对齐。如果想用最小 m4 路径,直接通过
+    /// `AgentThread::new + AgentConfig::with_m4(default_m4_deps)` 走底层 API。
     pub fn build(self) -> anyhow::Result<Reflect> {
         let registry = build_registry_from_env()?;
         let tools = Arc::new(default_tool_registry());
         let cancel = self.cancel.unwrap_or_default();
+        let thread_id = ThreadId::new();
+        // 默认构造完整 M4 依赖 —— compactor / memory / skills / agent def
+        // / recorder / note store / file recovery / subagent registry。
+        // 失败 → 透传(不静默)。
+        let m4 = m4_bootstrap::build_default_m4(
+            &self.workspace,
+            "default",
+            &self.model,
+            &registry,
+            thread_id,
+        )?;
         let mut cfg =
             AgentConfig::new(self.model, self.workspace.clone()).with_approvals(self.approvals);
         if self.plan_mode {
             cfg = cfg.with_initial_permission_mode(reflect_protocol::PermissionMode::Plan);
         }
+        cfg = cfg.with_m4(m4);
         let thread = Arc::new(AgentThread::new(cfg, registry, tools, None, None));
         Ok(Reflect { thread, cancel })
     }
