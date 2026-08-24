@@ -309,6 +309,15 @@ pub(crate) fn bootstrap_m5(
         });
     }
 
+    // v1.4 子代理可见性:`call_<role>` 是运行时动态注册的工具,不在静态
+    // `ALWAYS_ON_TOOLS` 中;而 `pre_loop` 按 `m4.skills.active_tool_names()`
+    // 计算 `effective_tools`(模型可见工具集)。不在此把 `call_<role>` 补入
+    // always-on 可见集,模型请求里就没有子代理工具的 schema,LLM 永远无法
+    // 委派(离线 mock provider 无视实际工具列表回放脚本,只能靠运行时
+    // 真实 LLM 测试暴露)。
+    let call_tool_names: Vec<String> =
+        configs.iter().map(|sc| format!("call_{}", sc.role)).collect();
+
     // 把合并后的 `SubagentSpecConfig` 映射为 `SubAgentSpec` 并注册为
     // `call_<role>` 工具。`data_transfer` 走默认配置。
     for sc in configs {
@@ -329,6 +338,9 @@ pub(crate) fn bootstrap_m5(
         tools().register_runtime_tool(tool);
         tracing::debug!(role = %role, "registered subagent spec");
     }
+
+    // 补入 always-on 可见集(见上方 v1.4 注释)。
+    m4.skills.add_always_on_tools(call_tool_names);
 
     let _ = (workspace, agent_name);
     factory

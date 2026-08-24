@@ -15,8 +15,8 @@ use reflect_hooks::{HookEngine, HookEvent};
 use reflect_llm::{ChatMessage, SharedModelRegistry, SharedQuotaTracker};
 use reflect_protocol::{
     AbortReason, ContextCompactedEvent, ContextCompactedStrategy, Event, EventMsg, MessageRole,
-    PermissionMode, PermissionModeChangedEvent, PlanId, PlanReadyEvent, PlanRejectedEvent,
-    PlanRequestEvent, ReasoningEffortMirror, RolloutRecord, RolloutRecorder,
+    PermissionMode, PermissionModeChangedEvent, PlanApprovedEvent, PlanId, PlanReadyEvent,
+    PlanRejectedEvent, PlanRequestEvent, ReasoningEffortMirror, RolloutRecord, RolloutRecorder,
     SessionConfiguredEvent, Submission, TokenCountEvent, TurnAbortedEvent, TurnCompleteEvent,
     TurnId, TurnStartedEvent, TurnStatus, UserInputItem,
 };
@@ -820,11 +820,19 @@ pub async fn submission_loop(
                 verify_command,
                 token_budget,
             } => {
-                let spec = cfg
+                // 与 `model_call` 节点同源的 spec 选取:policy 主 slot 的
+                // primary 优先;为空时(TUI bootstrap 未注入 routing policy,
+                // 如 `reflect tui` 直接启动)回退当前激活 model spec ——
+                // 否则 `next_for("")` 恒为 None,goal 模式被静默丢弃
+                // (warn 后 continue,校验永不发生)。
+                let mut spec = cfg
                     .policy
                     .resolve(reflect_llm::policy::Role::Main)
                     .primary
                     .clone();
+                if spec.is_empty() {
+                    spec = cfg.current_model();
+                }
                 let client = match registry.next_for(&spec, &[]) {
                     Some(nc) => nc.client.clone(),
                     None => {
@@ -1007,6 +1015,18 @@ async fn apply_plan_approval_choice(
                     ?from,
                     "plan approval approved but already in target mode; no-op"
                 );
+                // no-op 路径同样要发关闭事件:Exit 方向的 plan_approval
+                // 提示条靠 `PlanApproved` 事件关闭(TUI 不做乐观关闭),
+                // 缺了它提示条会挂死。
+                if matches!(direction, PlanDirection::Exit) {
+                    fan_out_session(
+                        session_subs,
+                        &Event::new(
+                            sub_id,
+                            EventMsg::PlanApproved(PlanApprovedEvent { plan_id }),
+                        ),
+                    );
+                }
                 return;
             }
             cfg.set_permission_mode(target_mode);
@@ -1018,6 +1038,19 @@ async fn apply_plan_approval_choice(
                 }),
             );
             fan_out_session(session_subs, &ev);
+            // Exit 方向(ExitPlanMode 审批)补发 `PlanApproved`:TUI 的
+            // plan_approval 提示条不乐观关闭,靠此事件「关闭提示条 + 推
+            // ✓ Plan approved 确认行」同帧完成。协议里该事件早已定义
+            // (与 PlanRejected 配对),此前引擎从未 emit —— 确认行是死代码。
+            if matches!(direction, PlanDirection::Exit) {
+                fan_out_session(
+                    session_subs,
+                    &Event::new(
+                        sub_id,
+                        EventMsg::PlanApproved(PlanApprovedEvent { plan_id }),
+                    ),
+                );
+            }
             tracing::info!(
                 plan_id = %plan_id,
                 ?from,

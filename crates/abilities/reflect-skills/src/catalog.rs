@@ -53,7 +53,10 @@ pub struct SkillsCatalog {
     /// 技能列表;`RwLock` 以便 plugin loader 在 `Arc` 共享下追加/移除。
     skills: RwLock<Vec<SkillMeta>>,
     activated: RwLock<HashSet<String>>,
-    always_on: HashSet<String>,
+    /// 动态可追加:bootstrap 注册 `call_<role>` 子代理工具后通过
+    /// [`Self::add_always_on_tools`] 补入(静态 `ALWAYS_ON_TOOLS` 无法
+    /// 覆盖运行时才确定的工具名)。
+    always_on: RwLock<HashSet<String>>,
     /// v1.x 功能 6:可选的 skill 白名单(非空时硬性过滤 child 可见 skill)。
     /// `None` = 不限(暴露全部 skill,向后兼容)。用于 per-subagent skill 过滤:
     /// subagent 通过 `set_allowed_skill_names` 限定自身可用的 skill 子集。
@@ -76,7 +79,12 @@ impl SkillsCatalog {
         Self {
             skills: RwLock::new(Vec::new()),
             activated: RwLock::new(HashSet::new()),
-            always_on: ALWAYS_ON_TOOLS.iter().map(|s| s.to_string()).collect(),
+            always_on: RwLock::new(
+                ALWAYS_ON_TOOLS
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            ),
             allowed_skills: RwLock::new(None),
         }
     }
@@ -131,8 +139,21 @@ impl SkillsCatalog {
     /// always-on ∪ 各已激活 skill `tools:` 列表的并集。
     /// v1.x 功能 6:`allowed_skills` 白名单非空时,仅计入白名单内 skill 的工具
     /// (always_on 基础工具不受影响)。
+    /// 动态工具(如 bootstrap 注册的 `call_<role>` 子代理工具)补加入
+    /// always-on 可见集。`pre_loop` 用 `active_tool_names()` 计算
+    /// `effective_tools` —— 不补入的话,运行时注册的子代理工具会被从
+    /// 模型请求的工具列表里滤掉,LLM 永远拿不到它们的 schema、
+    /// 无法委派(离线 mock provider 无视实际工具列表回放脚本,
+    /// 因此只能靠运行时真实 LLM 测试暴露)。幂等。
+    pub fn add_always_on_tools(&self, names: impl IntoIterator<Item = String>) {
+        let mut g = self.always_on.write();
+        for n in names {
+            g.insert(n);
+        }
+    }
+
     pub fn active_tool_names(&self) -> HashSet<String> {
-        let mut out = self.always_on.clone();
+        let mut out = self.always_on.read().clone();
         let filter = self.allowed_skills.read().clone();
         for skill_name in self.activated.read().iter() {
             // 白名单存在时跳过不在白名单内的 skill。
@@ -331,6 +352,27 @@ mod tests {
         cat.activate("b");
         let active = cat.active_tool_names();
         assert!(active.contains("write"));
+    }
+
+    // v1.4 子代理可见性防回归:bootstrap 注册的 `call_<role>` 工具不在静态
+    // ALWAYS_ON_TOOLS 里,必须经 add_always_on_tools 动态补入后才进入可见集,
+    // 否则 pre_loop 把它们从模型请求里滤掉,LLM 拿不到子代理 schema、无法委派。
+    #[test]
+    fn add_always_on_tools_visible_in_active_tool_names() {
+        let cat = SkillsCatalog::new();
+        assert!(!cat.active_tool_names().contains("call_explorer"));
+        cat.add_always_on_tools(vec![
+            "call_explorer".to_string(),
+            "call_writer".to_string(),
+        ]);
+        let active = cat.active_tool_names();
+        assert!(active.contains("call_explorer"));
+        assert!(active.contains("call_writer"));
+        // 幂等,且不影响默认 always-on 成员。
+        cat.add_always_on_tools(vec!["call_explorer".to_string()]);
+        let active = cat.active_tool_names();
+        assert!(active.contains("bash"));
+        assert!(active.contains("call_explorer"));
     }
 
     // v1.x Plan mode 防回归:三个 plan 控制面工具必须始终对 LLM 可见,
