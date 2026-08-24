@@ -16,6 +16,124 @@
 
 **0.0.1** · 33 crate · **2200+ tests** · Apache-2.0
 
+## 差异化特点
+
+同类 agent 工具大多是"**黑盒 CLI**":单一可执行程序、内部循环不透明、
+用户只能作为终端使用者驱动。Reflect 的定位相反 —— **可嵌入、可审计、
+可二次开发的 agent 运行时框架**,差异集中在:
+
+| 维度 | 常见 agent CLI | Reflect |
+|------|----------------|---------|
+| 产品形态 | 单一黑盒可执行程序,只能"用" | **纯框架 + 多语言入口**:`reflect` Rust 库门面(Builder + 60+ re-exports)、PyO3 绑定、`reflect serve` + Python / TS 官方 SDK;CLI 只是附带入口,可嵌入自有产品 |
+| 控制流 | 内部循环不透明、不可干预 | **显式 4 节点 StateGraph**(PreLoop → ModelCall → ToolExec → CheckStop):转移手写、可审计,Stop hook 可否决结束、强制续跑 |
+| 客户端协议 | 交互逻辑绑死在进程内 | **冻结的 Submission / Op / EventMsg wire 协议(v0)**:任何语言 / 形态的客户端走同一协议驱动 agent,框架新增变体不断既有 SDK |
+| 自定义工具 | 工具必须进 CLI 进程或另起 MCP 服务器 | **宿主语言函数直接注册为 LLM 工具**:core 下发执行请求,Python / TS handler 本地执行并回执,工具代码不进 Rust 进程 |
+| 工具面裁剪 | 工具集固定,给什么用什么 | **工具面配置化裁剪**:Agent 定义 frontmatter(`tools` 白名单 / `disallowed_tools` 黑名单 / `readonly`)、config.toml `[[subagents]]` 的 `allowed_tools`、或代码层 ToolRegistry 增删;被裁工具的 schema 不发给 LLM,tool 面更小、误触更少、更省 token |
+| 常驻会话 | 每次调用冷启动 | **`reflect serve` 常驻会话服务**:一个进程 = 一个常驻 AgentThread,多轮共享内存状态 + resume,SDK 以子进程方式嵌入 |
+| 多 Agent | 手工拼脚本 | **一等公民编排层**:子代理(Tool-per-Agent)、顺序 / 并发讨论、任务 / 团队、DAG pipeline、goal 模式 |
+| 上下文管理 | 截断或单一摘要 | **4 层压缩 escalation**:microcompact → smart_prune → LLM summarize,按 token 阈值逐级升级 |
+| 扩展面 | 零散 flag 与配置文件 | **hooks(8 事件 × 7 决策)+ Tool trait + MCP + LSP + 插件 + skills**,多层独立扩展机制 |
+| 会话审计 | 日志散落、难以回放 | **JSONL rollout 持久化** + resume + session 索引 + LLM 调用 traces 全量落盘 |
+| 安全边界 | 逐条人工确认 | **权限规则引擎 + 多级 sandbox + Plan mode**(写操作前强制只读调研,`ExitPlanMode` 才放行) |
+| 自动化 / CI | 解析自然语言输出 | **JSONL stdout + stderr 日志**管道友好(`reflect exec \| jq`),内置 mock provider,examples / e2e / SDK 测试**全离线** |
+| 运行时依赖 | 依赖宿主语言运行时 | **Rust 单二进制**(MSRV 1.85),无外部运行时依赖 |
+
+一句话:常见 agent CLI 是给用户**用**的工具,Reflect 是给开发者**造**
+agent 产品的运行时 —— 协议冻结、显式 StateGraph、跨语言工具与常驻 serve
+都为此服务:推理与编排在 Rust 引擎,业务逻辑留在你自己的语言与进程。
+
+## 架构总览
+
+客户端(TUI / exec / serve / lib)经同一套冻结的 Submission / Event 协议
+驱动引擎;六层 workspace 依赖自上而下,protocol 是所有层的公共契约:
+
+```mermaid
+flowchart TB
+    subgraph clients["客户端入口"]
+        direction LR
+        EXEC["reflect exec / CLI(17 子命令)"]
+        SERVE["reflect serve + Python / TS SDK"]
+        LIB["Rust lib 门面 / PyO3"]
+    end
+
+    subgraph layers["workspace 六层(依赖自上而下)"]
+        direction TB
+        RT["runtime — core / exec / cli / reflect / py<br/>AgentThread + StateGraph + 各入口"]
+        IG["integrations — mcp / lsp / stream"]
+        ORCH["orchestration — subagent / discussion / task / pipeline / goal"]
+        RES["resources — config / permissions / rollout / telemetry / sandbox / plugin / ast"]
+        AB["abilities — llm / tools / hooks / skills / memory / agent-def / prompt / compact / recovery / notes / sanitize"]
+        PR["protocol — Submission / Op / EventMsg / RolloutRecorder(v0 冻结)"]
+        RT --> IG
+        IG --> ORCH
+        ORCH --> RES
+        RES --> AB
+        AB --> PR
+    end
+
+    subgraph external["外部系统"]
+        direction LR
+        LLM["LLM providers<br/>OpenAI / Anthropic / Ollama"]
+        MCP["MCP servers"]
+        LSP["LSP servers"]
+    end
+
+    clients -->|"Submission / Event 协议"| RT
+    RT --> LLM
+    IG --> MCP
+    IG --> LSP
+```
+
+单个回合由 `submission_loop` 驱动 4 节点 StateGraph,转移手写、可审计:
+
+```mermaid
+flowchart LR
+    SUB(["Submission 入队"]) --> PRE
+    PRE["PreLoop<br/>压缩 escalation / hooks 前置"]
+    PRE --> MC["ModelCall<br/>SSE 流式调用 LLM"]
+    MC -->|"有工具调用"| TE["ToolExec<br/>审批 gate → 执行工具"]
+    TE -->|"结果回填"| PRE
+    MC -->|"无工具调用"| CS["CheckStop"]
+    CS -->|"Stop hook 否决"| PRE
+    CS -->|"通过"| DONE(["TurnComplete"])
+```
+
+### Workspace 分层(依赖方向自上而下)
+
+| 层 | Crate | 职责 |
+|----|-------|------|
+| `protocol/` | reflect-protocol | Submission / Op / EventMsg / Item + RolloutRecorder trait。所有层的公共契约 |
+| `abilities/` | llm, tools, hooks, skills, memory, agent-def, prompt, compact, recovery, notes, sanitize | 能力原语:ModelClient trait + providers、Tool trait + 内置工具、HookEngine、压缩 escalation 等 |
+| `resources/` | config, permissions, plugin, rollout, telemetry, sandbox, ast | 配置热重载、权限规则、插件 lifecycle、JSONL 持久化、tree-sitter 代码搜索 |
+| `orchestration/` | subagent, discussion, task, pipeline, goal | 多 agent 编排:子代理工厂(并发在途≤16)、讨论编排、任务/团队、DAG 流水线、目标模式 |
+| `integrations/` | mcp, lsp, integration, stream | MCP 客户端(stdio/streamable-http)、LSP、流式会话后端 |
+| `runtime/` | core, exec, cli, reflect, py | AgentThread + StateGraph、headless、CLI 入口、lib facade(60+ re-exports + Builder)、PyO3 绑定 |
+
+### 核心数据流
+
+- `AgentThread`(reflect-core)消费 `Submission`(mpsc 通道),`submission_loop` 驱动
+  4 节点 `StateGraph`:**PreLoop → ModelCall → (ToolExec → PreLoop)\* → CheckStop**。
+  模型不再发工具调用时经 CheckStop 结束 turn(Stop hook 可否决强制续跑)。
+- `NodeContext` 携带回合级依赖:model registry、RoutingPolicy、HookEngine、
+  ToolExecutionQueue、event 通道、CancellationToken、approval gates。
+- 客户端(TUI / exec / serve / lib)统一通过 Submission/Event 协议通信;headless
+  模式 Event 以 JSONL 流写 stdout、tracing 日志走 stderr(`reflect exec | jq`
+  不被破坏);`reflect serve` 复用同一协议常驻服务,SDK 在其上封装
+  (远程工具请求 / 回执、审批等交互均为协议内 Op / EventMsg)。
+
+### 关键设计决策
+
+- **Protocol v0 已冻结**:新增 Op/EventMsg 变体 = non-breaking,不可改动既有变体
+- **JSONL stdout,日志 stderr**:`reflect exec | jq` 不破坏
+- **ToolError 定义在 reflect-protocol**:打破 tools ↔ hooks 循环依赖
+- **StateGraph 用 enum + match**:4 节点固定结构,不引入 petgraph
+- **错误处理**:库 crate 用 `thiserror`,应用层(exec/cli)用 `anyhow`
+- **serve 是嵌入入口,不是开发助手**:内置 hook 默认不启用(exec / TUI 保持
+  "未配置 = 全启用"),避免 verification 之类 Stop hook 在宿主 cwd 跑测试
+
+完整目录结构(33 crate 一览)与各 StateGraph 节点的职责详解见
+[docs/architecture.md](docs/architecture.md)。
+
 ## 特性
 
 | 能力 | 实现 |
@@ -23,10 +141,11 @@
 | 4 节点 StateGraph | PreLoop → ModelCall → ToolExec → CheckStop 自循环 |
 | OpenAI + Anthropic + Ollama | SSE 流式、prompt caching、extended thinking、本地 NDJSON |
 | 23 内置工具 | bash / read / write / edit / grep / glob / web_fetch / web_search / notebook_edit / image_view / task 工具 + Plan mode 控制面等 |
+| 工具面可裁剪 | 三层裁剪:Agent 定义 frontmatter(`tools` / `disallowed_tools` / `readonly`,`--agent` 激活)→ config.toml `[[subagents]]` 的 `allowed_tools` → 代码层 `unregister` / `register_except`;被裁工具的 schema 不进 prompt(详见 [docs/architecture.md](docs/architecture.md)) |
 | 跨语言自定义工具 | 客户端(Python / TS)注册本地函数为 LLM 工具,core 下发执行请求、回执结果 |
 | 8 Hook 事件 × 7 决策 | PreToolUse / PostToolUse / PostToolUseFailure / Stop / SessionStart + 3 个 task 生命周期事件 |
 | 4 层上下文压缩 | microcompact → smart_prune → LLM summarize(escalation) |
-| 子代理 | Tool-per-Agent,嵌套深度 ≤ 3 |
+| 子代理 | Tool-per-Agent,并发在途 ≤ 16(父子共享计数器) |
 | 多 Agent 编排 | discussion(顺序/并发)、task / team、DAG pipeline、goal 模式 |
 | Python / TypeScript SDK | 纯 stdlib / 零原生依赖,spawn `reflect serve` 走 JSONL stdio 协议 |
 | 持久化 | JSONL rollout + resume + session 索引 + LLM traces 记录 |
@@ -80,46 +199,42 @@ EOF
 
 离线开发:examples 与 e2e 脚本用 `REFLECT_MODEL=mock` 跳过真实 LLM 网络调用。
 
-## 架构
+## 多语言 SDK(Python / TypeScript)
 
-### Workspace 分层(依赖方向自上而下)
+脚本项目经 `reflect serve`(常驻 stdio JSONL 会话,一进程 = 一常驻
+AgentThread,多轮共享内存状态)+ 官方 SDK 直接嵌入,核心能力是
+**把宿主语言函数注册成 LLM 可调用的自定义工具**:
 
-| 层 | Crate | 职责 |
-|----|-------|------|
-| `protocol/` | reflect-protocol | Submission / Op / EventMsg / Item + RolloutRecorder trait。所有层的公共契约 |
-| `abilities/` | llm, tools, hooks, skills, memory, agent-def, prompt, compact, recovery, notes, sanitize | 能力原语:ModelClient trait + providers、Tool trait + 内置工具、HookEngine、压缩 escalation 等 |
-| `resources/` | config, permissions, plugin, rollout, telemetry, sandbox, ast | 配置热重载、权限规则、插件 lifecycle、JSONL 持久化、tree-sitter 代码搜索 |
-| `orchestration/` | subagent, discussion, task, pipeline, goal | 多 agent 编排:子代理工厂(深度≤3)、讨论编排、任务/团队、DAG 流水线、目标模式 |
-| `integrations/` | mcp, lsp, integration, stream | MCP 客户端(stdio/streamable-http)、LSP、流式会话后端 |
-| `runtime/` | core, exec, cli, reflect, py | AgentThread + StateGraph、headless、CLI 入口、lib facade(60+ re-exports + Builder)、PyO3 绑定 |
+```python
+from reflect import ReflectAgent, ToolOutput, ContentBlock
 
-### 核心数据流
+agent = ReflectAgent.spawn()
 
-- `AgentThread`(reflect-core)消费 `Submission`(mpsc 通道),`submission_loop` 驱动
-  4 节点 `StateGraph`:**PreLoop → ModelCall → (ToolExec → PreLoop)\* → CheckStop**。
-  模型不再发工具调用时经 CheckStop 结束 turn(Stop hook 可否决强制续跑)。
-- `NodeContext` 携带回合级依赖:model registry、RoutingPolicy、HookEngine、
-  ToolExecutionQueue、event 通道、CancellationToken、approval gates。
-- 客户端(TUI / exec / serve / lib)统一通过 Submission/Event 协议通信;headless
-  模式 Event 以 JSONL 流写 stdout、tracing 日志走 stderr(`reflect exec | jq`
-  不被破坏);`reflect serve` 复用同一协议常驻服务,SDK 在其上封装
-  (远程工具请求 / 回执、审批等交互均为协议内 Op / EventMsg)。
+def get_weather(args):
+    return ToolOutput(
+        content=[ContentBlock(type="text", text=f"{args['city']} 晴")],
+        is_error=False, metadata={}, elapsed_ms=0,
+    )
 
-### 关键设计决策
+agent.register_tool("get_weather", "查询城市天气",
+                    {"type": "object",
+                     "properties": {"city": {"type": "string"}},
+                     "required": ["city"]},
+                    get_weather)          # 本地函数 → LLM 工具
+print(agent.prompt("北京天气如何?"))      # 聚合增量文本
+agent.close()
+```
 
-- **Protocol v0 已冻结**:新增 Op/EventMsg 变体 = non-breaking,不可改动既有变体
-- **JSONL stdout,日志 stderr**:`reflect exec | jq` 不破坏
-- **ToolError 定义在 reflect-protocol**:打破 tools ↔ hooks 循环依赖
-- **StateGraph 用 enum + match**:4 节点固定结构,不引入 petgraph
-- **错误处理**:库 crate 用 `thiserror`,应用层(exec/cli)用 `anyhow`
-- **serve 是嵌入入口,不是开发助手**:内置 hook 默认不启用(exec / TUI 保持
-  "未配置 = 全启用"),避免 verification 之类 Stop hook 在宿主 cwd 跑测试
+TypeScript API 同构(`ReflectAgent.spawn()` / `registerTool` / `prompt`)。
+完整接入指南(双语言示例、远程工具执行流、`submit` / `interrupt` /
+`approve` 高级面、离线联调)见 **[docs/sdk.md](docs/sdk.md)**;wire 协议
+规范见 [`sdks/PROTOCOL.md`](sdks/PROTOCOL.md)。
 
 ## CLI 子命令
 
 | 子命令 | 用途 |
 |--------|------|
-| `reflect exec` | 单轮 headless,JSONL Event 流到 stdout(支持 `-c` / `-r N` / `--resume <uuid>` / `--agent <name>` / `--plan-mode`) |
+| `reflect exec` | 单轮 headless,JSONL Event 流写 stdout(支持 `-c` / `-r N` / `--resume <uuid>` / `--agent <name>` / `--plan-mode`) |
 | `reflect serve` | 常驻 stdio JSONL 会话服务(Python / TS SDK 的协议入口;stdin 逐行 Submission、stdout 逐行 Event,同样支持 resume 旗标) |
 | `reflect discussion` | 多 Agent 讨论编排(`run -c <toml>` / `ls`) |
 | `reflect login` | 写 provider 凭据到 `~/.reflect/config.toml` |
@@ -184,76 +299,6 @@ agent 调研完成后调 `ExitPlanMode` 产出计划并退出 Plan 模式。
 reflect exec --plan-mode "refactor X"   # headless 调研(只读)
 ```
 
-## 多语言 SDK(Python / TypeScript)
-
-脚本项目不需要写 Rust 也能完整驱动本框架:`reflect serve` 提供常驻
-stdio JSONL 会话(一个进程 = 一个常驻 AgentThread,多轮共享内存状态,
-支持 resume),官方 SDK 在其上封装出符合各自语言习惯的 API ——
-**推理与编排在 Rust 引擎,业务逻辑留在宿主语言**。
-
-最有特点的能力是**跨语言自定义工具注册**:把 Python / TS 函数声明成
-工具(JSON Schema 参数),LLM 调用时 core 下发 `tool_execution_request`,
-SDK 在本地执行 handler 并回执 —— 工具实现无需进 Rust 进程。
-
-**Python**(`sdks/python`,纯 stdlib 零依赖;二进制定位:`REFLECT_BIN`
-env → PATH 上的 `reflect`):
-
-```python
-from reflect import ReflectAgent, ToolOutput, ContentBlock
-
-agent = ReflectAgent.spawn()
-
-def get_weather(args):
-    return ToolOutput(
-        content=[ContentBlock(type="text", text=f"{args['city']} 晴")],
-        is_error=False, metadata={}, elapsed_ms=0,
-    )
-
-# 本地函数 → LLM 可调用的工具
-agent.register_tool("get_weather", "查询城市天气",
-                    {"type": "object",
-                     "properties": {"city": {"type": "string"}},
-                     "required": ["city"]},
-                    get_weather)
-
-for ev in agent.submit("北京天气如何?"):        # 阻塞式迭代器,增量事件
-    if ev["msg"]["type"] == "agent_message_delta":
-        print(ev["msg"]["delta"], end="", flush=True)
-    if ev["msg"]["type"] == "turn_complete":
-        break
-agent.close()
-```
-
-**TypeScript**(`sdks/typescript`,纯 TS 零运行时依赖,API 同构):
-
-```ts
-import { ReflectAgent } from 'reflect-agent';
-
-const agent = await ReflectAgent.spawn();
-await agent.registerTool(
-  'get_weather', '查询城市天气',
-  { type: 'object', properties: { city: { type: 'string' } }, required: ['city'] },
-  (args) => ({
-    content: [{ type: 'text', text: `${args.city} 晴` }],
-    is_error: false, metadata: {}, elapsed_ms: 0,
-  }),
-);
-
-const text = await agent.prompt('北京天气如何?');   // 聚合增量文本
-await agent.close();
-```
-
-两套 SDK 的高级面:`submit()` 返回按 submission id 过滤的事件流(支持
-并发多轮互不干扰)、`interrupt()` 打断、`approve()` 响应审批请求;协议
-未知事件类型自动降级,框架加变体不断 SDK。
-
-- wire 协议规范:[`sdks/PROTOCOL.md`](sdks/PROTOCOL.md)(握手 / 工具执行流 /
-  审批回执 / 退出语义)
-- 各自细节:[`sdks/python/README.md`](sdks/python/README.md) ·
-  [`sdks/typescript/README.md`](sdks/typescript/README.md)
-- 离线联调:`REFLECT_MODEL=mock`(+ `REFLECT_MOCK_SCRIPT` 脚本化回复)免
-  API key;`./scripts/sdk_smoke.sh` 对真实二进制跑两套 SDK 全链路
-
 ## Examples
 
 | 示例 | 演示 | 命令 |
@@ -284,67 +329,16 @@ await agent.close();
 | `REFLECT_SANDBOX_*` | 否 | 沙箱策略(`STRICT` / `OS_LEVEL` / `WRITABLE`) |
 | `RUST_LOG` | 否 | tracing filter(默认 `warn,reflect=info`) |
 
-## 项目结构
-
-```
-crates/
-├── protocol/               公共契约
-│   └── reflect-protocol        Submission / Op / EventMsg + RolloutRecorder
-├── abilities/              能力原语
-│   ├── reflect-llm             ModelClient trait + OpenAI/Anthropic/Ollama + pricing
-│   ├── reflect-tools           Tool trait + 23 内置工具 + ToolExecutionQueue
-│   ├── reflect-hooks           HookEngine + 8 事件 + 7 决策
-│   ├── reflect-skills          SKILL.md 扫描 + 加载
-│   ├── reflect-memory          3 scope 记忆(Project/User/Session)
-│   ├── reflect-agent-def       Markdown frontmatter Agent 定义
-│   ├── reflect-prompt          分层 prompt + cache_control 注入
-│   ├── reflect-compact         4 层压缩策略 escalation
-│   ├── reflect-recovery        故障恢复
-│   ├── reflect-notes           笔记
-│   └── reflect-sanitize        输出净化
-├── resources/              配置 / 权限 / 持久化
-│   ├── reflect-config          统一 TOML 配置 + 热重载
-│   ├── reflect-permissions     权限规则引擎
-│   ├── reflect-plugin          插件 lifecycle
-│   ├── reflect-rollout         JSONL 持久化 + session index
-│   ├── reflect-telemetry       可观测性
-│   ├── reflect-sandbox         多级沙箱
-│   └── reflect-ast             tree-sitter 代码搜索
-├── orchestration/          多 agent 编排
-│   ├── reflect-subagent        Tool-per-Agent 子代理工厂(深度 ≤ 3)
-│   ├── reflect-discussion      多 Agent 讨论编排
-│   ├── reflect-task            结构化任务 / 团队
-│   ├── reflect-pipeline        DAG 流水线
-│   └── reflect-goal            目标模式
-├── integrations/           外部协议集成
-│   ├── reflect-mcp             MCP 客户端(stdio / streamable-http)
-│   ├── reflect-lsp             LSP 集成
-│   ├── reflect-integration     集成胶水层
-│   └── reflect-stream          流式会话后端
-└── runtime/                运行时与入口
-    ├── reflect-core            AgentThread + 4 节点 StateGraph
-    ├── reflect-exec            headless + JSONL stdout + resume + serve
-    ├── reflect-cli             CLI 顶层路由(单一 reflect 二进制)
-    ├── reflect                 lib facade(60+ re-exports + Builder)
-    └── reflect-py              PyO3 Python 绑定(骨架)
-sdks/                          多语言 SDK
-├── PROTOCOL.md                    serve wire 协议规范
-├── python/                        纯 stdlib Python SDK(reflect-agent)
-└── typescript/                    纯 TS npm SDK(reflect-agent)
-```
-
-`reflect` 二进制由 `reflect-cli` crate 产出,是本仓库的**薄 headless 入口**;
-框架消费方的主接口是 `reflect` 库门面(Builder / re-exports)。
-
 ## 文档
 
 | 文档 | 内容 |
 |------|------|
+| [`docs/architecture.md`](docs/architecture.md) | 架构详解:完整目录结构、核心数据流、各节点职责、设计决策 |
+| [`docs/sdk.md`](docs/sdk.md) | SDK 接入指南:serve 模式、Python / TS 完整示例、远程工具流、离线联调 |
 | [`AGENTS.md`](AGENTS.md) | 开发指南:命令、架构分层、项目约定 |
 | [`sdks/PROTOCOL.md`](sdks/PROTOCOL.md) | serve wire 协议规范(SDK 共同实现依据) |
 | [`sdks/python/README.md`](sdks/python/README.md) | Python SDK 用法与安装 |
 | [`sdks/typescript/README.md`](sdks/typescript/README.md) | TypeScript SDK 用法与安装 |
-| [`SECURITY.md`](SECURITY.md) | 安全策略与漏洞上报 |
 
 ## 开发
 
