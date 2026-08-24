@@ -111,7 +111,7 @@ pub async fn tool_exec(state: &mut AgentState, ctx: &NodeContext) -> Option<Grap
     state
         .latest_content
         .retain(|b| !matches!(b, ContentBlock::ToolUse { .. }));
-    for r in results {
+    for mut r in results {
         // 取出 call_meta 提前 —— v1.x Plan mode 分支要在 ToolCallEnd 之后
         // 立刻 dispatch(成功走 request / ready;失败走 PlanRejected),需要
         // 工具名 + 参数。
@@ -227,9 +227,9 @@ pub async fn tool_exec(state: &mut AgentState, ctx: &NodeContext) -> Option<Grap
                         let workspace = ctx.cfg.current_workspace();
                         let markdown = read_latest_plan_file(&workspace)
                             .unwrap_or_else(|| resolve_plan_markdown(&args, &state.latest_content));
-                        // 阻塞等待用户审批;返回的 choice 暂不使用(无论批准/Revise
-                        // 都回 PreLoop,下一轮按已翻转的 mode 自然推进)。
-                        let _ = dispatch_plan_ready_blocking(
+                        // 阻塞等待用户审批。无论批准/Revise 都回 PreLoop,
+                        // 下一轮按已翻转的 mode 自然推进。
+                        let choice = dispatch_plan_ready_blocking(
                             gate,
                             subs,
                             ctx.event_tx.clone(),
@@ -238,6 +238,40 @@ pub async fn tool_exec(state: &mut AgentState, ctx: &NodeContext) -> Option<Grap
                             markdown,
                         )
                         .await;
+                        // v1.4 审批信号回传:choice 此前被丢弃,模型收到的
+                        // 工具输出始终是 "Plan ready (N chars)",感知不到
+                        // 「用户已批准 / 要求修改」——真实 LLM 在 ExitPlanMode
+                        // 返回后倾向直接结束 turn("Waiting for your
+                        // approval to proceed."),已批准的 plan 永远不会被执行。
+                        // 这里把决策重写进工具输出(模型可见的 Tool 消息 +
+                        // latest_content),驱动模型在批准后立即执行 plan。
+                        // 注:ToolCallEnd 事件(上方)发的是原始输出,TUI
+                        // 侧另有 PlanApproved 确认条,不受影响。
+                        if let Some(choice) = choice {
+                            match choice {
+                                reflect_protocol::PlanApprovalChoice::AutoMode
+                                | reflect_protocol::PlanApprovalChoice::ManualApprove => {
+                                    rewrite_first_text_block(
+                                        &mut r,
+                                        "Plan approved. The user approved this \
+                                         plan and the permission mode has been \
+                                         switched accordingly. Execute the plan \
+                                         now: perform the planned steps and \
+                                         report the result.",
+                                    );
+                                }
+                                reflect_protocol::PlanApprovalChoice::Revise => {
+                                    rewrite_first_text_block(
+                                        &mut r,
+                                        "The user requested changes to the plan. \
+                                         Stay in Plan mode: refine the plan \
+                                         according to the user's feedback, update \
+                                         it with PlanWrite, then call ExitPlanMode \
+                                         again to request approval.",
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -422,6 +456,24 @@ async fn emit_plan_rejected(
 /// `InvalidArgs` / `Execution` 等错误用 `Text { text: ... }` 形式
 /// 塞进 content(沿用 `ToolExecutionQueue::execute_single` 通用约定),
 /// 此函数纯文本抽取即可。
+/// 重写 `ToolResult.content` 里第一个 text block(把 plan 审批决策
+/// 回传给模型用)。已有 text block 则覆盖;没有则追加一个。
+fn rewrite_first_text_block(r: &mut reflect_tools::ToolResult, text: &str) {
+    if let Some(b) = r
+        .content
+        .iter_mut()
+        .find(|b| matches!(b, ContentBlock::Text { .. }))
+    {
+        if let ContentBlock::Text { text: t } = b {
+            *t = text.to_string();
+        }
+    } else {
+        r.content.push(ContentBlock::Text {
+            text: text.to_string(),
+        });
+    }
+}
+
 fn summarize_tool_error(r: &reflect_tools::ToolResult) -> String {
     r.content
         .iter()
