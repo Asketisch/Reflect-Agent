@@ -154,7 +154,15 @@ pub async fn bootstrap_common(args: &HeadlessArgs) -> anyhow::Result<HeadlessCom
     let tools = Arc::new(ToolRegistry::default());
     tools.register(Arc::new(reflect_tools::builtins::EchoTool));
     tools.register(Arc::new(reflect_tools::builtins::BashTool));
+    // 核心文件工具:与 lib facade(`reflect::builder::default_tool_registry`)对齐。
+    // 此前缺失导致 CLI headless/serve 下模型调用 read/write/edit/grep/glob 报
+    // "tool not found",而 ALWAYS_ON_TOOLS prompt 仍向模型宣告这些工具可用。
+    tools.register(Arc::new(reflect_tools::builtins::ReadTool));
+    tools.register(Arc::new(reflect_tools::builtins::WriteTool));
+    tools.register(Arc::new(reflect_tools::builtins::EditTool));
     tools.register(Arc::new(reflect_tools::builtins::DeleteTool));
+    tools.register(Arc::new(reflect_tools::builtins::GrepTool));
+    tools.register(Arc::new(reflect_tools::builtins::GlobTool));
     tools.register(Arc::new(reflect_tools::builtins::EnterPlanModeTool));
     tools.register(Arc::new(reflect_tools::builtins::ExitPlanModeTool));
     tools.register(Arc::new(reflect_tools::builtins::PlanWriteTool));

@@ -88,7 +88,7 @@ impl Tool for GlobTool {
         }
 
         // 按 mtime 倒序排列。
-        paths.sort_by(|a, b| b.1.cmp(&a.1));
+        paths.sort_by_key(|p| std::cmp::Reverse(p.1));
         let truncated = paths.len() > MAX_RESULTS;
         paths.truncate(MAX_RESULTS);
 

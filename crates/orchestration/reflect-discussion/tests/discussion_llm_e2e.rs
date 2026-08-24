@@ -335,9 +335,8 @@ async fn discussion_llm_e2e_sequential_runs_full_rounds_without_depth_exhaustion
     let result = orch.run(prompt_for_closure(ctx, bus.clone()), |_| {}).await;
 
     // 修复后预期:Sequential 模式下 9 个 spawn 都能完成 —— 不触达 MAX_DEPTH。
-    let outcome = result.expect(
-        "Sequential mode + in-flight semantics: depth must not exhaust over 9 spawns",
-    );
+    let outcome = result
+        .expect("Sequential mode + in-flight semantics: depth must not exhaust over 9 spawns");
     // depth 在 orchestrator 退出后应归 0(所有 SpawnedChild 已 drop)。
     // 这里改为更宽松的断言:depth ≤ max_rounds(因为 sequential 模式是
     // 同步逐个跑,每轮 collect_result 完成后 in-flight 应归 0;但保守

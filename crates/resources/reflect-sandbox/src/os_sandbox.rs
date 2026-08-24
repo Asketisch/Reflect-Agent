@@ -366,10 +366,8 @@ impl OsSandbox {
         // 子进程根本不启动(表现为 stdout 空);或读到他人完整 profile,
         // workspace 写白名单错乱。pid + 原子自增序号保证互不踩踏。
         let seq = SEATBELT_PROFILE_SEQ.fetch_add(1, Ordering::Relaxed);
-        let tmp = std::env::temp_dir().join(format!(
-            "reflect-sandbox-{}-{seq}.sb",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("reflect-sandbox-{}-{seq}.sb", std::process::id()));
         std::fs::write(&tmp, &profile)?;
         Ok((
             "/usr/bin/sandbox-exec".to_string(),

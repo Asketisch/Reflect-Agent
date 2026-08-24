@@ -65,14 +65,17 @@ export type PlanApprovalChoice =
   | 'prompt_mode'
   | 'reject';
 
-export interface ReviewDecisionApprove {
-  type: 'approve';
-}
-export interface ReviewDecisionDeny {
-  type: 'deny';
-  reason: string;
-}
-export type ReviewDecision = ReviewDecisionApprove | ReviewDecisionDeny;
+/**
+ * `ReviewDecision` 的 wire 形态(serde snake_case)。
+ *
+ * 注意是**扁平**结构而非 tagged 对象:`Approve` 序列化为裸字符串
+ * `"approve"`,`Deny` 序列化为 `{"deny":{"reason":...}}`。旧版误写成
+ * `{type:'approve'}`,服务端无法反序列化,审批会永久挂起(v1.3 修复)。
+ */
+export type ReviewDecision =
+  | 'approve'
+  | 'approve_for_session'
+  | { deny: { reason: string } };
 
 export interface AskUserAnswer {
   answers: Answer[];
@@ -126,6 +129,7 @@ export type EventMsg =
   | TurnAborted
   | TurnRewound
   | ShutdownComplete
+  | SubmissionClosed
   | AgentMessage
   | AgentMessageDelta
   | ThinkingDelta
@@ -205,6 +209,17 @@ export interface TurnRewound {
 
 export interface ShutdownComplete {
   type: 'shutdown_complete';
+}
+
+/**
+ * v1.3 SDK:某条 submission 的 per-turn 通道已排空(该 submission 在
+ * core 处理完毕,不会再有任何事件)。`Event.id` 携带对应 submission id。
+ * serve 在 drain task 结束时发出;非 turn 操作(compact / rewind / 权限
+ * 模式切换 / goal 等)没有 `turn_complete` 之类的终态事件,`submit()`
+ * 迭代器靠本事件收尾,否则会永久挂起。
+ */
+export interface SubmissionClosed {
+  type: 'submission_closed';
 }
 
 export interface AgentMessage {

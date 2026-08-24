@@ -22,6 +22,7 @@ import {
   EventMsg,
   Op,
   RemoteToolSpec,
+  ReviewDecision,
   Submission,
   ToolOutput,
 } from './protocol.js';
@@ -243,8 +244,16 @@ export class ReflectAgent {
     });
   }
 
-  /** 响应 `ApprovalRequest` 或 `HookApprovalRequest`。 */
-  async approve(id: string, decision: { type: 'approve' } | { type: 'deny'; reason: string }): Promise<void> {
+  /**
+   * 响应 `ApprovalRequest` 或 `HookApprovalRequest`。
+   *
+   * `decision` 是 wire 形态的 `ReviewDecision`(serde snake_case):
+   * `"approve"` / `"approve_for_session"`,或
+   * `{ deny: { reason: string } }`。与 Python SDK 一致 —— 透传 wire
+   * 值,不做形状转换(旧版发 `{type:'approve'}` 无法被服务端反序列化,
+   * 审批会永久挂起,已修)。
+   */
+  async approve(id: string, decision: ReviewDecision): Promise<void> {
     await this.writeSubmission({
       id: randomUUID(),
       op: {
@@ -381,7 +390,8 @@ export class ReflectAgent {
       const cb = this.eventListeners.get(ev.id);
       if (cb) {
         cb(ev);
-        // turn_complete / turn_aborted / shutdown_complete 视为 stream 末尾,清掉监听者。
+        // 终态事件(turn_complete / turn_aborted / shutdown_complete /
+        // submission_closed)视为 stream 末尾,清掉监听者。
         if (isTerminal(ev.msg)) this.eventListeners.delete(ev.id);
       }
     } else {
@@ -469,10 +479,16 @@ function errorOutput(message: string): ToolOutput {
 }
 
 function isTerminal(msg: EventMsg): boolean {
+  // `submission_closed` 是 serve 在某条 submission 的 per-turn 通道排空后
+  // 发出的收尾标记(挂该 submission id)。非 turn 操作(compact / rewind /
+  // set_permission_mode 等)没有 turn_complete 之类终态事件,迭代器靠它
+  // 收尾;turn 类操作先被 turn_complete / turn_aborted 终结,本事件届时
+  // 已无监听者,被无害忽略。
   return (
     msg.type === 'turn_complete' ||
     msg.type === 'turn_aborted' ||
-    msg.type === 'shutdown_complete'
+    msg.type === 'shutdown_complete' ||
+    msg.type === 'submission_closed'
   );
 }
 

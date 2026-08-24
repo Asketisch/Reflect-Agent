@@ -190,8 +190,5 @@ fn subagent_factory_debug_includes_in_flight() {
     );
     let s = format!("{factory:?}");
     // Debug 字段名已从 `depth` 改为 `in_flight`(反映新语义)
-    assert!(
-        s.contains("in_flight"),
-        "Debug missing `in_flight`: {s}"
-    );
+    assert!(s.contains("in_flight"), "Debug missing `in_flight`: {s}");
 }

@@ -18,9 +18,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use reflect_protocol::{PermissionMode, ToolError, ToolOutput};
+use reflect_protocol::{
+    EVENT_ID_NONE, Event, EventMsg, McpToolInvokedEvent, PermissionMode, ToolError, ToolOutput,
+};
 use reflect_tools::{Tool, ToolContext};
 use rmcp::model::CallToolRequestParams;
+use tokio::sync::mpsc;
 
 use crate::content::convert_mcp_content;
 use crate::manager::McpClientInner;
@@ -53,15 +56,20 @@ pub struct McpToolAdapter {
     /// execute 路径会立即返 `ToolError::Execution`("client not initialized")。
     pub client: Option<Arc<McpClientInner>>,
     pub timeout: Duration,
+    /// 可选事件通道:调用完成后 emit `EventMsg::McpToolInvoked`(供 TUI /
+    /// JSONL 消费者配对 `call_id` 渲染调用链)。`None` 时静默。
+    pub event_tx: Option<mpsc::Sender<Event>>,
 }
 
 impl McpToolAdapter {
     /// 由 `McpToolDescriptor` + `McpClientInner` 构造 adapter。
+    /// `event_tx` 为 `Some` 时,`execute` 完成后 emit `McpToolInvoked`。
     pub fn from_descriptor(
         inner: Arc<McpClientInner>,
         desc: &McpToolDescriptor,
         server_name: &str,
         timeout: Duration,
+        event_tx: Option<mpsc::Sender<Event>>,
     ) -> Self {
         Self {
             full_name: desc.full_name.clone(),
@@ -75,6 +83,7 @@ impl McpToolAdapter {
             is_concurrency_safe: desc.is_concurrency_safe,
             client: Some(inner),
             timeout,
+            event_tx,
         }
     }
 
@@ -92,6 +101,7 @@ impl McpToolAdapter {
             is_concurrency_safe: desc.is_concurrency_safe,
             client: None,
             timeout,
+            event_tx: None,
         }
     }
 }
@@ -170,6 +180,20 @@ impl Tool for McpToolAdapter {
         })?;
         let content = convert_mcp_content(&result.content);
         let is_error = result.is_error.unwrap_or(false);
+        // 调用完成(无论成功/业务错误)→ emit `McpToolInvoked`,
+        // `call_id` 与 `ToolCallEnd.call_id` 一致,供前端配对渲染调用链。
+        // 通道关闭(下游已退出)时静默丢弃。
+        if let Some(tx) = &self.event_tx {
+            let ev = Event::new(
+                EVENT_ID_NONE,
+                EventMsg::McpToolInvoked(McpToolInvokedEvent {
+                    server: self.server_name.clone(),
+                    tool: self.original_name.clone(),
+                    call_id: ctx.call_id.clone(),
+                }),
+            );
+            let _ = tx.send(ev).await;
+        }
         let metadata = serde_json::json!({
             "server": self.server_name,
             "original_name": self.original_name,

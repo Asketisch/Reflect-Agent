@@ -223,12 +223,20 @@ where
             _ if matches!(sub.op, Op::Shutdown) => {
                 // 转发给 core:触发 cancel + emit ShutdownComplete(turn
                 // 通道与 session 扇出都会带上),随后退出循环。
+                let sub_id = sub.id.clone();
                 let mut handle = thread.submit(sub).await;
                 while let Some(ev) = handle.next().await {
                     if sink.send(ev).await.is_err() {
                         break;
                     }
                 }
+                // 收尾标记:客户端迭代器已被 shutdown_complete 终结,
+                // 此处仅为保持「每条 serve 提交的 submission 恰好一条
+                // submission_closed」不变量(消费方此时已摘除 listener,
+                // 该事件被无害丢弃)。
+                let _ = sink
+                    .send(Event::new(sub_id, EventMsg::SubmissionClosed))
+                    .await;
                 tracing::info!("serve: shutdown requested");
                 break;
             }
@@ -236,6 +244,7 @@ where
                 // 普通 Submission:转发 core;turn 事件由后台 reader 汇入
                 // sink(允许上一 turn 未结束时提交下一 turn,engine 侧
                 // 串行排队)。
+                let sub_id = sub.id.clone();
                 let mut handle = thread.submit(sub).await;
                 let sink4 = sink.clone();
                 tokio::spawn(async move {
@@ -250,6 +259,16 @@ where
                             break;
                         }
                     }
+                    // v1.3 SDK:per-turn 通道排空 = 该 submission 在 core
+                    // 处理完毕,不会再有任何事件 → 发收尾标记。非 turn 操作
+                    // (compact / rewind / 权限模式切换 / goal 等)没有
+                    // turn_complete 之类的终态事件,SDK 的 `submit_op`
+                    // 迭代器靠本事件收尾,否则会永久阻塞;turn 类 submission
+                    // 的迭代器已先被 turn_complete/turn_aborted 终结,
+                    // listener 已摘除,本事件被无害丢弃。
+                    let _ = sink4
+                        .send(Event::new(sub_id, EventMsg::SubmissionClosed))
+                        .await;
                 });
             }
         }

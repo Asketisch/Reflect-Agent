@@ -19,14 +19,12 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use reflect_agent_def::AgentDefinition;
 use reflect_compact::{Compactor, LlmSummarizer, Summarizer};
-use reflect_core::config::{
-    M4Deps, compactor_config_from_env_and_toml, default_m4_deps,
-};
+use reflect_core::config::{M4Deps, compactor_config_from_env_and_toml, default_m4_deps};
 use reflect_llm::RoutingPolicy;
 use reflect_memory::{FileMemoryStore, InMemoryStore, MemoryStore};
 use reflect_notes::NoteStore;
-use reflect_protocol::{RolloutRecorder, ThreadId};
 use reflect_prompt::PromptBuilder;
+use reflect_protocol::{RolloutRecorder, ThreadId};
 use reflect_recovery::{ActiveFileRecovery, SubagentRegistry};
 use reflect_rollout::{JsonlRolloutWriter, path::default_base};
 use reflect_skills::SkillsCatalog;
@@ -56,12 +54,14 @@ pub fn build_default_m4(
     let mut agents = reflect_agent_def::load_agents_dir(&ws_agents).unwrap_or_default();
     let home_agents_map = reflect_agent_def::load_agents_dir(&home_agents).unwrap_or_default();
     agents.extend(home_agents_map);
-    let active_def = agents.remove(agent_name).unwrap_or_else(|| AgentDefinition {
-        name: agent_name.to_string(),
-        description: "default agent".into(),
-        system_prompt: DEFAULT_FACADE_SYSTEM_PROMPT.into(),
-        ..Default::default()
-    });
+    let active_def = agents
+        .remove(agent_name)
+        .unwrap_or_else(|| AgentDefinition {
+            name: agent_name.to_string(),
+            description: "default agent".into(),
+            system_prompt: DEFAULT_FACADE_SYSTEM_PROMPT.into(),
+            ..Default::default()
+        });
     let active_def = Arc::new(active_def);
 
     // ── Skills ────────────────────────────────────────────────
@@ -75,8 +75,7 @@ pub fn build_default_m4(
 
     // ── Memory:CompositeMemoryStore(Session 内存 + Project/User 文件) ──
     let file_store = Arc::new(FileMemoryStore::new(workspace, home_path));
-    let memory: Arc<dyn MemoryStore> =
-        Arc::new(InMemoryStore::with_fallback(file_store));
+    let memory: Arc<dyn MemoryStore> = Arc::new(InMemoryStore::with_fallback(file_store));
 
     // ── Session notes(落盘失败 → 内存 fallback) ──────────────
     let note_store: Arc<dyn NoteStore> = match build_note_store(thread_id) {
@@ -90,11 +89,7 @@ pub fn build_default_m4(
     let summarizer: Arc<dyn Summarizer> = {
         let spec = {
             let p = policy.resolve(reflect_llm::Role::Compact).primary.clone();
-            if p.is_empty() {
-                model.to_string()
-            } else {
-                p
-            }
+            if p.is_empty() { model.to_string() } else { p }
         };
         if registry.next_for(&spec, &[]).is_some() {
             Arc::new(LlmSummarizer::new(
@@ -123,15 +118,11 @@ pub fn build_default_m4(
     }
 
     // ── Recorder:默认挂 JsonlRolloutWriter ──────────────────
-    let recorder: Arc<dyn RolloutRecorder> = Arc::new(JsonlRolloutWriter::new(
-        default_base(),
-        thread_id,
-    ));
+    let recorder: Arc<dyn RolloutRecorder> =
+        Arc::new(JsonlRolloutWriter::new(default_base(), thread_id));
 
     // ── file recovery + subagent registry ────────────────────
-    let file_recovery = Arc::new(ActiveFileRecovery::new(Arc::from(
-        workspace.to_path_buf(),
-    )));
+    let file_recovery = Arc::new(ActiveFileRecovery::new(Arc::from(workspace.to_path_buf())));
     let subagent_registry = SubagentRegistry::shared();
 
     Ok(M4Deps {
@@ -204,8 +195,14 @@ mod tests {
         let tmp = TempDir::new().expect("tempdir");
         let registry: reflect_llm::SharedModelRegistry =
             Arc::new(reflect_llm::ModelRegistry::new());
-        let m4 = build_default_m4(tmp.path(), "test-agent", "openai/gpt-4o", &registry, ThreadId::new())
-            .expect("build_default_m4 should succeed");
+        let m4 = build_default_m4(
+            tmp.path(),
+            "test-agent",
+            "openai/gpt-4o",
+            &registry,
+            ThreadId::new(),
+        )
+        .expect("build_default_m4 should succeed");
         // 断言每个字段都已填(关键——防止回归回退到占位实现)
         assert!(Arc::strong_count(&m4.compactor) >= 1);
         assert_eq!(m4.active_agent_def.name, "test-agent");
