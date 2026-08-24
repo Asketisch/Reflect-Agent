@@ -9,7 +9,7 @@
 //! 记录的 session。
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use reflect_protocol::{MessageRole, RolloutRecord, SessionInfo, ThreadId, TurnId};
@@ -59,7 +59,7 @@ pub fn list_sessions(base: &Path) -> std::io::Result<Vec<SessionInfo>> {
     }
     let mut out: Vec<SessionInfo> = by_id.into_values().map(|(info, _)| info).collect();
     // 按 started_at 倒序,最新在前。
-    out.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    out.sort_by_key(|s| std::cmp::Reverse(s.started_at));
     Ok(out)
 }
 
@@ -114,6 +114,96 @@ pub fn resolve_session_index(
     Ok(sessions[n - 1].session_id)
 }
 
+/// 轻量解析文件**首行** `SessionMeta` 里的内部 `session_id`(不读全文件)。
+///
+/// 文件名是 thread id,与文件内 `SessionMeta.session_id` 可能不同
+/// (双 ID 设计),按内部 id 定位文件时必须逐文件比对首行。
+pub fn first_line_session_id(path: &Path) -> Option<ThreadId> {
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return None;
+    };
+    let mut reader = std::io::BufReader::new(&mut f);
+    let mut line = String::new();
+    use std::io::BufRead;
+    if reader.read_line(&mut line).ok()? == 0 {
+        return None;
+    }
+    match serde_json::from_str::<RolloutRecord>(line.trim()).ok()? {
+        RolloutRecord::SessionMeta { session_id, .. } => Some(session_id),
+        _ => None,
+    }
+}
+
+/// 按文件**内部** `session_id`(首行 SessionMeta)全盘查找 session 文件。
+///
+/// 修复 `session show <内部 id / 内部 id 前缀>` 无法定位文件的问题:
+/// 文件名是 thread id,`session_path_at` / `find_session_file` 都按
+/// 文件名找,内部 id 拼出的路径必然不存在。命中多份(轮转 `.N` 副本)
+/// 时优先返回活跃文件(文件名无 `.N` 后缀)。
+pub fn find_file_by_session_id(
+    base: &Path,
+    session_id: &ThreadId,
+) -> std::io::Result<Option<PathBuf>> {
+    let mut found: Option<PathBuf> = None;
+    if base.exists() {
+        fn scan(dir: &Path, target: &ThreadId, found: &mut Option<PathBuf>) -> std::io::Result<()> {
+            for entry in std::fs::read_dir(dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_dir() {
+                    scan(&path, target, found)?;
+                } else if path.extension().and_then(|s| s.to_str()) == Some("jsonl")
+                    && first_line_session_id(&path).as_ref() == Some(target)
+                {
+                    // 活跃文件(stem 无 `.N` 轮转后缀)直接替换,副本仅兜底。
+                    let active = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .and_then(|n| n.strip_suffix(".jsonl"))
+                        .map(|stem| !stem.contains('.'))
+                        .unwrap_or(false);
+                    if active || found.is_none() {
+                        *found = Some(path);
+                    }
+                }
+            }
+            Ok(())
+        }
+        scan(base, session_id, &mut found)?;
+    }
+    Ok(found)
+}
+
+/// 按**文件名**(thread id)前缀查找 session 文件,返回全部命中。
+///
+/// 供 `session show <thread id 前 N 字符>` 使用;调用方按文件内部
+/// `session_id` 去重后判定唯一性(轮转副本与不同 session 都可能命中)。
+pub fn find_files_by_name_prefix(base: &Path, prefix: &str) -> std::io::Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    if !base.exists() {
+        return Ok(out);
+    }
+    fn scan(dir: &Path, prefix: &str, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                scan(&path, prefix, out)?;
+            } else if path.extension().and_then(|s| s.to_str()) == Some("jsonl")
+                && let Some(name) = path.file_name().and_then(|n| n.to_str())
+                && let Some(stem) = name.strip_suffix(".jsonl")
+                && stem.starts_with(prefix)
+            {
+                out.push(path);
+            }
+        }
+        Ok(())
+    }
+    scan(base, prefix, &mut out)?;
+    out.sort();
+    Ok(out)
+}
+
 /// v0.2.4:列出包含指定 `discussion_id` 的 `DiscussionTranscript`
 /// 记录的 session。
 ///
@@ -140,7 +230,7 @@ pub fn list_sessions_with_discussion(
         }
     };
     walk_with_discussion(base, &target, &mut out)?;
-    out.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    out.sort_by_key(|s| std::cmp::Reverse(s.started_at));
     Ok(out)
 }
 

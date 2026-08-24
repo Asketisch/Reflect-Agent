@@ -316,7 +316,7 @@ pub fn list_model_io_files(base_dir: &Path) -> Vec<(String, PathBuf, std::time::
         out.push((id.to_string(), path, mtime));
     }
     // 按 mtime 降序(最近修改的 session 排最前)。
-    out.sort_by(|a, b| b.2.cmp(&a.2));
+    out.sort_by_key(|t| std::cmp::Reverse(t.2));
     out
 }
 

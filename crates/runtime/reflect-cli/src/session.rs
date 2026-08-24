@@ -10,6 +10,10 @@ use reflect_rollout::index::list_sessions;
 use reflect_rollout::path::{default_base, session_path_at};
 // v1.x:接入此前孤儿的 rename/read_name/to_markdown(S5b + S3)。
 use reflect_rollout::index::{read_session_name, rename_session};
+// 双 ID(文件名 thread id vs 首行内部 session_id)兜底解析助手。
+use reflect_rollout::index::{
+    find_file_by_session_id, find_files_by_name_prefix, first_line_session_id,
+};
 use reflect_rollout::to_markdown;
 use uuid::Uuid;
 
@@ -240,7 +244,6 @@ pub fn export(id: &str, out: Option<&std::path::Path>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 把 `id` 解析成 `ThreadId`:完整 UUID 或前 8 字符前缀(扫描 list_sessions)。
 /// 解析 `id`(完整 UUID 或前缀)为 session 文件路径。
 ///
 /// 路径解析策略(修复「show/rm 用今天日期拼路径导致历史会话找不到」的 bug):
@@ -250,33 +253,101 @@ pub fn export(id: &str, out: Option<&std::path::Path>) -> anyhow::Result<()> {
 /// 3. 完整 UUID 但不在列表中(如跨天 / started_at 缺失):`find_session_file`
 ///    全盘扫描兜底。
 ///
+/// 双 ID 兜底(修复「文件名是 thread id、内部 session_id 是另一个 UUID,
+/// 按内部 id / 内部 id 前缀定位不到文件」的 bug):
+/// - 文件名查找(`session_path_at` / `find_session_file`)未命中时,
+///   按首行 `SessionMeta.session_id` 全盘再找一次(`find_file_by_session_id`)。
+/// - 内部 id 前缀在 `list_sessions` 0 命中时,回退按**文件名**前缀查找
+///   (`find_files_by_name_prefix`),按内部 id 去重后判唯一性。
+///
 /// 返回 `(ThreadId, 路径)`。
 fn resolve_session_path(
     base: &std::path::Path,
     id: &str,
 ) -> anyhow::Result<(ThreadId, std::path::PathBuf)> {
-    match resolve_session_id(base, id)? {
+    let resolved = match resolve_session_id(base, id) {
+        Ok(r) => r,
+        // 内部 session_id 前缀 0 命中:回退按文件名(thread id)前缀查找。
+        Err(e) if id.len() != 36 => {
+            let files = find_files_by_name_prefix(base, id)?;
+            let deduped = dedupe_prefix_files(&files);
+            match deduped.len() {
+                0 => return Err(e),
+                1 => return Ok(deduped.into_iter().next().expect("len == 1")),
+                n => {
+                    return Err(anyhow!(
+                        "prefix '{id}' matches {n} sessions; please give a longer prefix or full UUID"
+                    ));
+                }
+            }
+        }
+        Err(e) => return Err(e),
+    };
+    match resolved {
         // 有 SessionInfo:用真实 started_at 拼路径,失败再兜底扫描。
         Some(info) => {
             let path = session_path_at(base, info.session_id, info.started_at);
             if path.exists() {
                 Ok((info.session_id, path))
             } else {
-                let found = find_session_file(base, info.session_id)?
-                    .ok_or_else(|| anyhow!("session file not found: {}", path.display()))?;
-                Ok((info.session_id, found))
+                // 文件名是 thread id,与内部 session_id 可能不同:先按文件名
+                // 找,再按首行内部 id 全盘找。
+                let found = find_session_file(base, info.session_id)?.or_else(|| {
+                    find_file_by_session_id(base, &info.session_id)
+                        .ok()
+                        .flatten()
+                });
+                found
+                    .ok_or_else(|| anyhow!("session file not found: {}", path.display()))
+                    .map(|p| (info.session_id, p))
             }
         }
-        // 完整 UUID 但不在列表:直接全盘扫描。
+        // 完整 UUID 但不在列表:文件名查找未命中时按首行内部 id 再找
+        // (完整 UUID 既可能是 thread id 也可能是内部 session_id)。
         None => {
             let tid = Uuid::parse_str(id)
                 .map(ThreadId)
                 .map_err(|e| anyhow!("invalid UUID '{id}': {e}"))?;
             let found = find_session_file(base, tid)?
+                .or_else(|| find_file_by_session_id(base, &tid).ok().flatten())
                 .ok_or_else(|| anyhow!("session file not found for id: {id}"))?;
             Ok((tid, found))
         }
     }
+}
+
+/// 按文件**内部** `session_id` 对前缀命中的文件去重,返回
+/// `(内部 session_id, 路径)` 列表。同一 session 的活跃文件与轮转 `.N`
+/// 副本只保留活跃文件(找不到活跃文件时保留任一副本)。
+///
+/// 首行无 `SessionMeta`(writer 崩溃等)时退化为文件名 stem;stem 也非
+/// UUID 的候选跳过,避免把无关 jsonl 误当作 session。
+fn dedupe_prefix_files(files: &[std::path::PathBuf]) -> Vec<(ThreadId, std::path::PathBuf)> {
+    let mut out: Vec<(ThreadId, std::path::PathBuf)> = Vec::new();
+    for f in files {
+        let sid = first_line_session_id(f).or_else(|| {
+            f.file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_suffix(".jsonl"))
+                .and_then(|s| Uuid::parse_str(s).ok())
+                .map(ThreadId)
+        });
+        let Some(sid) = sid else {
+            continue;
+        };
+        let active = f
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_suffix(".jsonl"))
+            .map(|stem| !stem.contains('.'))
+            .unwrap_or(false);
+        match out.iter_mut().find(|(s, _)| *s == sid) {
+            Some((_, prev)) if active => *prev = f.clone(),
+            None => out.push((sid, f.clone())),
+            Some(_) => {}
+        }
+    }
+    out
 }
 
 /// 解析 `id`(完整 UUID 或前缀)为 `SessionInfo`。

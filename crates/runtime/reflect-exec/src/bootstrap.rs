@@ -420,6 +420,9 @@ pub(crate) async fn bootstrap_m6(
         let cfg: McpServerConfig = McpServerConfig::from(cfg_shape.clone());
         let manager_clone = manager.clone();
         let tools_clone = tools.clone();
+        // adapter 调用完成后 emit `McpToolInvoked`,与生命周期事件走同一
+        // JSONL drainer 到 stdout(TUI / headless 消费者按 call_id 配对)。
+        let invoked_tx = event_tx.clone();
         tokio::spawn(async move {
             match manager_clone.start_server(cfg.clone()).await {
                 Ok(handle) => {
@@ -429,6 +432,7 @@ pub(crate) async fn bootstrap_m6(
                             desc,
                             &cfg.name,
                             cfg.timeout,
+                            Some(invoked_tx.clone()),
                         );
                         let arc: Arc<dyn reflect_tools::Tool> = Arc::new(adapter);
                         // v1.3:MCP 工具改走 `ToolSource::Mcp` + 安全 floor。

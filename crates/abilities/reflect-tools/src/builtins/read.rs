@@ -86,12 +86,10 @@ impl Tool for ReadTool {
             None => total,
         };
         let slice: Vec<&str> = lines[offset.min(total)..end].to_vec();
-        let omitted;
-        let body;
-        if slice.len() > TRUNCATION_THRESHOLD {
+        let body = if slice.len() > TRUNCATION_THRESHOLD {
             let head = &slice[..TRUNCATION_HEAD];
             let tail = &slice[slice.len() - TRUNCATION_TAIL..];
-            omitted = slice.len() - TRUNCATION_HEAD - TRUNCATION_TAIL;
+            let omitted = slice.len() - TRUNCATION_HEAD - TRUNCATION_TAIL;
             let mut s = String::new();
             for (i, l) in head.iter().enumerate() {
                 s.push_str(&format!("{:>6}\t{}\n", offset + i + 1, l));
@@ -104,14 +102,14 @@ impl Tool for ReadTool {
                     l
                 ));
             }
-            body = s;
+            s
         } else {
             let mut s = String::new();
             for (i, l) in slice.iter().enumerate() {
                 s.push_str(&format!("{:>6}\t{}\n", offset + i + 1, l));
             }
-            body = s;
-        }
+            s
+        };
         Ok(ToolOutput {
             content: vec![reflect_protocol::ContentBlock::text(body)],
             is_error: false,
