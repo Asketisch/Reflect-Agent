@@ -241,6 +241,20 @@ impl ToolRegistry {
         before - map.len()
     }
 
+    /// 非 `Builtin` 源工具的名字集合(Runtime / Plugin / Mcp / Remote)。
+    ///
+    /// v1.x:供 `pre_loop` 的 LLM 可见工具集合并外部工具 —— MCP / LSP /
+    /// plugin / serve 远程工具由用户显式接入,注册即应对模型可见,
+    /// 不应被 skills catalog 的 always_on 白名单挡住(CLI 与 GUI 同受益)。
+    pub fn external_tool_names(&self) -> std::collections::HashSet<String> {
+        self.tools
+            .read()
+            .iter()
+            .filter(|(_, (s, _))| !matches!(s, ToolSource::Builtin))
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
         self.tools.read().get(name).map(|(_, t)| t.clone())
     }

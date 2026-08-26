@@ -160,6 +160,11 @@ pub async fn pre_loop(state: &mut AgentState, ctx: &NodeContext) -> Option<Graph
     let ephemeral_skills = m4.skills.render_for_system_prompt();
     let reminder = format!("Iteration {}/{}", state.iteration, ctx.max_iterations);
     let mut effective = m4.skills.active_tool_names();
+    // v1.x:外部工具(MCP / LSP / plugin / serve 远程)注册即对 LLM 可见 ——
+    // 用户显式接入的工具不应被 skills catalog 的 always_on 白名单挡住
+    // (GUI 的 MCP/LSP 全部走 Runtime/Mcp 源;CLI 的 MCP 走 Mcp 源,同受益)。
+    // 只并集不删减:Builtin 集仍由 catalog 策略(curated)管理。
+    effective.extend(ctx.tools_queue.registry().external_tool_names());
 
     // v1.x Plan mode：从 LLM 可见工具集中移除通用 `write` / `edit`，强制 LLM
     // 使用 `PlanWrite`（`required_permission = Auto`，审批层跳过）。否则 LLM

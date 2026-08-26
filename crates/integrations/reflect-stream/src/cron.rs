@@ -311,6 +311,18 @@ impl CronScheduler {
         }
     }
 
+    /// 换绑 submission sender(GUI 换 AgentThread 时把 cron 投递切到新 loop)。
+    ///
+    /// **重要**:`start(self, ..)` 把旧 `sub_tx` 克隆**按值捕获**进 driver
+    /// task,本方法只改 scheduler 自身字段 —— 运行中的 driver 不会感知。
+    /// 调用方必须 `CronDriverHandle::stop()` 停旧 driver 后重新
+    /// `start(tick)`。`jobs` 是共享 `Arc`,重启不换 job、**id 不变**
+    /// (这是相对"重建 scheduler + 迁移 job"的优势:后者会生成新 uuid,
+    /// 前端按 id 管理 schedule 时会漂移)。
+    pub fn rebind_sender(&mut self, sub_tx: Option<mpsc::Sender<Submission>>) {
+        self.sub_tx = sub_tx;
+    }
+
     /// 注册一条新 job。校验 schedule 表达式并算出 next_fire;返回新 job 的
     /// clone。`name` 缺省时取 prompt 前 24 字符。
     pub fn create(
@@ -639,6 +651,34 @@ mod tests {
         CronScheduler::tick(&jobs, &Some(tx)).await;
         let sub = rx.recv().await.expect("should receive a submission");
         assert!(matches!(sub.op, reflect_protocol::Op::UserInput { .. }));
+    }
+
+    /// v1.x:`rebind_sender` 后重启 driver,到期 job 投递到**新** channel,
+    /// 且 job id 不变(前端按 id 管理 schedule 不漂移)。
+    /// 同时验证 `start(self)` 按值捕获旧 sender —— 只 rebind 不重启时,
+    /// 旧 driver 仍写旧 channel(这是要求调用方 stop+restart 的原因)。
+    #[tokio::test]
+    async fn rebind_sender_replaces_tx_before_restart() {
+        let (old_tx, mut old_rx) = mpsc::channel::<Submission>(8);
+        let mut s = CronScheduler::new(Some(old_tx), ThreadId::new());
+        let job = s.create("* * * * *", "rebind", None).unwrap();
+        let job_id = job.id.clone();
+
+        // 换绑到新 channel。
+        let (new_tx, mut new_rx) = mpsc::channel::<Submission>(8);
+        s.rebind_sender(Some(new_tx));
+        assert_eq!(s.list()[0].id, job_id, "rebind 不动 job,id 保持");
+
+        // 直接用换绑后的 scheduler 触发 tick → 落新 channel。
+        let mut due = s.get(&job_id).unwrap();
+        due.next_fire = Some(Utc::now() - Duration::minutes(1));
+        s.jobs.write()[0] = due;
+        let jobs = Arc::clone(&s.jobs);
+        let tx = s.sub_tx.clone().unwrap();
+        CronScheduler::tick(&jobs, &Some(tx)).await;
+        let sub = new_rx.recv().await.expect("换绑后应投递到新 channel");
+        assert!(matches!(sub.op, reflect_protocol::Op::UserInput { .. }));
+        assert!(old_rx.try_recv().is_err(), "旧 channel 不应再收到投递");
     }
 
     #[tokio::test]

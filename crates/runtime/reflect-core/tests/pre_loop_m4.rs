@@ -138,6 +138,7 @@ fn make_sub(text: &str) -> Submission {
         },
         client_user_message_id: None,
         trace: None,
+        workspace: None,
     }
 }
 
@@ -1253,5 +1254,346 @@ async fn m4_non_plan_mode_keeps_write_edit_visible() {
         tool_names.contains(&"PlanWrite"),
         "Auto mode 下 `PlanWrite` 也应可见（always_on 包含）;got {:?}",
         tool_names
+    );
+}
+
+/// v1.x:外部源工具(Runtime / Plugin / Mcp / Remote)注册即对 LLM 可见,
+/// 不被 skills catalog 的 always_on 白名单挡住。模拟 GUI 的 MCP/LSP 接入
+/// (`register_runtime_tool`)与 CLI 的 MCP 接入(`Mcp` 源),两者都应出现在
+/// effective_tools。同时 Builtin 侧 curated 语义不变:不在 always_on 的
+/// 内置工具(echo)仍被隐藏。
+#[tokio::test]
+async fn m4_external_source_tools_are_visible_beyond_always_on() {
+    let registry = Arc::new(ModelRegistry::new());
+    let stub = Arc::new(StubClient::new(vec![
+        ChatEvent::MessageStart {
+            id: "m1".into(),
+            model: "stub-1".into(),
+        },
+        ChatEvent::ContentDelta("ok".into()),
+        ChatEvent::MessageStop,
+    ]));
+    registry.register_pool(
+        "stub",
+        CredentialPool {
+            entries: vec![PoolEntry {
+                client: stub.clone(),
+                label: "default".into(),
+                weight: 1,
+            }],
+        },
+    );
+
+    let m4 = make_m4_deps("tester", "You are a tester.");
+    let cfg = AgentConfig::new("stub/m1", Path::new(".")).with_m4(m4);
+
+    let tools = Arc::new(ToolRegistry::default());
+    // Builtin 源:echo 不在 ALWAYS_ON_TOOLS → curated 隐藏(对照组)。
+    tools.register(Arc::new(EchoTool));
+    // Runtime 源(GUI 的 MCP/LSP 走此路径)。
+    tools.register_runtime_tool(Arc::new(NamedStubTool {
+        name: "mcp__fs__list".into(),
+    }));
+    // Mcp 源(CLI 的 bootstrap_m6 走此路径)。
+    tools.register_with_source(
+        reflect_tools::ToolSource::Mcp,
+        Arc::new(NamedStubTool {
+            name: "mcp__gh__pr".into(),
+        }),
+    );
+    let thread = AgentThread::new(cfg, registry, tools, None, None);
+
+    let mut handle = thread.submit(make_sub("hi")).await;
+    while let Some(ev) = handle.next().await {
+        if matches!(ev.msg, EventMsg::TurnComplete(_)) {
+            break;
+        }
+    }
+
+    let req = stub.last_request.lock().clone().expect("model was called");
+    let tool_names: Vec<&str> = req
+        .tools
+        .iter()
+        .map(|t| match t {
+            reflect_llm::ToolSpec::Function { name, .. } => name.as_str(),
+        })
+        .collect();
+
+    assert!(
+        tool_names.contains(&"mcp__fs__list"),
+        "Runtime 源工具必须对 LLM 可见;got {:?}",
+        tool_names
+    );
+    assert!(
+        tool_names.contains(&"mcp__gh__pr"),
+        "Mcp 源工具必须对 LLM 可见;got {:?}",
+        tool_names
+    );
+    assert!(
+        !tool_names.contains(&"echo"),
+        "Builtin 侧 curated 语义不变:不在 always_on 的内置工具仍隐藏;got {:?}",
+        tool_names
+    );
+}
+
+// ── v1.x 每轮回填:recorder 驱动的跨轮记忆 ────────────────────────────
+
+/// 测试用内存 recorder:record 收进 Vec,replay 全量返回,
+/// truncate_after 按 turn_id 定位截断(模拟 JsonlRolloutWriter 语义的
+/// 最小子集,避免测试触碰文件系统)。
+#[derive(Debug, Default)]
+struct MemRecorder {
+    records: Mutex<Vec<reflect_protocol::RolloutRecord>>,
+}
+
+#[async_trait]
+impl reflect_protocol::RolloutRecorder for MemRecorder {
+    async fn record(&self, r: reflect_protocol::RolloutRecord) -> anyhow::Result<()> {
+        self.records.lock().push(r);
+        Ok(())
+    }
+    async fn replay(
+        &self,
+        _session_id: reflect_protocol::ThreadId,
+    ) -> anyhow::Result<Vec<reflect_protocol::RolloutRecord>> {
+        Ok(self.records.lock().clone())
+    }
+    async fn list_sessions(&self) -> anyhow::Result<Vec<reflect_protocol::SessionInfo>> {
+        Ok(vec![])
+    }
+    async fn truncate_after(
+        &self,
+        to_turn_id: Option<&reflect_protocol::TurnId>,
+    ) -> anyhow::Result<usize> {
+        let mut records = self.records.lock();
+        let Some(target) = to_turn_id else {
+            return Ok(0);
+        };
+        // 找到目标 turn 的第一条 Message 记录,截断到该下标(丢弃目标及之后)。
+        let pos = records.iter().position(|r| match r {
+            reflect_protocol::RolloutRecord::Message { turn_id, .. } => turn_id == target,
+            _ => false,
+        });
+        let Some(pos) = pos else {
+            return Ok(0);
+        };
+        let dropped = records.len() - pos;
+        records.truncate(pos);
+        Ok(dropped)
+    }
+}
+
+/// 跨轮记忆回归:带 recorder 的线程,第 2 轮模型请求必须包含第 1 轮的
+/// User 输入与 Assistant 回答 —— 修复前引擎无跨轮累积,第 2 轮只看到
+/// 新输入(每轮失忆)。
+#[tokio::test]
+async fn recorder_refill_gives_cross_turn_memory() {
+    let registry = Arc::new(ModelRegistry::new());
+    let stub = Arc::new(SeqStubClient::new(vec![
+        // 第 2 轮(最后 pop):纯文本停止。
+        vec![
+            ChatEvent::MessageStart {
+                id: "m2".into(),
+                model: "stub-1".into(),
+            },
+            ChatEvent::ContentDelta("second answer".into()),
+            ChatEvent::MessageStop,
+        ],
+        // 第 1 轮(先 pop)。
+        vec![
+            ChatEvent::MessageStart {
+                id: "m1".into(),
+                model: "stub-1".into(),
+            },
+            ChatEvent::ContentDelta("first answer".into()),
+            ChatEvent::MessageStop,
+        ],
+    ]));
+    registry.register_pool(
+        "stub",
+        CredentialPool {
+            entries: vec![PoolEntry {
+                client: stub.clone(),
+                label: "default".into(),
+                weight: 1,
+            }],
+        },
+    );
+
+    let mut m4 = make_m4_deps("tester", "You are a tester.");
+    m4.recorder = Some(Arc::new(MemRecorder::default()));
+    let thread = build_thread(registry, m4);
+
+    let mut h1 = thread.submit(make_sub("我叫 Alice")).await;
+    while let Some(ev) = h1.next().await {
+        if matches!(ev.msg, EventMsg::TurnComplete(_)) {
+            break;
+        }
+    }
+    let mut h2 = thread.submit(make_sub("我叫什么?")).await;
+    while let Some(ev) = h2.next().await {
+        if matches!(ev.msg, EventMsg::TurnComplete(_)) {
+            break;
+        }
+    }
+
+    let reqs: Vec<ChatRequest> = stub.requests.lock().clone();
+    assert!(reqs.len() >= 2, "两轮各至少一次模型调用");
+    let second = &reqs[1];
+    let has_turn1_user = second.messages.iter().any(|m| {
+        matches!(
+            m,
+            ChatMessage::User(u) if u.blocks.iter().any(|b| {
+                matches!(b, reflect_llm::ContentBlock::Text { text } if text.contains("我叫 Alice"))
+            })
+        )
+    });
+    assert!(
+        has_turn1_user,
+        "第 2 轮必须回填第 1 轮的 User 输入;got {:?}",
+        second
+            .messages
+            .iter()
+            .map(|m| match m {
+                ChatMessage::System(_) => "System",
+                ChatMessage::User(_) => "User",
+                ChatMessage::Assistant(_) => "Assistant",
+                ChatMessage::Tool(_) => "Tool",
+            })
+            .collect::<Vec<_>>()
+    );
+    let has_turn1_assistant = second
+        .messages
+        .iter()
+        .any(|m| matches!(m, ChatMessage::Assistant(a) if a.text.as_deref().is_some_and(|t| t.contains("first answer"))));
+    assert!(
+        has_turn1_assistant,
+        "第 2 轮必须回填第 1 轮的 Assistant 回答"
+    );
+
+    // 本轮新输入恰好出现一次(replay 在写入本轮记录之前,不得重复)。
+    let new_input_count = second
+        .messages
+        .iter()
+        .filter(|m| {
+            matches!(
+                m,
+                ChatMessage::User(u) if u.blocks.iter().any(|b| {
+                    matches!(b, reflect_llm::ContentBlock::Text { text } if text.contains("我叫什么?"))
+                })
+            )
+        })
+        .count();
+    assert_eq!(new_input_count, 1, "本轮输入不得因回填而重复");
+}
+
+/// rewind 回归:truncate_after 截断后,下一轮回填不再包含被截断的对话
+/// —— `Op::Rewind` 分支注释声称的「截断后下一次 turn 自然从更短的
+/// rollout 回放」由此真正成立。
+#[tokio::test]
+async fn recorder_refill_respects_rewind_truncation() {
+    let registry = Arc::new(ModelRegistry::new());
+    let stub = Arc::new(SeqStubClient::new(vec![
+        // rewind 后的第 3 轮。
+        vec![
+            ChatEvent::MessageStart {
+                id: "m3".into(),
+                model: "stub-1".into(),
+            },
+            ChatEvent::ContentDelta("after rewind".into()),
+            ChatEvent::MessageStop,
+        ],
+        // 第 1 轮。
+        vec![
+            ChatEvent::MessageStart {
+                id: "m1".into(),
+                model: "stub-1".into(),
+            },
+            ChatEvent::ContentDelta("to be truncated".into()),
+            ChatEvent::MessageStop,
+        ],
+    ]));
+    registry.register_pool(
+        "stub",
+        CredentialPool {
+            entries: vec![PoolEntry {
+                client: stub.clone(),
+                label: "default".into(),
+                weight: 1,
+            }],
+        },
+    );
+
+    let recorder = Arc::new(MemRecorder::default());
+    let mut m4 = make_m4_deps("tester", "You are a tester.");
+    m4.recorder = Some(recorder.clone());
+    let thread = build_thread(registry, m4);
+
+    let mut h1 = thread.submit(make_sub("old question")).await;
+    while let Some(ev) = h1.next().await {
+        if matches!(ev.msg, EventMsg::TurnComplete(_)) {
+            break;
+        }
+    }
+
+    // 从 recorder 里取第 1 轮的 turn_id,发 Rewind 截断它。
+    let turn1 = recorder
+        .records
+        .lock()
+        .iter()
+        .find_map(|r| match r {
+            reflect_protocol::RolloutRecord::Message { turn_id, .. } => Some(*turn_id),
+            _ => None,
+        })
+        .expect("第 1 轮应有 Message 记录");
+    let mut hr = thread
+        .submit(Submission {
+            id: "rewind-sub".into(),
+            op: reflect_protocol::Op::Rewind {
+                to_turn_id: Some(turn1.to_string()),
+            },
+            client_user_message_id: None,
+            trace: None,
+            workspace: None,
+        })
+        .await;
+    while let Some(ev) = hr.next().await {
+        if matches!(ev.msg, EventMsg::TurnRewound(_)) {
+            break;
+        }
+    }
+
+    // 截断后的新一轮:回填历史不得再包含被截断的第 1 轮内容。
+    let mut h3 = thread.submit(make_sub("fresh start")).await;
+    while let Some(ev) = h3.next().await {
+        if matches!(ev.msg, EventMsg::TurnComplete(_)) {
+            break;
+        }
+    }
+    let reqs: Vec<ChatRequest> = stub.requests.lock().clone();
+    let last = reqs.last().expect("rewind 后应有模型调用");
+    let leaked = last.messages.iter().any(|m| {
+        matches!(
+            m,
+            ChatMessage::User(u) if u.blocks.iter().any(|b| {
+                matches!(b, reflect_llm::ContentBlock::Text { text } if text.contains("old question"))
+            })
+        ) || matches!(
+            m,
+            ChatMessage::Assistant(a) if a.text.as_deref().is_some_and(|t| t.contains("to be truncated"))
+        )
+    });
+    assert!(
+        !leaked,
+        "rewind 截断后的回填不得包含被截断内容;got {:?}",
+        last.messages
+            .iter()
+            .map(|m| match m {
+                ChatMessage::System(_) => "System",
+                ChatMessage::User(_) => "User",
+                ChatMessage::Assistant(_) => "Assistant",
+                ChatMessage::Tool(_) => "Tool",
+            })
+            .collect::<Vec<_>>()
     );
 }
