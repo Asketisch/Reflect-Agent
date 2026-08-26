@@ -24,6 +24,7 @@ pub mod agent_thread;
 pub mod background_tasks;
 pub mod config;
 pub mod graph;
+pub mod resume;
 pub mod steering_queue;
 pub mod submission_loop;
 pub mod turn;

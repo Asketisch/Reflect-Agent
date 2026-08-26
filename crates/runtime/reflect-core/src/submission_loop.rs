@@ -173,11 +173,22 @@ pub async fn submission_loop(
         .await;
 
     let mut session_emitted = false;
+    // v1.x:从首条 Submission(通常是首条 UserInput)携带的 `workspace`
+    // 字段捕获。GUI 主动注入当前激活工作区;CLI / 测试场景不指定 →
+    // 后续 `cfg.current_workspace()` 作为回退。捕获后保持不变,即使
+    // `set_workspace` 后续切换工作区也不影响已归属 session。
+    let mut session_workspace: Option<String> = None;
     while let Some(sub) = sub_rx.recv().await {
         let turn_tx = turn_subs
             .lock()
             .remove(&sub.id)
             .unwrap_or_else(|| mpsc::channel(8).0);
+
+        // 首条 Submission(无论 op 类型)就锁定 workspace —— 之后即使
+        // 切 workspace 也不影响该 session 的归属。
+        if session_workspace.is_none() {
+            session_workspace = sub.workspace.clone();
+        }
 
         match sub.op {
             reflect_protocol::Op::UserInput {
@@ -217,6 +228,11 @@ pub async fn submission_loop(
                         cfg.current_model(),
                         provider_of(&cfg.current_model()),
                     );
+                    // v1.x:覆盖 `new()` 内部生成的随机 id,统一为 loop 的
+                    // session_id —— 保证 SessionConfigured.session_id 与
+                    // recorder 文件名 / SessionMeta.session_id 三者一致
+                    // (GUI 按路由 id 预分配 session,依赖此一致性)。
+                    sc.session_id = session_id;
                     // v1.x:填入模型上下文窗口(供 TUI 上下文用量条做分母)。
                     // 级联:config.toml `[context_windows]` per-model 覆盖表(优先)
                     // → 内置 `context_window_for` 静态回退表 → None。
@@ -235,12 +251,19 @@ pub async fn submission_loop(
                     let _ = turn_tx.send(ev.clone()).await;
                     fan_out_session(&session_subs, &ev);
                     // M5:把会话头部持久化到 rollout recorder。
+                    // v1.x:workspace 字段 —— 首条 Submission 携带的
+                    // `workspace` 优先,否则回退到 `cfg.current_workspace()`
+                    // 解析出的字符串(由 `set_workspace` 后台管理)。
                     if let Some(rec) = cfg.m4.as_ref().and_then(|m| m.recorder.clone()) {
+                        let ws = session_workspace
+                            .clone()
+                            .or_else(|| cfg.current_workspace().to_str().map(|s| s.to_string()));
                         let _ = rec
                             .record(RolloutRecord::SessionMeta {
                                 session_id,
                                 model: cfg.current_model(),
                                 started_at: chrono::Utc::now(),
+                                workspace: ws,
                             })
                             .await;
                     }
@@ -271,6 +294,30 @@ pub async fn submission_loop(
                 // 让 provider 收到原子化的图文消息。Text-only 单 item 路径与旧行为
                 // 完全一致;LocalImage / Skill / QuestionAnswer 留待后续接通。
                 let messages = user_input_items_to_messages(merged_items);
+
+                // v1.x 每轮回填:有 recorder 时,每轮 UserInput 前从 rollout
+                // 重建会话历史。放在写本轮 user 记录**之前** replay,历史里
+                // 天然不含本轮输入,不会重复;也让 `Op::Rewind` 截断后下一轮
+                // 自然从更短的 rollout 回放(rewind 分支注释声称的设计落地)。
+                // 这修复了跨轮失忆:引擎除 preload-once 外此前无任何跨轮累积,
+                // 第 2 轮起模型只看到新输入。
+                // 无 recorder 的线程保留旧 preload-once 语义(resume 路径的
+                // recorder 绑定旧 id,replay 已含全部历史,preload 不再叠加,
+                // 避免重复 echo)。
+                let base: Vec<ChatMessage> =
+                    if let Some(rec) = cfg.m4.as_ref().and_then(|m| m.recorder.clone()) {
+                        match rec.replay(session_id).await {
+                            Ok(records) => crate::resume::records_to_preload(&records),
+                            Err(e) => {
+                                // 回填失败不致命:退化为无历史轮(与 recorder
+                                // 缺席同款),本轮对话照常进行。
+                                tracing::warn!("rollout replay 回填失败,退化为无历史轮: {e:#}");
+                                Vec::new()
+                            }
+                        }
+                    } else {
+                        std::mem::take(&mut *cfg.preload_messages.write())
+                    };
 
                 // v1.2 P2:持久化本轮 user 输入(此前从未落盘)。
                 // submission_loop 原先只在 turn 结束后写 assistant 的最后一条
@@ -314,20 +361,14 @@ pub async fn submission_loop(
                     }
                 }
 
-                // v1.x resume:`--resume` 续作时,把回放出的历史消息前置到
-                // 当前用户输入之前。`pre_loop` 会在本 turn 首次进入时把
-                // `ctx.messages` 整体 seed 进 `state.messages`,因此历史 +
-                // 新输入会一起进入会话上下文,恢复的 agent 仍记得之前的对话。
-                //
-                // 关键:**只消费一次**。take 出 preload 历史后立即清空槽位,
-                // 避免后续跨提交 turn 再次前置 → 历史重复 echo
-                // (`[old, resume, reply, old, new]`)。普通路径槽位为空,take
-                // 出空 Vec,此分支为 no-op,行为不变。
-                let preload = std::mem::take(&mut *cfg.preload_messages.write());
-                let messages = if preload.is_empty() {
+                // v1.x resume / 每轮回填:把上面算出的 base 历史(recorder
+                // replay 或 preload-once)前置到当前用户输入之前。`pre_loop`
+                // 会在本 turn 首次进入时把 `ctx.messages` 整体 seed 进
+                // `state.messages`,因此历史 + 新输入会一起进入会话上下文。
+                let messages = if base.is_empty() {
                     messages
                 } else {
-                    let mut v = preload;
+                    let mut v = base;
                     v.extend(messages);
                     v
                 };
@@ -1440,9 +1481,14 @@ fn persist_plan_markdown(
 
 /// v1.2 P0:把一批 `UserInputItem` 转成原子化的用户消息。
 ///
-/// 所有 Text / Image item 合并进同一个 `UserContent.blocks` 数组,保证 provider
-/// 收到图文混排而非多个割裂的连续 user role。Text-only 单 item 与旧实现完全
-/// 一致。尚未接通的 LocalImage / Skill / QuestionAnswer 暂时跳过。
+/// 所有 Text / Image / File item 合并进同一个 `UserContent.blocks` 数组,
+/// 保证 provider 收到图文混排而非多个割裂的连续 user role。Text-only 单
+/// item 与旧实现完全一致。尚未接通的 LocalImage / Skill / QuestionAnswer
+/// 暂时跳过。
+///
+/// v1.x 新增 `File` 分支 —— 把文件 mention 展开为带路径标注的文本块
+/// (`@<path>` 或 `@<path>:L<start>-L<end>`)。真实读取由 LLM `/read`
+/// 工具按需触发(避免无谓 IO 与抽象泄露)。
 fn user_input_items_to_messages(items: Vec<UserInputItem>) -> Vec<ChatMessage> {
     let blocks: Vec<reflect_llm::ContentBlock> = items
         .into_iter()
@@ -1450,6 +1496,13 @@ fn user_input_items_to_messages(items: Vec<UserInputItem>) -> Vec<ChatMessage> {
             UserInputItem::Text { text } => Some(reflect_llm::ContentBlock::Text { text }),
             UserInputItem::Image { data, mime_type } => {
                 Some(reflect_llm::ContentBlock::Image { data, mime_type })
+            }
+            UserInputItem::File { path, range } => {
+                let annotation = match range {
+                    Some(r) => format!("@{}:L{}-L{}", path, r.start_line, r.end_line),
+                    None => format!("@{}", path),
+                };
+                Some(reflect_llm::ContentBlock::Text { text: annotation })
             }
             UserInputItem::LocalImage { .. }
             | UserInputItem::Skill { .. }

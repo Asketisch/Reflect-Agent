@@ -334,6 +334,9 @@ fn proactive_session_configured(thread: &Arc<AgentThread>) -> Event {
         .map(|(p, _)| p.to_string())
         .unwrap_or_else(|| "unknown".to_string());
     let mut sc = reflect_protocol::SessionConfiguredEvent::new(model.clone(), provider);
+    // v1.x:外部预分配了 session_id 时覆盖随机 id,与 recorder 文件名 /
+    // SessionMeta 保持一致(见 submission_loop 同款修复)。
+    sc.session_id = cfg.session_id.unwrap_or(sc.session_id);
     // RwLock guard 不是 Send:先把值拷出来再构造事件(与 core 同款注释)。
     let override_hit = cfg.context_window_overrides.read().get(&model).copied();
     sc.context_window_size = override_hit.or_else(|| reflect_llm::context_window_for(&model));
