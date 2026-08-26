@@ -54,6 +54,7 @@ fn write_parent(
             session_id: sid,
             model: model.to_string(),
             started_at: Utc::now(),
+            workspace: None,
         })
         .unwrap()
     )

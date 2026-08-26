@@ -60,6 +60,7 @@ fn list_sessions_derives_title_from_first_user_message() {
             session_id: sid,
             model: "m".into(),
             started_at: chrono::Utc::now(),
+            workspace: None,
         })
         .unwrap(),
         serde_json::to_string(&RolloutRecord::message(
@@ -96,6 +97,7 @@ fn list_sessions_no_title_when_no_user_message() {
         session_id: sid,
         model: "m".into(),
         started_at: chrono::Utc::now(),
+        workspace: None,
     })
     .unwrap();
     std::fs::write(day_dir.join(format!("{sid}.jsonl")), body).unwrap();
@@ -140,6 +142,7 @@ fn recovers_meta_from_rotated_sibling() {
         session_id: sid,
         model: "openai/gpt-4o".into(),
         started_at: started,
+        workspace: None,
     })
     .unwrap();
     std::fs::write(
@@ -195,6 +198,7 @@ fn list_sessions_with_discussion_filters_by_id() {
             session_id: sid_a,
             model: "openai/gpt-4o".into(),
             started_at: Utc.with_ymd_and_hms(2026, 6, 18, 12, 0, 0).unwrap(),
+            workspace: None,
         })
         .unwrap(),
         serde_json::to_string(&RolloutRecord::DiscussionTranscript {
@@ -217,6 +221,7 @@ fn list_sessions_with_discussion_filters_by_id() {
             session_id: sid_b,
             model: "anthropic/claude".into(),
             started_at: Utc.with_ymd_and_hms(2026, 6, 18, 13, 0, 0).unwrap(),
+            workspace: None,
         })
         .unwrap(),
         serde_json::to_string(&RolloutRecord::DiscussionTranscript {
@@ -269,6 +274,7 @@ fn newest_first_ordering() {
             session_id: sid_old,
             model: "m".into(),
             started_at: older,
+            workspace: None,
         })
         .unwrap(),
     )
@@ -279,6 +285,7 @@ fn newest_first_ordering() {
             session_id: sid_new,
             model: "m".into(),
             started_at: newer,
+            workspace: None,
         })
         .unwrap(),
     )
@@ -288,6 +295,58 @@ fn newest_first_ordering() {
     assert_eq!(sessions.len(), 2);
     assert_eq!(sessions[0].session_id, sid_new, "newest first");
     assert_eq!(sessions[1].session_id, sid_old);
+}
+
+/// v1.x workspace 归属:`list_sessions_in_workspace` 只返回 `SessionMeta.workspace`
+/// 精确匹配的 session;`workspace = None` 的旧 session 在过滤下**不返回**
+/// (归属在创建时确定,未归属会话只出现在全量列表里)。
+#[test]
+fn list_sessions_in_workspace_filters_by_exact_match() {
+    let dir = tempdir().unwrap();
+    let day_dir = dir.path().join("2026/06/18");
+    std::fs::create_dir_all(&day_dir).unwrap();
+
+    // 写 3 条 session:proj-a、proj-b、未归属(workspace = None)。
+    let sid_a = ThreadId::new();
+    let sid_b = ThreadId::new();
+    let sid_none = ThreadId::new();
+    let bodies: [(&ThreadId, Option<String>); 3] = [
+        (&sid_a, Some("/tmp/proj-a".into())),
+        (&sid_b, Some("/tmp/proj-b".into())),
+        (&sid_none, None),
+    ];
+    for (sid, workspace) in &bodies {
+        std::fs::write(
+            day_dir.join(format!("{sid}.jsonl")),
+            serde_json::to_string(&RolloutRecord::SessionMeta {
+                session_id: **sid,
+                model: "m".into(),
+                started_at: chrono::Utc::now(),
+                workspace: workspace.clone(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    // 全量列表仍含 3 条(兼容既有行为)。
+    let all = list_sessions(dir.path()).unwrap();
+    assert_eq!(all.len(), 3);
+
+    // 过滤 proj-a → 只有 sid_a。
+    let in_a = list_sessions_in_workspace(dir.path(), "/tmp/proj-a").unwrap();
+    assert_eq!(in_a.len(), 1);
+    assert_eq!(in_a[0].session_id, sid_a);
+    assert_eq!(in_a[0].workspace.as_deref(), Some("/tmp/proj-a"));
+
+    // 过滤 proj-b → 只有 sid_b。
+    let in_b = list_sessions_in_workspace(dir.path(), "/tmp/proj-b").unwrap();
+    assert_eq!(in_b.len(), 1);
+    assert_eq!(in_b[0].session_id, sid_b);
+
+    // 未归属 session 在过滤下不可见 —— 精确匹配保证 None != Some(ws)。
+    let in_none = list_sessions_in_workspace(dir.path(), "/tmp/other").unwrap();
+    assert!(in_none.iter().all(|s| s.session_id != sid_none));
 }
 
 // ── v0.4: resolve_session_index ──
@@ -307,6 +366,7 @@ fn prepare_n_sessions(n: usize) -> (tempfile::TempDir, Vec<ThreadId>) {
                 session_id: sid,
                 model: "m".into(),
                 started_at: started,
+                workspace: None,
             })
             .unwrap(),
         )
@@ -463,6 +523,7 @@ fn write_fork_record_appends_to_parent() {
             session_id: parent,
             model: "m".into(),
             started_at: started,
+            workspace: None,
         })
         .unwrap(),
     );
@@ -573,6 +634,7 @@ fn list_sessions_aggregates_token_count_from_records() {
             session_id: sid,
             model: "openai/gpt-4o".into(),
             started_at: chrono::Utc::now(),
+            workspace: None,
         })
         .unwrap(),
     );
@@ -616,6 +678,7 @@ fn list_sessions_sums_cost_usd_across_turns() {
             session_id: sid,
             model: "openai/gpt-4o".into(),
             started_at: chrono::Utc::now(),
+            workspace: None,
         })
         .unwrap(),
     );
@@ -656,6 +719,7 @@ fn list_sessions_token_count_zero_for_old_rollouts() {
             session_id: sid,
             model: "m".into(),
             started_at: chrono::Utc::now(),
+            workspace: None,
         })
         .unwrap(),
     );
