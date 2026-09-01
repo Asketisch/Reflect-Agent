@@ -127,16 +127,21 @@ pub async fn bootstrap_common(args: &HeadlessArgs) -> anyhow::Result<HeadlessCom
     initial_cfg
         .apply_to_registry(&registry)
         .map_err(|e| anyhow::anyhow!("failed to build provider from config: {e}"))?;
-    let provider = initial_cfg
-        .active_provider()
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no provider configured: set [active] in {} or OPENAI_API_KEY/ANTHROPIC_API_KEY env, or REFLECT_MODEL=mock",
-                config_path.display()
-            )
-        })?
-        .to_string();
-    let model = format!("{provider}/{}", initial_cfg.model_for(&provider));
+    // 无 provider / 无显式 model 都要 fail-fast 且报因可读 —— 不再回落
+    // 内置默认模型名(打向第三方兼容端点只会得到难诊断的远端错误)。
+    if initial_cfg.active_provider().is_none() {
+        anyhow::bail!(
+            "no provider configured: set [active] in {} or OPENAI_API_KEY/ANTHROPIC_API_KEY env, or REFLECT_MODEL=mock",
+            config_path.display()
+        );
+    }
+    let model = initial_cfg.resolved_model_spec().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no model configured for the active provider: set [<provider>].model \
+             or a [[<provider>.credentials]].model entry in {} (or REFLECT_MODEL env)",
+            config_path.display()
+        )
+    })?;
 
     let watcher = ConfigWatcher::spawn(config_path.clone(), initial_cfg.clone()).map_err(|e| {
         anyhow::anyhow!(
@@ -154,7 +159,15 @@ pub async fn bootstrap_common(args: &HeadlessArgs) -> anyhow::Result<HeadlessCom
     let tools = Arc::new(ToolRegistry::default());
     tools.register(Arc::new(reflect_tools::builtins::EchoTool));
     tools.register(Arc::new(reflect_tools::builtins::BashTool));
+    // 核心文件工具:与 lib facade(`reflect::builder::default_tool_registry`)对齐。
+    // 此前缺失导致 CLI headless/serve 下模型调用 read/write/edit/grep/glob 报
+    // "tool not found",而 ALWAYS_ON_TOOLS prompt 仍向模型宣告这些工具可用。
+    tools.register(Arc::new(reflect_tools::builtins::ReadTool));
+    tools.register(Arc::new(reflect_tools::builtins::WriteTool));
+    tools.register(Arc::new(reflect_tools::builtins::EditTool));
     tools.register(Arc::new(reflect_tools::builtins::DeleteTool));
+    tools.register(Arc::new(reflect_tools::builtins::GrepTool));
+    tools.register(Arc::new(reflect_tools::builtins::GlobTool));
     tools.register(Arc::new(reflect_tools::builtins::EnterPlanModeTool));
     tools.register(Arc::new(reflect_tools::builtins::ExitPlanModeTool));
     tools.register(Arc::new(reflect_tools::builtins::PlanWriteTool));

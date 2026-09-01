@@ -12,7 +12,7 @@
 //!
 //! v1.0 Phase 3:从 `ReflectConfig.routing` TOML 段构建;v1.0 Phase 1
 //! 暂用 `RoutingPolicy::default()`,`main.primary` 为空时由 caller
-//! 用 `cfg.model_for(provider)` 兜底。
+//! 用 `cfg.resolve_model(provider)` 兜底。
 
 use std::time::Duration;
 
@@ -68,7 +68,7 @@ pub struct SpecSlot {
 }
 
 impl SpecSlot {
-    /// 给定 slot primary 起点(由 `model_for` 算出),构造仅含 primary
+    /// 给定 slot primary 起点(由 `resolve_model` 算出),构造仅含 primary
     /// 的 slot。常用于 `RoutingPolicy::default()` 后由 `bootstrap_m4`
     /// 注入实际 spec。
     pub fn with_primary(primary: impl Into<String>) -> Self {

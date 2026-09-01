@@ -124,26 +124,16 @@ impl Tool for BashTool {
         } else {
             ("sh".to_string(), vec!["-c".to_string(), cmd.clone()])
         };
+        // Seatbelt 模式下 argv[1] 是临时 .sb profile 路径;文件名按调用唯一
+        // (见 seatbelt_argv),命令结束后由本工具负责删除,避免临时目录泄漏。
+        let seatbelt_profile_path: Option<std::path::PathBuf> = if program == "/usr/bin/sandbox-exec"
+        {
+            argv.get(1).map(std::path::PathBuf::from)
+        } else {
+            None
+        };
         let mut command = Command::new(&program);
         command.args(&argv);
-        // Linux Landlock:在 fork 后、exec 前应用规则(workspace 内放行,
-        // 其余写拒)。内核不支持时降级(闭包内 Ok,不阻塞)。
-        #[cfg(target_os = "linux")]
-        if matches!(sandbox.status(), reflect_sandbox::OsSandboxStatus::Landlock) {
-            use std::os::unix::process::CommandExt;
-            let ws_clone = workspace.clone();
-            let mut pre_exec = sandbox.landlock_pre_exec(ws_clone);
-            unsafe {
-                command.pre_exec(move || pre_exec());
-            }
-        }
-        command
-            .current_dir(&workspace)
-            .env_clear()
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .stdin(Stdio::null())
-            .kill_on_drop(true);
         // Linux Landlock:在 fork 后、exec 前应用规则(workspace 内放行,
         // 其余写拒)。内核不支持时降级(闭包内 Ok,不阻塞)。
         #[cfg(target_os = "linux")]
@@ -217,11 +207,18 @@ impl Tool for BashTool {
             Ok(triple) => triple,
             Err(_) => {
                 warn!(cmd, "bash tool timed out");
+                if let Some(p) = &seatbelt_profile_path {
+                    let _ = std::fs::remove_file(p);
+                }
                 return Err(ToolError::Timeout {
                     elapsed_ms: timeout_ms,
                 });
             }
         };
+        // 命令已结束(正常或被 reap),临时 .sb profile 不再需要,删除。
+        if let Some(p) = &seatbelt_profile_path {
+            let _ = std::fs::remove_file(p);
+        }
 
         // M3:child 已在 timeout 块内 `wait()` reap,exit_code 已捕获。
         // 若 timeout 触发,上面 `Err(_)` 分支已 return;若 child_handle 仍在

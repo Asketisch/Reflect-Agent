@@ -1597,3 +1597,68 @@ async fn recorder_refill_respects_rewind_truncation() {
             .collect::<Vec<_>>()
     );
 }
+
+
+/// v1.4 子代理可见性防回归:`call_<role>` 是运行时动态注册的工具(不在静态
+/// `ALWAYS_ON_TOOLS` 中),bootstrap 注册后必须同步调用
+/// `skills.add_always_on_tools` 把它补进可见集 —— 否则 `pre_loop` 的
+/// `effective_tools` 过滤会把它从模型请求的 tools 数组里剔除,LLM 永远
+/// 拿不到子代理工具的 schema、无法委派。离线 mock provider 无视实际工具
+/// 列表(直接回放脚本),这条链路只能靠本测试(stub 收到的真实 request)
+/// 与运行时真实 LLM 测试暴露。
+#[tokio::test]
+async fn m4_dynamic_always_on_tool_visible_to_model() {
+    let registry = Arc::new(ModelRegistry::new());
+    let stub = Arc::new(StubClient::new(vec![
+        ChatEvent::MessageStart {
+            id: "m1".into(),
+            model: "stub-1".into(),
+        },
+        ChatEvent::ContentDelta("ok".into()),
+        ChatEvent::MessageStop,
+    ]));
+    registry.register_pool(
+        "stub",
+        CredentialPool {
+            entries: vec![PoolEntry {
+                client: stub.clone(),
+                label: "default".into(),
+                weight: 1,
+            }],
+        },
+    );
+
+    let m4 = make_m4_deps("tester", "You are a tester.");
+    // 模拟 bootstrap:把动态注册的子代理工具名补入 always-on 可见集。
+    m4.skills
+        .add_always_on_tools(vec!["call_explorer".to_string()]);
+    let cfg = AgentConfig::new("stub/m1", Path::new(".")).with_m4(m4);
+
+    let tools = Arc::new(ToolRegistry::default());
+    tools.register(Arc::new(NamedStubTool {
+        name: "call_explorer".into(),
+    }));
+    let thread = AgentThread::new(cfg, registry, tools, None, None);
+
+    let mut handle = thread.submit(make_sub("hi")).await;
+    while let Some(ev) = handle.next().await {
+        if matches!(ev.msg, EventMsg::TurnComplete(_)) {
+            break;
+        }
+    }
+
+    let req = stub.last_request.lock().clone().expect("model was called");
+    let tool_names: Vec<&str> = req
+        .tools
+        .iter()
+        .map(|t| match t {
+            reflect_llm::ToolSpec::Function { name, .. } => name.as_str(),
+        })
+        .collect();
+
+    assert!(
+        tool_names.contains(&"call_explorer"),
+        "动态补入 always-on 的子代理工具必须出现在模型请求 tools 数组;got {:?}",
+        tool_names
+    );
+}

@@ -50,7 +50,7 @@ reflect serve [--resume <uuid> | -c | -r <N>] [--agent <name>] [--plan-mode] ...
 |---|---|---|
 | `user_input` | `items: [{type:"text", text}]`, 可选 `thread_settings` | 提交一轮对话 |
 | `interrupt` | 可选 `child_id` | 打断当前 turn |
-| `tool_approval` | `id`, `decision: {type:"approve"\|"deny", reason?}` | 响应审批请求 |
+| `tool_approval` | `id`, `decision` | 响应审批请求。`decision` 是 `ReviewDecision`(serde snake_case):字符串 `"approve"` / `"approve_for_session"`,或对象 `{"deny":{"reason":"..."}}` |
 | `register_tools` | `tools: [{name, description, parameters}]` | **serve-local**,注册客户端自定义工具 |
 | `tool_execution_response` | `call_id`, `output` | **serve-local**,远程工具执行回执 |
 | `shutdown` | — | 优雅退出(见 §6) |
@@ -93,10 +93,20 @@ SDK 关心的核心变体(完整列表见 `event_msg/mod.rs`):
 | `turn_complete` | `turn_id`, `status`, `usage` | turn 终态(`ok`/`cancelled`/`aborted`/`error`) |
 | `turn_aborted` | `turn_id`, `reason` | turn 被打断(终态) |
 | `shutdown_complete` | — | 会话收尾完成(终态,见 §6) |
+| `submission_closed` | — | 该 submission 的 per-turn 通道已排空(终态,见下) |
 
 终态语义:turn 事件流以 `turn_complete` / `turn_aborted` 收尾。注意
 `shutdown_complete` **携带 shutdown 那条 submission 的 id**(不是全局
 `id=""`),订阅该 id 的消费者以此终结。
+
+`submission_closed`(v1.3 新增,additive 非破坏)serve 在每条 submission
+的 per-turn 通道排空后发出,**携带该 submission 的 id**。它让非 turn
+操作(`compact` / `rewind` / `set_permission_mode` / `cycle_permission_mode`
+/ goal / plan 等——这些操作没有 `turn_complete` 终态事件)的
+`submit()` 迭代器也能确定性收尾;客户端把 `submission_closed` 与
+`turn_complete` / `turn_aborted` 同等视为迭代器末尾。turn 类 submission
+先被 `turn_complete` / `turn_aborted` 终结,其 `submission_closed` 到达时
+监听者已摘除,被无害丢弃。
 
 ## 3.1 hooks 默认行为(serve 特有)
 

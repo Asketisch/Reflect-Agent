@@ -55,7 +55,7 @@ pub type EventMsgDiscriminant = &'static str;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EventMsg {
-    // 生命周期(5)
+    // 生命周期(6)
     /// 一个线程的首 turn 触发一次。id 字段会是 `EVENT_ID_NONE`。
     SessionConfigured(SessionConfiguredEvent),
     TurnStarted(TurnStartedEvent),
@@ -63,6 +63,12 @@ pub enum EventMsg {
     TurnAborted(TurnAbortedEvent),
     /// 批次十九:`Op::Rewind` 成功后发出(TUI 据此裁剪显示)。
     TurnRewound(TurnRewoundEvent),
+    /// v1.3 SDK:某条 submission 的 per-turn 通道已排空(该 submission
+    /// 处理完毕,不会再有任何事件)。`Event.id` 携带对应 submission id。
+    /// serve 在 drain task 结束时发出;非 turn 操作(compact / rewind /
+    /// 权限模式切换 / goal 等)没有 `TurnComplete` 之类的终态事件,
+    /// SDK 的 `submit_op` 迭代器靠本变体收尾,否则会永久阻塞。
+    SubmissionClosed,
     ShutdownComplete,
 
     // LLM 输出(4)
@@ -208,6 +214,7 @@ impl EventMsg {
             EventMsg::TurnComplete(_) => "turn_complete",
             EventMsg::TurnAborted(_) => "turn_aborted",
             EventMsg::TurnRewound(_) => "turn_rewound",
+            EventMsg::SubmissionClosed => "submission_closed",
             EventMsg::ShutdownComplete => "shutdown_complete",
             EventMsg::AgentMessage(_) => "agent_message",
             EventMsg::AgentMessageDelta(_) => "agent_message_delta",
@@ -315,6 +322,7 @@ mod tests {
         let _ = ApprovalPolicy::Auto; // 抑制该符号的 unused 警告
         let all = vec![
             EventMsg::ShutdownComplete,
+            EventMsg::SubmissionClosed,
             EventMsg::AgentMessage(AgentMessage {
                 text: String::new(),
             }),

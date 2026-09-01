@@ -87,7 +87,12 @@ def _text_output(text: str, *, is_error: bool = False) -> ToolOutput:
 
 def _is_terminal(msg: dict[str, Any]) -> bool:
     t = msg.get("type")
-    return t in ("turn_complete", "turn_aborted", "shutdown_complete")
+    # `submission_closed` 是 serve 在某条 submission 的 per-turn 通道排空后
+    # 发出的收尾标记(挂该 submission id)。非 turn 操作(compact / rewind /
+    # set_permission_mode 等)没有 turn_complete 之类终态事件,迭代器靠它
+    # 收尾;turn 类操作先被 turn_complete / turn_aborted 终结,本事件届时
+    # 已无监听者,被无害忽略。
+    return t in ("turn_complete", "turn_aborted", "shutdown_complete", "submission_closed")
 
 
 class ReflectAgent:
@@ -237,9 +242,14 @@ class ReflectAgent:
     def approve(
         self,
         approval_id: str,
-        decision: dict[str, Any],
+        decision: "str | dict[str, Any]",
     ) -> None:
-        """响应 `EventMsg::ApprovalRequest` / `HookApprovalRequest`。"""
+        """响应 `EventMsg::ApprovalRequest` / `HookApprovalRequest`。
+
+        `decision` 是 wire 形态的 `ReviewDecision`(serde snake_case):
+        `"approve"` / `"approve_for_session"`,或
+        `{"deny": {"reason": "..."}}`。透传 wire 值,不做形状转换。
+        """
         self._write_submission(
             _build_submission(
                 {"type": "tool_approval", "id": approval_id, "decision": decision}

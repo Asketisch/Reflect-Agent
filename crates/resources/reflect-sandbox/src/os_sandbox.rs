@@ -328,6 +328,9 @@ impl OsSandbox {
             (deny file-read* (subpath \"/Users/*/Library/Keychains\"))
             ;; 写:仅 workspace + 额外目录 + 临时目录
             {write_rules}
+            ;; /dev/null 放行:shell 里 `cmd 2>/dev/null` 是高频写法,重定向
+            ;; 失败时 sh 会直接中止该命令(静默跳过执行),必须显式允许。
+            (allow file-write* (path \"/dev/null\"))
             ;; 网络:{net_label}
             {net_rule}
             ;; 进程:允许 spawn/fork/exec(子进程继承沙箱)
@@ -366,10 +369,8 @@ impl OsSandbox {
         // 子进程根本不启动(表现为 stdout 空);或读到他人完整 profile,
         // workspace 写白名单错乱。pid + 原子自增序号保证互不踩踏。
         let seq = SEATBELT_PROFILE_SEQ.fetch_add(1, Ordering::Relaxed);
-        let tmp = std::env::temp_dir().join(format!(
-            "reflect-sandbox-{}-{seq}.sb",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("reflect-sandbox-{}-{seq}.sb", std::process::id()));
         std::fs::write(&tmp, &profile)?;
         Ok((
             "/usr/bin/sandbox-exec".to_string(),

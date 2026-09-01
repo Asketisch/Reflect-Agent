@@ -23,10 +23,10 @@
 
 use std::time::Instant;
 
+use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
-use pyo3::IntoPyObjectExt;
 use reflect::stream::EventStream;
 use reflect::{EventMsg, ReflectBuilder, Submission, TurnStatus};
 
@@ -165,9 +165,7 @@ fn run_turn_blocking(agent: reflect::Reflect, prompt: String) -> anyhow::Result<
 }
 
 /// 内部:消费 `EventStream` 直到终结事件。
-async fn drain_to_completion(
-    stream: &mut EventStream,
-) -> anyhow::Result<TurnOutcome> {
+async fn drain_to_completion(stream: &mut EventStream) -> anyhow::Result<TurnOutcome> {
     let mut text = String::new();
     let mut input_tokens: u32 = 0;
     let mut output_tokens: u32 = 0;
@@ -370,7 +368,10 @@ mod tests {
     #[test]
     fn turn_status_label_maps_all_variants() {
         assert_eq!(turn_status_label(&TurnStatus::Success), "success");
-        assert_eq!(turn_status_label(&TurnStatus::MaxIterations), "max_iterations");
+        assert_eq!(
+            turn_status_label(&TurnStatus::MaxIterations),
+            "max_iterations"
+        );
         assert_eq!(turn_status_label(&TurnStatus::Stopped), "stopped");
         assert_eq!(
             turn_status_label(&TurnStatus::TokenBudgetExceeded),

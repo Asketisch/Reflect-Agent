@@ -46,10 +46,10 @@ pub fn spawn_reload_task(
 ) {
     tokio::spawn(async move {
         let mut rx = watcher.subscribe();
-        // 跳过初始值(启动期间已应用)。
-        if rx.changed().await.is_err() {
-            return;
-        }
+        // 注意:不能再在循环前预调一次 `rx.changed()`「跳过初始值」——
+        // watch::Receiver 新订阅时已把当前值视为已见,那次预调会**吞掉
+        // 启动后第一次真实变更**,loop 里的 `changed()` 则永远等不到
+        // 第二次。直接进入循环:sender drop 时 `changed()` 返 Err 退出。
         // 在 reload 循环外持有 mutable 状态,每次迭代更新为最新 cfg。
         let mut prev = previous_cfg;
         while rx.changed().await.is_ok() {

@@ -21,6 +21,133 @@
 
 **0.0.1** · 33 crates · **2200+ tests** · Apache-2.0
 
+## Differentiators
+
+Most agent tools in this space ship as a **black-box CLI**: a single
+executable with an opaque internal loop that users can only drive as a
+terminal consumer. Reflect takes the opposite stance — an **embeddable,
+auditable, extensible agent runtime framework**:
+
+| Dimension | Typical agent CLI | Reflect |
+|-----------|-------------------|---------|
+| Product form | Single black-box executable, only "usable" | **Pure framework + multilingual entry points**: the `reflect` Rust lib facade (Builder + 60+ re-exports), PyO3 bindings, `reflect serve` + official Python / TS SDKs; the CLI is a thin add-on entry you can embed in your own product |
+| Control flow | Opaque internal loop, no intervention points | **Explicit 4-node StateGraph** (PreLoop → ModelCall → ToolExec → CheckStop): hand-written transitions, auditable; a Stop hook can veto completion and force the turn to continue |
+| Client protocol | Interaction logic locked inside the process | **Frozen Submission / Op / EventMsg wire protocol (v0)**: any client in any language drives the agent over the same protocol; adding variants never breaks existing SDKs |
+| Custom tools | Tools must live inside the CLI process or behind a separate MCP server | **Host-language functions registered directly as LLM tools**: the core dispatches execution requests; Python / TS handlers run locally and reply — tool code never enters the Rust process |
+| Tool-surface trimming | Fixed toolset, take it or leave it | **Config-driven tool trimming**: agent-definition frontmatter (`tools` allowlist / `disallowed_tools` denylist / `readonly`), `allowed_tools` per `[[subagents]]` in config.toml, or ToolRegistry add/remove in code; trimmed tools' schemas are never sent to the LLM — smaller tool surface, fewer misfires, fewer tokens |
+| Resident sessions | Cold start per invocation | **`reflect serve` resident session service**: one process = one resident AgentThread, in-memory state shared across turns + resume; SDKs embed it as a subprocess |
+| Multi-agent | Ad-hoc scripting | **First-class orchestration layer**: subagents (Tool-per-Agent), sequential / concurrent discussion, tasks / teams, DAG pipelines, goal mode |
+| Context management | Truncation or a single summarization pass | **4-tier compaction escalation**: microcompact → smart_prune → LLM summarize, upgraded stepwise by token threshold |
+| Extension surface | Scattered flags and config files | **hooks (8 events × 7 decisions) + Tool trait + MCP + LSP + plugins + skills** — layered, independent extension mechanisms |
+| Session auditing | Scattered logs, hard to replay | **JSONL rollout persistence** + resume + session index + full LLM call traces on disk |
+| Security boundary | Per-action human confirmation | **Permissions rule engine + multi-level sandbox + Plan mode** (write tools blocked until research completes and `ExitPlanMode` is called) |
+| Automation / CI | Parsing natural-language output | **JSONL stdout + stderr logs** are pipe-friendly (`reflect exec \| jq`); built-in mock provider keeps examples / e2e / SDK tests **fully offline** |
+| Runtime dependency | Depends on a host language runtime | **Single Rust binary** (MSRV 1.85), no external runtime |
+
+In one sentence: a typical agent CLI is a tool you *use*; Reflect is a
+runtime you *build agent products on* — the frozen protocol, the explicit
+StateGraph, cross-language tools, and the resident serve mode all serve
+that goal: inference and orchestration run in the Rust engine while your
+business logic stays in your own language and process.
+
+## Architecture Overview
+
+Clients (TUI / exec / serve / lib) drive the same engine over one frozen
+Submission / Event protocol; the six workspace layers depend strictly
+top-down, with protocol as the common contract for all layers:
+
+```mermaid
+flowchart TB
+    subgraph clients["Client entry points"]
+        direction LR
+        EXEC["reflect exec / CLI (17 subcommands)"]
+        SERVE["reflect serve + Python / TS SDKs"]
+        LIB["Rust lib facade / PyO3"]
+    end
+
+    subgraph layers["Workspace layers (deps flow top-down)"]
+        direction TB
+        RT["runtime — core / exec / cli / reflect / py<br/>AgentThread + StateGraph + entry points"]
+        IG["integrations — mcp / lsp / stream"]
+        ORCH["orchestration — subagent / discussion / task / pipeline / goal"]
+        RES["resources — config / permissions / rollout / telemetry / sandbox / plugin / ast"]
+        AB["abilities — llm / tools / hooks / skills / memory / agent-def / prompt / compact / recovery / notes / sanitize"]
+        PR["protocol — Submission / Op / EventMsg / RolloutRecorder (v0 frozen)"]
+        RT --> IG
+        IG --> ORCH
+        ORCH --> RES
+        RES --> AB
+        AB --> PR
+    end
+
+    subgraph external["External systems"]
+        direction LR
+        LLM["LLM providers<br/>OpenAI / Anthropic / Ollama"]
+        MCP["MCP servers"]
+        LSP["LSP servers"]
+    end
+
+    clients -->|"Submission / Event protocol"| RT
+    RT --> LLM
+    IG --> MCP
+    IG --> LSP
+```
+
+Each turn is driven by `submission_loop` through the 4-node StateGraph,
+with hand-written, auditable transitions:
+
+```mermaid
+flowchart LR
+    SUB(["Submission enqueued"]) --> PRE
+    PRE["PreLoop<br/>compaction escalation / pre-hooks"]
+    PRE --> MC["ModelCall<br/>SSE streaming LLM call"]
+    MC -->|"tool calls issued"| TE["ToolExec<br/>approval gate → run tools"]
+    TE -->|"results appended"| PRE
+    MC -->|"no tool calls"| CS["CheckStop"]
+    CS -->|"Stop hook veto"| PRE
+    CS -->|"pass"| DONE(["TurnComplete"])
+```
+
+### Workspace layers (dependencies flow top-down)
+
+| Layer | Crates | Responsibility |
+|-------|--------|----------------|
+| `protocol/` | reflect-protocol | Submission / Op / EventMsg / Item + RolloutRecorder trait. The common contract for all layers |
+| `abilities/` | llm, tools, hooks, skills, memory, agent-def, prompt, compact, recovery, notes, sanitize | Capability primitives: ModelClient trait + providers, Tool trait + built-in tools, HookEngine, compaction escalation, etc. |
+| `resources/` | config, permissions, plugin, rollout, telemetry, sandbox, ast | Config hot-reload, permission rules, plugin lifecycle, JSONL persistence, tree-sitter code search |
+| `orchestration/` | subagent, discussion, task, pipeline, goal | Multi-agent orchestration: subagent factory (in-flight ≤ 16), discussion orchestration, tasks/teams, DAG pipelines, goal mode |
+| `integrations/` | mcp, lsp, integration, stream | MCP client (stdio/streamable-http), LSP, streaming session backend |
+| `runtime/` | core, exec, cli, reflect, py | AgentThread + StateGraph, headless, CLI entry, lib facade (60+ re-exports + Builder), PyO3 bindings |
+
+### Core data flow
+
+- `AgentThread` (reflect-core) consumes `Submission`s (mpsc channel);
+  `submission_loop` drives the 4-node `StateGraph`:
+  **PreLoop → ModelCall → (ToolExec → PreLoop)\* → CheckStop**.
+  When the model stops issuing tool calls, CheckStop ends the turn
+  (a Stop hook may veto and force the turn to continue).
+- `NodeContext` carries per-turn dependencies: model registry, RoutingPolicy,
+  HookEngine, ToolExecutionQueue, event channel, CancellationToken,
+  approval gates.
+- Clients (TUI / exec / serve / lib) all communicate through the same
+  Submission/Event protocol; in headless mode Events stream to stdout as
+  JSONL while tracing logs go to stderr (`reflect exec | jq` stays clean);
+  `reflect serve` reuses the same protocol as a resident service that the
+  SDKs wrap (remote tool requests/responses, approvals, etc. are all
+  protocol-level Op / EventMsg variants).
+
+### Key design decisions
+
+- **Protocol v0 is frozen**: adding Op/EventMsg variants is non-breaking; existing variants never change
+- **JSONL to stdout, logs to stderr**: `reflect exec | jq` is never corrupted
+- **ToolError lives in reflect-protocol**: breaks the tools ↔ hooks dependency cycle
+- **StateGraph via enum + match**: fixed 4-node structure, no petgraph
+- **Error handling**: `thiserror` for library crates, `anyhow` for application layers (exec/cli)
+- **serve is an embedding entry, not a dev assistant**: built-in hooks are disabled by default (exec / TUI keep "unconfigured = all enabled"), so Stop hooks like `verification` never run tests in the host's cwd
+
+See [docs/architecture.md](docs/architecture.md) (Chinese) for the full
+33-crate directory tree and per-node StateGraph responsibilities.
+
 ## Features
 
 | Capability | Implementation |
@@ -28,10 +155,11 @@
 | 4-node StateGraph | PreLoop → ModelCall → ToolExec → CheckStop self-loop |
 | OpenAI + Anthropic + Ollama | SSE streaming, prompt caching, extended thinking, local NDJSON |
 | 23 built-in tools | bash / read / write / edit / grep / glob / web_fetch / web_search / notebook_edit / image_view / task tools + Plan-mode control plane, etc. |
+| Trimmable tool surface | Three layers: agent-definition frontmatter (`tools` / `disallowed_tools` / `readonly`, activated via `--agent`) → `allowed_tools` per `[[subagents]]` in config.toml → code-level `unregister` / `register_except`; trimmed tools' schemas never reach the prompt (see [docs/architecture.md](docs/architecture.md), Chinese) |
 | Cross-language custom tools | Clients (Python / TS) register local functions as LLM tools; the core dispatches execution requests and receives results back |
 | 8 hook events × 7 decisions | PreToolUse / PostToolUse / PostToolUseFailure / Stop / SessionStart + 3 task-lifecycle events |
 | 4-tier context compaction | microcompact → smart_prune → LLM summarize (escalation) |
-| Subagents | Tool-per-Agent, nesting depth ≤ 3 |
+| Subagents | Tool-per-Agent, concurrent in-flight ≤ 16 (shared parent/child counter) |
 | Multi-agent orchestration | discussion (sequential/concurrent), task / team, DAG pipelines, goal mode |
 | Python / TypeScript SDKs | Pure stdlib / zero native dependencies; spawn `reflect serve` over the JSONL stdio protocol |
 | Persistence | JSONL rollout + resume + session index + LLM trace recording |
@@ -86,44 +214,38 @@ EOF
 Offline development: examples and e2e scripts use `REFLECT_MODEL=mock` to skip
 real LLM network calls.
 
-## Architecture
+## Multilingual SDKs (Python / TypeScript)
 
-### Workspace layers (dependencies flow top-down)
+Script projects embed the framework via `reflect serve` (a resident stdio
+JSONL session: one process = one resident AgentThread, in-memory state
+shared across turns) plus the official SDKs. The standout capability:
+**register host-language functions as LLM-callable custom tools**:
 
-| Layer | Crates | Responsibility |
-|-------|--------|----------------|
-| `protocol/` | reflect-protocol | Submission / Op / EventMsg / Item + RolloutRecorder trait. The common contract for all layers |
-| `abilities/` | llm, tools, hooks, skills, memory, agent-def, prompt, compact, recovery, notes, sanitize | Capability primitives: ModelClient trait + providers, Tool trait + built-in tools, HookEngine, compaction escalation, etc. |
-| `resources/` | config, permissions, plugin, rollout, telemetry, sandbox, ast | Config hot-reload, permission rules, plugin lifecycle, JSONL persistence, tree-sitter code search |
-| `orchestration/` | subagent, discussion, task, pipeline, goal | Multi-agent orchestration: subagent factory (depth ≤ 3), discussion orchestration, tasks/teams, DAG pipelines, goal mode |
-| `integrations/` | mcp, lsp, integration, stream | MCP client (stdio/streamable-http), LSP, streaming session backend |
-| `runtime/` | core, exec, cli, reflect, py | AgentThread + StateGraph, headless, CLI entry, lib facade (60+ re-exports + Builder), PyO3 bindings |
+```python
+from reflect import ReflectAgent, ToolOutput, ContentBlock
 
-### Core data flow
+agent = ReflectAgent.spawn()
 
-- `AgentThread` (reflect-core) consumes `Submission`s (mpsc channel);
-  `submission_loop` drives the 4-node `StateGraph`:
-  **PreLoop → ModelCall → (ToolExec → PreLoop)\* → CheckStop**.
-  When the model stops issuing tool calls, CheckStop ends the turn
-  (a Stop hook may veto and force the turn to continue).
-- `NodeContext` carries per-turn dependencies: model registry, RoutingPolicy,
-  HookEngine, ToolExecutionQueue, event channel, CancellationToken,
-  approval gates.
-- Clients (TUI / exec / serve / lib) all communicate through the same
-  Submission/Event protocol; in headless mode Events stream to stdout as
-  JSONL while tracing logs go to stderr (`reflect exec | jq` stays clean);
-  `reflect serve` reuses the same protocol as a resident service that the
-  SDKs wrap (remote tool requests/responses, approvals, etc. are all
-  protocol-level Op / EventMsg variants).
+def get_weather(args):
+    return ToolOutput(
+        content=[ContentBlock(type="text", text=f"{args['city']}: sunny")],
+        is_error=False, metadata={}, elapsed_ms=0,
+    )
 
-### Key design decisions
+agent.register_tool("get_weather", "Get weather for a city",
+                    {"type": "object",
+                     "properties": {"city": {"type": "string"}},
+                     "required": ["city"]},
+                    get_weather)          # local function -> LLM tool
+print(agent.prompt("What's the weather in Beijing?"))   # aggregates deltas
+agent.close()
+```
 
-- **Protocol v0 is frozen**: adding Op/EventMsg variants is non-breaking; existing variants never change
-- **JSONL to stdout, logs to stderr**: `reflect exec | jq` is never corrupted
-- **ToolError lives in reflect-protocol**: breaks the tools ↔ hooks dependency cycle
-- **StateGraph via enum + match**: fixed 4-node structure, no petgraph
-- **Error handling**: `thiserror` for library crates, `anyhow` for application layers (exec/cli)
-- **serve is an embedding entry, not a dev assistant**: built-in hooks are disabled by default (exec / TUI keep "unconfigured = all enabled"), so Stop hooks like `verification` never run tests in the host's cwd
+The TypeScript API is isomorphic (`ReflectAgent.spawn()` / `registerTool` /
+`prompt`). See **[docs/sdk.md](docs/sdk.md)** (Chinese) for the full
+integration guide (both languages, the remote-tool execution flow, the
+`submit` / `interrupt` / `approve` advanced surface, offline debugging);
+the wire protocol spec is [`sdks/PROTOCOL.md`](sdks/PROTOCOL.md).
 
 ## CLI Subcommands
 
@@ -196,84 +318,6 @@ leave Plan mode.
 reflect exec --plan-mode "refactor X"   # headless research (read-only)
 ```
 
-## Multilingual SDKs (Python / TypeScript)
-
-Script projects can drive the entire framework without writing any Rust:
-`reflect serve` provides a resident stdio JSONL session (one process =
-one resident AgentThread, in-memory state shared across turns, resume
-supported), and the official SDKs wrap it with idiomatic APIs for each
-language — **inference and orchestration run in the Rust engine, business
-logic stays in the host language**.
-
-The standout capability is **cross-language custom tool registration**:
-declare a Python / TS function as a tool (JSON Schema parameters); when
-the LLM calls it, the core dispatches a `tool_execution_request`, the SDK
-executes the handler locally and returns the result — tool implementations
-never enter the Rust process.
-
-**Python** (`sdks/python`, pure stdlib with zero dependencies; binary
-lookup: `REFLECT_BIN` env → `reflect` on PATH):
-
-```python
-from reflect import ReflectAgent, ToolOutput, ContentBlock
-
-agent = ReflectAgent.spawn()
-
-def get_weather(args):
-    return ToolOutput(
-        content=[ContentBlock(type="text", text=f"{args['city']}: sunny")],
-        is_error=False, metadata={}, elapsed_ms=0,
-    )
-
-# local function -> a tool the LLM can call
-agent.register_tool("get_weather", "Get weather for a city",
-                    {"type": "object",
-                     "properties": {"city": {"type": "string"}},
-                     "required": ["city"]},
-                    get_weather)
-
-for ev in agent.submit("What's the weather in Beijing?"):  # blocking iterator, incremental events
-    if ev["msg"]["type"] == "agent_message_delta":
-        print(ev["msg"]["delta"], end="", flush=True)
-    if ev["msg"]["type"] == "turn_complete":
-        break
-agent.close()
-```
-
-**TypeScript** (`sdks/typescript`, pure TS with zero runtime dependencies;
-isomorphic API):
-
-```ts
-import { ReflectAgent } from 'reflect-agent';
-
-const agent = await ReflectAgent.spawn();
-await agent.registerTool(
-  'get_weather', 'Get weather for a city',
-  { type: 'object', properties: { city: { type: 'string' } }, required: ['city'] },
-  (args) => ({
-    content: [{ type: 'text', text: `${args.city}: sunny` }],
-    is_error: false, metadata: {}, elapsed_ms: 0,
-  }),
-);
-
-const text = await agent.prompt("What's the weather in Beijing?");  // aggregates deltas
-await agent.close();
-```
-
-Advanced surface of both SDKs: `submit()` returns an event stream filtered
-by submission id (concurrent turns don't interfere), `interrupt()` aborts,
-`approve()` answers approval requests; unknown protocol event types
-degrade gracefully — adding variants to the framework never breaks the
-SDKs.
-
-- Wire protocol spec: [`sdks/PROTOCOL.md`](sdks/PROTOCOL.md) (handshake /
-  tool execution flow / approval replies / shutdown semantics)
-- Per-language details: [`sdks/python/README.md`](sdks/python/README.md) ·
-  [`sdks/typescript/README.md`](sdks/typescript/README.md)
-- Offline debugging: `REFLECT_MODEL=mock` (+ `REFLECT_MOCK_SCRIPT` for
-  scripted replies) needs no API key; `./scripts/sdk_smoke.sh` runs both
-  SDKs end-to-end against the real binary
-
 ## Examples
 
 | Example | Demonstrates | Command |
@@ -304,68 +348,16 @@ SDKs.
 | `REFLECT_SANDBOX_*` | no | Sandbox policy (`STRICT` / `OS_LEVEL` / `WRITABLE`) |
 | `RUST_LOG` | no | tracing filter (default `warn,reflect=info`) |
 
-## Project Structure
-
-```
-crates/
-├── protocol/               common contract
-│   └── reflect-protocol        Submission / Op / EventMsg + RolloutRecorder
-├── abilities/              capability primitives
-│   ├── reflect-llm             ModelClient trait + OpenAI/Anthropic/Ollama + pricing
-│   ├── reflect-tools           Tool trait + 23 built-in tools + ToolExecutionQueue
-│   ├── reflect-hooks           HookEngine + 8 events + 7 decisions
-│   ├── reflect-skills          SKILL.md scanning + loading
-│   ├── reflect-memory          3-scope memory (Project/User/Session)
-│   ├── reflect-agent-def       Markdown frontmatter agent definitions
-│   ├── reflect-prompt          layered prompts + cache_control injection
-│   ├── reflect-compact         4-tier compaction strategy escalation
-│   ├── reflect-recovery        failure recovery
-│   ├── reflect-notes           notes
-│   └── reflect-sanitize        output sanitization
-├── resources/              config / permissions / persistence
-│   ├── reflect-config          unified TOML config + hot reload
-│   ├── reflect-permissions     permission rule engine
-│   ├── reflect-plugin          plugin lifecycle
-│   ├── reflect-rollout         JSONL persistence + session index
-│   ├── reflect-telemetry       observability
-│   ├── reflect-sandbox         multi-level sandbox
-│   └── reflect-ast             tree-sitter code search
-├── orchestration/          multi-agent orchestration
-│   ├── reflect-subagent        Tool-per-Agent subagent factory (depth ≤ 3)
-│   ├── reflect-discussion      multi-agent discussion orchestration
-│   ├── reflect-task            structured tasks / teams
-│   ├── reflect-pipeline        DAG pipelines
-│   └── reflect-goal            goal mode
-├── integrations/           external protocol integrations
-│   ├── reflect-mcp             MCP client (stdio / streamable-http)
-│   ├── reflect-lsp             LSP integration
-│   ├── reflect-integration     integration glue layer
-│   └── reflect-stream          streaming session backend
-└── runtime/                runtime and entry points
-    ├── reflect-core            AgentThread + 4-node StateGraph
-    ├── reflect-exec            headless + JSONL stdout + resume + serve
-    ├── reflect-cli             top-level CLI routing (single reflect binary)
-    ├── reflect                 lib facade (60+ re-exports + Builder)
-    └── reflect-py              PyO3 Python bindings (skeleton)
-sdks/                          multilingual SDKs
-├── PROTOCOL.md                    serve wire protocol spec
-├── python/                        pure-stdlib Python SDK (reflect-agent)
-└── typescript/                    pure-TS npm SDK (reflect-agent)
-```
-
-The `reflect` binary is produced by the `reflect-cli` crate and is this
-repository's **thin headless entry**; framework consumers' primary
-interface is the `reflect` library facade (Builder / re-exports).
-
 ## Documentation
 
 | Document | Contents |
 |----------|----------|
+| [`docs/architecture.md`](docs/architecture.md) | Architecture deep dive (Chinese): full directory tree, core data flow, per-node duties, design decisions |
+| [`docs/sdk.md`](docs/sdk.md) | SDK integration guide (Chinese): serve mode, Python / TS examples, remote-tool flow, offline debugging |
 | [`AGENTS.md`](AGENTS.md) | Development guide: commands, architecture layers, project conventions |
 | [`sdks/PROTOCOL.md`](sdks/PROTOCOL.md) | serve wire protocol spec (shared implementation basis for the SDKs) |
 | [`sdks/python/README.md`](sdks/python/README.md) | Python SDK usage and installation |
 | [`sdks/typescript/README.md`](sdks/typescript/README.md) | TypeScript SDK usage and installation |
-| [`SECURITY.md`](SECURITY.md) | Security policy and vulnerability reporting |
 
 ## Development
 
