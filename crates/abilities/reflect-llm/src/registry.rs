@@ -40,6 +40,10 @@ pub struct ModelRegistry {
     /// provider → weighted round-robin 游标(`Arc<AtomicUsize>` 允许
     /// 读锁外 fetch_add)。
     cursors: RwLock<HashMap<String, Arc<AtomicUsize>>>,
+    /// provider → preferred label(`[active].credential` 钉住的条目)。
+    /// 命中的条目可用时 `next_for` 始终优先派位;不存在/cooldown 中/
+    /// 已被整池替换时自然回落加权轮询。
+    preferred: RwLock<HashMap<String, String>>,
 }
 
 impl Default for ModelRegistry {
@@ -48,6 +52,7 @@ impl Default for ModelRegistry {
             pools: RwLock::new(HashMap::new()),
             cooldowns: RwLock::new(HashMap::new()),
             cursors: RwLock::new(HashMap::new()),
+            preferred: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -93,14 +98,36 @@ impl ModelRegistry {
     /// 注册完整的 credential pool。`register_pool` 是幂等的:同 provider
     /// 再调一次会整池替换,适用于 `apply_to_registry` 整段重写场景。
     ///
-    /// 同时确保游标存在(避免 `next_for` 第一次走的锁升级)。
+    /// 同时确保游标存在(避免 `next_for` 第一次走的锁升级),并清掉该
+    /// provider 的旧 preferred —— 整池替换后旧 label 可能已不存在,钉住
+    /// 语义由调用方(`apply_to_registry`)基于新配置重新施加。
     pub fn register_pool(&self, name: impl Into<String>, pool: CredentialPool) {
         let name = name.into();
         self.pools.write().insert(name.clone(), pool);
         self.cursors
             .write()
-            .entry(name)
+            .entry(name.clone())
             .or_insert_with(|| Arc::new(AtomicUsize::new(0)));
+        self.preferred.write().remove(&name);
+    }
+
+    /// 钉住 provider 池中的某个 label(`[active].credential`)。label 未
+    /// 命中池内条目时静默忽略 —— `next_for` 找不到就回落加权轮询,不让
+    /// 手写错的 label 阻断请求。整池替换(`register_pool`)会清掉钉住。
+    pub fn set_preferred(&self, provider: &str, label: &str) {
+        self.preferred
+            .write()
+            .insert(provider.to_string(), label.to_string());
+    }
+
+    /// 读取 provider 当前的钉住 label(诊断 / 测试用)。
+    pub fn preferred_label(&self, provider: &str) -> Option<String> {
+        self.preferred.read().get(provider).cloned()
+    }
+
+    /// 解除 provider 的钉住(切回全池加权轮询)。
+    pub fn clear_preferred(&self, provider: &str) {
+        self.preferred.write().remove(provider);
     }
 
     /// 整 provider 段移除(给 reload 用来整段重写)。同时清掉 cooldown
@@ -109,6 +136,7 @@ impl ModelRegistry {
         self.pools.write().remove(name);
         self.cooldowns.write().remove(name);
         self.cursors.write().remove(name);
+        self.preferred.write().remove(name);
     }
 
     /// 在已有 pool 上 upsert 单 credential:`label` 存在则替换,否则追加。
@@ -133,8 +161,13 @@ impl ModelRegistry {
         if let Some(pool) = pools.get_mut(name) {
             pool.entries.retain(|e| e.label != label);
         }
+        drop(pools);
         if let Some(cd_map) = self.cooldowns.write().get_mut(name) {
             cd_map.remove(label);
+        }
+        // 删的正是钉住条目时一并解除,避免残留永不命中的 preferred。
+        if self.preferred.read().get(name).is_some_and(|p| p == label) {
+            self.clear_preferred(name);
         }
     }
 
@@ -203,6 +236,24 @@ impl ModelRegistry {
 
         if available.is_empty() {
             return None;
+        }
+
+        // v1.5:[active].credential 钉住 —— preferred 条目可用(不在
+        // cooldown / exclude)时始终优先派位,不消耗轮询游标;它进
+        // cooldown 后不在 `available` 里,其余条目自然按权重轮询接管,
+        // 即"钉住主条目 + 池内 failover"语义。label 未命中池内条目时
+        // 静默回落轮询。
+        if let Some(preferred) = self.preferred.read().get(provider).cloned() {
+            if let Some(&idx) = available
+                .iter()
+                .find(|&&i| pool.entries[i].label == preferred)
+            {
+                let entry = &pool.entries[idx];
+                return Some(NextClient {
+                    client: entry.client.clone(),
+                    label: entry.label.clone(),
+                });
+            }
         }
 
         // 计算总权重(忽略 weight=0 的 entry,但上面已过滤掉 cooldown,
@@ -739,5 +790,75 @@ mod tests {
 
         // 真实 builtin client 的 override 验证见 providers/*/tests 模块,
         // 不在本 registry 单元测范围。
+    }
+
+    // ── v1.5:[active].credential 钉住(preferred label)──────────────
+
+    /// preferred 条目可用时始终优先派位,且不消耗轮询游标。
+    #[test]
+    fn preferred_label_pins_selection() {
+        let r = ModelRegistry::new();
+        r.register_pool(
+            "anthropic",
+            pool(vec![entry("default", 1), entry("minimax", 1)]),
+        );
+        r.set_preferred("anthropic", "minimax");
+
+        for _ in 0..5 {
+            let nc = r.next_for("anthropic/x", &[]).unwrap();
+            assert_eq!(nc.label, "minimax", "钉住后必须始终命中 minimax");
+        }
+        // 游标未被钉住派位消耗:解除钉住后从池首重新开始。
+        r.clear_preferred("anthropic");
+        assert_eq!(r.next_for("anthropic/x", &[]).unwrap().label, "default");
+    }
+
+    /// preferred 进 cooldown 后回落其余条目的加权轮询(failover);
+    /// cooldown 过期前钉住条目不被选中,恢复后重新被钉住。
+    #[test]
+    fn preferred_in_cooldown_falls_over_to_rest() {
+        let r = ModelRegistry::new();
+        r.register_pool(
+            "anthropic",
+            pool(vec![entry("minimax", 1), entry("backup", 1)]),
+        );
+        r.set_preferred("anthropic", "minimax");
+        r.mark_cooldown("anthropic", "minimax", Duration::from_secs(60), CooldownReason::Auth);
+
+        assert_eq!(r.next_for("anthropic/x", &[]).unwrap().label, "backup");
+        assert_eq!(r.next_for("anthropic/x", &[]).unwrap().label, "backup");
+    }
+
+    /// preferred label 未命中池内条目 → 静默回落全池轮询。
+    #[test]
+    fn unknown_preferred_label_falls_back_to_round_robin() {
+        let r = ModelRegistry::new();
+        r.register_pool("openai", pool(vec![entry("a", 1), entry("b", 1)]));
+        r.set_preferred("openai", "ghost");
+        let labels: Vec<String> = (0..4)
+            .map(|_| r.next_for("openai/x", &[]).unwrap().label)
+            .collect();
+        assert!(labels.contains(&"a".to_string()) && labels.contains(&"b".to_string()));
+    }
+
+    /// 整池替换(register_pool)清掉旧 preferred;remove_credential 删除
+    /// 钉住条目时一并解除。
+    #[test]
+    fn preferred_cleared_on_pool_replace_and_credential_remove() {
+        let r = ModelRegistry::new();
+        r.register_pool("anthropic", pool(vec![entry("a", 1)]));
+        r.set_preferred("anthropic", "a");
+        r.register_pool("anthropic", pool(vec![entry("b", 1)]));
+        assert_eq!(r.preferred_label("anthropic"), None, "整池替换须清钉住");
+
+        r.register_pool("openai", pool(vec![entry("x", 1), entry("y", 1)]));
+        r.set_preferred("openai", "x");
+        r.remove_credential("openai", "x");
+        assert_eq!(r.preferred_label("openai"), None, "删除钉住条目须解除");
+
+        // unregister 同样清理。
+        r.set_preferred("anthropic", "b");
+        r.unregister("anthropic");
+        assert_eq!(r.preferred_label("anthropic"), None);
     }
 }

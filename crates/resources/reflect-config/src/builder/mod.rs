@@ -3,12 +3,22 @@
 //! - 若 `[anthropic].api_key` 缺,回退到 env `ANTHROPIC_API_KEY`。
 //! - 若 `[openai].api_key` 缺,回退到 env `OPENAI_API_KEY`。
 //! - `active_provider()` 优先级:`REFLECT_PROVIDER` env > TOML `[active].provider` > 第一个非空 section。
+//! - `active_credential()`:`[active].credential` 钉住 active provider
+//!   凭证池中的条目;`apply_to_registry` 把它注册为 registry 的
+//!   preferred label —— 该条目健康则始终优先派位,其余条目仅在其
+//!   cooldown 时作 failover。
 //!
 //! v1.0 多 Provider 路由:
 //! - `[[<provider>.credentials]]` 数组非空 → 展开为 `CredentialPool`;
 //! - 数组空 + 单值 `api_key` 非空(env 兜底也算)→ wrap 为
 //!   `label = "default"` 的单 entry pool,行为与 v0.x 完全一致;
 //! - 都空 → 该 provider 不注册。
+//!
+//! model 解析(`resolve_model`)是**诚实**的:env `REFLECT_MODEL` >
+//! 被钉住条目的 `model` > `[<provider>].model` > `None`。未显式配置时
+//! 返回 `None` 而非编造内置默认 —— 请求打向第三方兼容端点(stepfun /
+//! MiniMax 等)时,编造的官方模型名只会产生更难诊断的远端错误,不如让
+//! 缺失在配置层就可见。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -41,10 +51,6 @@ const ENV_OPENAI_API_KEY: &str = "OPENAI_API_KEY";
 /// 向远端 server,或 `OLLAMA_API_KEY` 带 Bearer。
 const ENV_OLLAMA_HOST: &str = "OLLAMA_HOST";
 const ENV_OLLAMA_API_KEY: &str = "OLLAMA_API_KEY";
-
-const DEFAULT_ANTHROPIC_MODEL: &str = "claude-3-5-sonnet-latest";
-const DEFAULT_OPENAI_MODEL: &str = "gpt-4o";
-const DEFAULT_OLLAMA_MODEL: &str = "llama3.2";
 
 impl ReflectConfig {
     /// 构造一个新的 `ModelRegistry`,把本配置中所有非空 provider 注册进去。
@@ -90,6 +96,13 @@ impl ReflectConfig {
                     }],
                 },
             );
+        }
+        // v1.5:[active].credential 钉住 —— active provider 池内同名条目
+        // 健康则始终优先派位,其余条目只在其 cooldown 时作 failover。
+        // label 未命中池内条目时 registry 侧静默忽略(全池 round-robin),
+        // 不让一个手写错的 label 阻断启动。
+        if let (Some(provider), Some(label)) = (self.active_provider(), self.active_credential()) {
+            registry.set_preferred(provider, &label);
         }
         Ok(())
     }
@@ -150,57 +163,103 @@ impl ReflectConfig {
         None
     }
 
-    /// 给定 provider 选出最终 model 字符串:env > TOML section > 内置默认值。
-    pub fn model_for(&self, provider: &str) -> String {
-        self.model_for_inner(provider, std::env::var(ENV_REFLECT_MODEL).ok().as_deref())
+    /// `[active].credential` —— 钉住 active provider 凭证池中的条目 label。
+    /// `None` = 未钉住(全池加权 round-robin)。顶层 `[<provider>].api_key`
+    /// 隐式条目的 label 固定为 `"default"`,钉它就显式写
+    /// `credential = "default"`。
+    pub fn active_credential(&self) -> Option<String> {
+        self.active
+            .credential
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
     }
 
-    /// `model_for` 的纯函数核心(env 值由调用方注入,便于单测)。
-    fn model_for_inner(&self, provider: &str, env_model: Option<&str>) -> String {
+    /// 给定 provider 显式解析 model:env `REFLECT_MODEL` > 被钉住条目的
+    /// `model` > `[<provider>].model` 段级覆盖。
+    ///
+    /// `None` = 未显式配置任何 model。调用方应如实上报缺失(报错 /
+    /// UI 显示"未配置"),而非回落内置默认 —— 默认模型名打向第三方
+    /// 兼容端点只会得到更难诊断的远端错误。
+    pub fn resolve_model(&self, provider: &str) -> Option<String> {
+        self.resolve_model_inner(provider, std::env::var(ENV_REFLECT_MODEL).ok().as_deref())
+    }
+
+    /// `resolve_model` 的纯函数核心(env 值由调用方注入,便于单测)。
+    fn resolve_model_inner(&self, provider: &str, env_model: Option<&str>) -> Option<String> {
         // v1.3 SDK:mock provider 的 model 取 `mock/` 前缀后的部分
         // (`REFLECT_MODEL=mock/mock-1` → `mock-1`),裸 `mock` / 未设 →
         // `mock-1`。不能走下面的通用 env 分支,否则会把完整 spec
         // (`mock/mock-1`)原样当 model 名拼出 `mock/mock/mock-1`。
+        // mock 是显式 opt-in 的离线 provider,内置 model 名属于其契约
+        // 的一部分,不属于"编造默认"。
         if provider == "mock" {
             if let Some(m) = env_model.map(str::trim) {
                 if let Some(stripped) = m.strip_prefix("mock/") {
                     if !stripped.is_empty() {
-                        return stripped.to_string();
+                        return Some(stripped.to_string());
                     }
                 }
             }
-            return reflect_llm::DEFAULT_MOCK_MODEL.to_string();
+            return Some(reflect_llm::DEFAULT_MOCK_MODEL.to_string());
         }
-        if let Some(m) = env_model.filter(|m| !m.is_empty()) {
-            return m.to_string();
+        if let Some(m) = env_model.map(str::trim).filter(|m| !m.is_empty()) {
+            return Some(m.to_string());
         }
-        let section_override = match provider {
+        // 被钉住的凭证条目自带 model 时优先取用:它比段级覆盖更具体
+        // (描述的就是当前 plan 本身);钉住只对 active provider 生效。
+        if self.active_provider() == Some(provider) {
+            if let Some(label) = self.active_credential() {
+                let entry_model = self
+                    .credentials_of(provider)
+                    .and_then(|creds| creds.iter().find(|c| c.label == label))
+                    .and_then(|c| c.model.clone());
+                if let Some(m) = entry_model.filter(|m| !m.trim().is_empty()) {
+                    return Some(m);
+                }
+            }
+        }
+        let section_override = self.section_model_of(provider);
+        if let Some(m) = section_override.filter(|m| !m.trim().is_empty()) {
+            return Some(m);
+        }
+        None
+    }
+
+    /// provider 段的 `credentials` 数组(mock 无段,返回 `None`)。
+    fn credentials_of(&self, provider: &str) -> Option<&Vec<CredentialConfig>> {
+        match provider {
+            "anthropic" => self.anthropic.as_ref().map(|s| &s.credentials),
+            "openai" => self.openai.as_ref().map(|s| &s.credentials),
+            "ollama" => self.ollama.as_ref().map(|s| &s.credentials),
+            _ => None,
+        }
+    }
+
+    /// provider 段的段级 `model` 覆盖。
+    fn section_model_of(&self, provider: &str) -> Option<String> {
+        match provider {
             "anthropic" => self.anthropic.as_ref().and_then(|s| s.model.clone()),
             "openai" => self.openai.as_ref().and_then(|s| s.model.clone()),
             "ollama" => self.ollama.as_ref().and_then(|s| s.model.clone()),
             _ => None,
-        };
-        if let Some(m) = section_override {
-            return m;
-        }
-        match provider {
-            "anthropic" => DEFAULT_ANTHROPIC_MODEL.to_string(),
-            "openai" => DEFAULT_OPENAI_MODEL.to_string(),
-            "ollama" => DEFAULT_OLLAMA_MODEL.to_string(),
-            _ => DEFAULT_OPENAI_MODEL.to_string(),
         }
     }
 
-    /// 当前 active provider 的完整 spec(`"anthropic/claude-3-5-sonnet-latest"`)。
-    /// `None` 表示未配置任何可用 provider。
+    /// 当前 active provider 的完整 spec(`"anthropic/<model>"`)。
+    /// `None` = 未配置 provider,或 provider 已配置但没有任何显式 model
+    /// (env / 被钉住条目 / 段级都没有)—— 调用方据此如实显示"未配置
+    /// 模型",而不是展示一个编造出来的默认模型。
     ///
     /// 用途:`reflect-exec::handle_reload` 拿到 `old_cfg` 与 `new_cfg` 后,
     /// 对比两侧 `resolved_model_spec()` 的差异决定是否更新
-    /// `AgentConfig.model`。集中在这里便于单测覆盖 env > TOML > default
-    /// 优先级和 provider 切换场景。
+    /// `AgentConfig.model`。集中在这里便于单测覆盖 env > 钉住条目 >
+    /// 段级优先级和 provider 切换场景。
     pub fn resolved_model_spec(&self) -> Option<String> {
         let provider = self.active_provider()?;
-        Some(format!("{provider}/{}", self.model_for(provider)))
+        let model = self.resolve_model(provider)?;
+        Some(format!("{provider}/{model}"))
     }
 
     /// v1.0 多 Provider 路由:从 `[routing]` 段构建 `RoutingPolicy`。
@@ -303,6 +362,7 @@ fn build_anthropic_pool(section: &AnthropicSection) -> Result<Option<CredentialP
             label: "default".to_string(),
             api_key: key,
             base_url: section.base_url.clone(),
+            model: None,
             weight: 1,
             cooldown_override_secs: None,
             quota: None,
@@ -347,6 +407,7 @@ fn build_openai_pool(section: &OpenAISection) -> Result<Option<CredentialPool>, 
             label: "default".to_string(),
             api_key: key,
             base_url: section.base_url.clone(),
+            model: None,
             weight: 1,
             cooldown_override_secs: None,
             quota: None,
@@ -422,6 +483,7 @@ fn build_ollama_pool(
             label: "default".to_string(),
             api_key: merged_api_key.clone().unwrap_or_default(),
             base_url: merged_base_url.clone(),
+            model: None,
             weight: 1,
             cooldown_override_secs: None,
             quota: None,
@@ -507,6 +569,7 @@ fn build_subagent_anthropic_pool(
             label: "default".to_string(),
             api_key: key,
             base_url: section.base_url.clone(),
+            model: None,
             weight: 1,
             cooldown_override_secs: None,
             quota: None,
@@ -559,6 +622,7 @@ fn build_subagent_openai_pool(
             label: "default".to_string(),
             api_key: key,
             base_url: section.base_url.clone(),
+            model: None,
             weight: 1,
             cooldown_override_secs: None,
             quota: None,
@@ -607,6 +671,7 @@ fn build_subagent_ollama_pool(
             label: "default".to_string(),
             api_key: section.api_key.clone().unwrap_or_default(),
             base_url: section.base_url.clone(),
+            model: None,
             weight: 1,
             cooldown_override_secs: None,
             quota: None,
