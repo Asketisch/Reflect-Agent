@@ -37,9 +37,14 @@ pub use caching::{
 pub use resources::{PromptResources, copy, prompts};
 pub use template::{PromptError, render, render_with};
 
-/// 收敛提示模板:当工具调用应停止、要求模型用此格式给出最终答案时,各收敛点
-/// (ephemeral `## Important`、各 nudge、max-iterations force-final、
-/// auto-continue 等)统一引用此常量,避免措辞漂移。
+/// 收敛提示模板:当工具调用应停止、要求模型用此格式给出最终答案时,各收敛
+/// 边路(nudge、max-iterations force-final、auto-continue)统一引用此常量,
+/// 避免措辞漂移。
+///
+/// **不常驻** ephemeral `## Important`:运行时没有任何代码消费该标记
+/// (turn 收尾判定是「模型不再调工具」),常驻注入只会让照字面执行的模型
+/// 把标记回显进每条回答,污染输出。只在迭代预算耗尽等真正需要强收口压力
+/// 的边路注入;展示层(TUI/GUI)对历史会话中已存在的标记做渲染剥离。
 ///
 /// 模板值固定为 `"FINAL ANSWER: <answer>"`。现有测试(`single_turn.rs` /
 /// `pre_loop_m4.rs`)用 `contains("FINAL ANSWER")` 断言,本常量值变更会
