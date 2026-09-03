@@ -140,6 +140,7 @@ impl LspConnectionManager {
             root_uri,
             init_options,
             Some(self.diagnostics.clone()),
+            cfg.timeout,
         )
         .await
         {
@@ -216,9 +217,29 @@ impl LspConnectionManager {
         };
         // 1. close_all docs(best-effort,尽力而为)
         entry.client.close_all().await;
-        // 2. cancel peer → 子进程 drop → kill_on_drop 杀进程
+        // 2. 优雅退出:review 修复 —— 此前注释承诺"shutdown + exit 由
+        // stop_server 在结束时发",实现却直接 cancel 强杀。按 LSP 规范
+        // 依次发 `shutdown` request(带超时)与 `exit` notification,
+        // best-effort:server 无响应时超时后仍走 cancel 强杀。
+        {
+            // 注:`LspPeer::request` / `notify` 是固有方法,泛型参数实现
+            // lsp_types 的 Request / Notification trait 即可,无需 trait 导入。
+            use lsp_types::request::Shutdown;
+            let peer = entry.client.peer.clone();
+            let graceful = async {
+                peer.request::<Shutdown>(()).await?;
+                // lsp-types 0.97:`Exit` 的 Params 是 `()`。
+                peer.notify::<lsp_types::notification::Exit>(()).await
+            };
+            let _ = tokio::time::timeout(entry.client.timeout, graceful)
+                .await
+                .inspect_err(|_| {
+                    tracing::warn!(server = name, "LSP 优雅 shutdown 超时,回退强杀");
+                });
+        }
+        // 3. cancel peer → 子进程 drop → kill_on_drop 杀进程
         entry.client.cancel.cancel();
-        // 3. event(事件)
+        // 4. event(事件)
         let _ = self
             .event_tx
             .send(LspLifecycleEvent::Stopped {

@@ -274,15 +274,25 @@ impl McpConnectionManager {
     /// `removed` / `changed` 分支。返回被移除的 tool 全名,给 caller
     /// 反注册 `ToolRegistry`。
     pub async fn stop_server(&self, name: &str) -> Option<Vec<String>> {
-        let mut handles = self.handles.write().await;
-        let entry = handles.remove(name)?;
-        // cancel in-flight calls + 触发 TokioChildProcess DropGuard 杀子进程。
-        entry.inner.cancel.cancel();
-        // 通知 caller (TUI status_bar / 监控)。
+        // review 修复:此前写锁 guard 活到函数结尾,期间 `event_tx.send(...).await`
+        // (bounded mpsc,接收端慢时背压阻塞)会卡住所有 start_server /
+        // reload / server_names。先在作用域内完成 remove + cancel,再 drop
+        // 锁、最后 send 事件(对齐 start_server 的写法)。
+        let (entry, stopped_name) = {
+            let mut handles = self.handles.write().await;
+            let entry = handles.remove(name)?;
+            // cancel in-flight calls + 触发 TokioChildProcess DropGuard 杀子进程。
+            entry.inner.cancel.cancel();
+            (
+                entry,
+                name.to_string(),
+            )
+        };
+        // 锁已释放,事件发送背压不再阻塞 registry。
         let _ = self
             .event_tx
             .send(McpLifecycleEvent::Stopped {
-                server: name.to_string(),
+                server: stopped_name,
             })
             .await;
         Some(entry.tools.iter().map(|t| t.full_name.clone()).collect())

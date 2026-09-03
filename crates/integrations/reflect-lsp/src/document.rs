@@ -9,19 +9,21 @@
 //!
 //! - 工作区可能有几万文件,主动 `didOpen` 全部既慢又吃内存;
 //! - LLM 通常只问一个文件,按需打开足够;
-//! - 文件被 LSP server 改过(workspaceEdit 落盘路径,Phase B)→ 我们
-//!   主动 `didChange` 同步;Phase A 没有 mutation,文件变化由下次
-//!   `ensure_open` 重新读盘 + 重新 didOpen 覆盖。
+//! - review 修复:文件被外部(Write/Edit 工具)修改后,`ensure_open`
+//!   此前因 fast path `contains_key` 直接返回,LSP server 永远看到旧文本。
+//!   现记录 didOpen 时的 mtime,变化时走 `didChange`(version+1,全量
+//!   sync)刷新 server 视图。
 //!
 //! ## 版本号
 //!
-//! LSP `didOpen` / `didChange` 都用单调递增 `version` 字段。Phase A
-//! 每个文件只发一次 `didOpen`,version = 1;Phase B 引入 `didChange` 后
-//! 每次 +1。
+//! LSP `didOpen` / `didChange` 都用单调递增 `version` 字段。didOpen 时
+//! version = 1;检测到磁盘变化走 didChange 每次 +1。
 
 use std::path::Path;
 
-use lsp_types::{TextDocumentItem, Uri};
+use lsp_types::{
+    DidChangeTextDocumentParams, TextDocumentContentChangeEvent, TextDocumentItem, Uri,
+};
 use tokio::fs;
 
 use crate::client::LspClientInner;
@@ -34,8 +36,10 @@ pub struct DocumentState {
     pub version: i32,
     /// LSP `TextDocumentItem.languageId`,告诉 server 怎么解析。
     pub language_id: String,
-    /// 文档内容(Phase A 不主动同步磁盘变化,这里只记 didOpen 时的快照)。
+    /// 文档内容(didOpen / 最近一次 didChange 时的快照)。
     pub text: String,
+    /// didOpen / 最近一次同步时的文件 mtime(检测外部修改)。
+    pub synced_mtime: Option<std::time::SystemTime>,
 }
 
 impl LspClientInner {
@@ -47,12 +51,55 @@ impl LspClientInner {
     /// 错误路径:`fs::read_to_string` 失败 → `LspError::Io`;`didOpen`
     /// 失败 → `LspError::Call`。
     pub async fn ensure_open(&self, path: &Path, uri: &Uri, lang_id: &str) -> Result<(), LspError> {
-        // 双重检查:fast path 不持锁(读锁快),slow path 写锁。
-        if self.docs.read().contains_key(uri) {
-            return Ok(());
+        // 快路径:已 open 且 mtime 未变 → 直接返回(短锁拷贝,不跨 await)。
+        let synced_mtime: Option<std::time::SystemTime> =
+            self.docs.read().get(uri).and_then(|st| st.synced_mtime);
+        if let Some(recorded) = synced_mtime {
+            let mtime = fs::metadata(path).await.ok().and_then(|m| m.modified().ok());
+            if mtime == Some(recorded) {
+                return Ok(());
+            }
         }
         // 读盘。文件不存在(中间被删除)按 IO 错误处理,call 路径会传 ToolError::Io。
+        let meta = fs::metadata(path).await.map_err(LspError::Spawn)?;
+        let mtime = meta.modified().ok();
         let text = fs::read_to_string(path).await.map_err(LspError::Spawn)?;
+        // 已 open 但磁盘已变 → didChange 全量同步;首次 → didOpen。
+        // (先在短语句里 clone 状态,guard 不能活到 await。)
+        let existing: Option<DocumentState> = self.docs.read().get(uri).cloned();
+        if let Some(st) = existing
+            && st.synced_mtime != mtime
+        {
+            let new_version = st.version + 1;
+            use lsp_types::notification::DidChangeTextDocument;
+            self.peer
+                .notify::<DidChangeTextDocument>(DidChangeTextDocumentParams {
+                    text_document: lsp_types::VersionedTextDocumentIdentifier {
+                        uri: uri.clone(),
+                        version: new_version,
+                    },
+                    content_changes: vec![TextDocumentContentChangeEvent {
+                        range: None,
+                        range_length: None,
+                        text: text.clone(),
+                    }],
+                })
+                .await?;
+            self.docs.write().insert(
+                uri.clone(),
+                DocumentState {
+                    version: new_version,
+                    language_id: lang_id.to_string(),
+                    text,
+                    synced_mtime: mtime,
+                },
+            );
+            return Ok(());
+        }
+        if self.docs.read().contains_key(uri) {
+            // 已 open 且 mtime 读取不到差异(如 mtime 不可用),避免重复 didOpen。
+            return Ok(());
+        }
         let item = TextDocumentItem {
             uri: uri.clone(),
             language_id: lang_id.to_string(),
@@ -73,6 +120,7 @@ impl LspClientInner {
                 version: 1,
                 language_id: lang_id.to_string(),
                 text,
+                synced_mtime: mtime,
             },
         );
         Ok(())
@@ -141,6 +189,7 @@ mod tests {
             version: 1,
             language_id: "rust".to_string(),
             text: "fn foo() {}".to_string(),
+            synced_mtime: None,
         };
         assert_eq!(st.language_id, "rust");
         assert_eq!(st.version, 1);

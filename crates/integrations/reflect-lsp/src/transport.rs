@@ -125,7 +125,12 @@ pub(crate) fn try_parse_frame(buf: &mut Vec<u8>) -> Result<FrameState, LspError>
 /// 容忍 header section 内多行(只取第一个匹配的 key)。
 fn parse_content_length(headers: &str) -> Option<usize> {
     for line in headers.split("\r\n") {
-        let (key, value) = line.split_once(':')?;
+        // review 修复:此前 `split_once(':')?` 会让任何无冒号的 header 行
+        // (畸形/未来扩展头)直接中止整个解析,即使 Content-Length 行完好;
+        // 该跳过该行继续。
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
         if key.trim().eq_ignore_ascii_case("content-length") {
             return value.trim().parse().ok();
         }
@@ -181,6 +186,7 @@ impl LspPeer {
         root_uri: Option<&url::Url>,
         initialization_options: Option<&Value>,
         diagnostics: Option<Arc<DiagnosticRegistry>>,
+        handshake_timeout: std::time::Duration,
     ) -> Result<(Arc<Self>, ServerCapabilities, Option<ServerInfo>), LspError> {
         // 构造 stdio 子进程。
         let mut cmd = Command::new(command);
@@ -231,13 +237,27 @@ impl LspPeer {
             cancel: child_cancel,
         });
         // initialize 握手(异步,等 server 回应)。
-        let init_result = peer
-            .initialize(root_uri, initialization_options)
-            .await
-            .inspect_err(|_| {
+        // review 修复:此前裸等 oneshot —— server 启动后不响应时
+        // `start_server` 永久挂起(阻塞 bootstrap / reload)。包一层超时。
+        let init_fut = peer.initialize(root_uri, initialization_options);
+        let init_result = match tokio::time::timeout(handshake_timeout, init_fut).await {
+            Ok(r) => r.inspect_err(|_| {
                 // 握手失败 → cancel peer(子进程随之 kill)。
                 peer.cancel.cancel();
-            })?;
+            })?,
+            Err(_) => {
+                peer.cancel.cancel();
+                return Err(LspError::Timeout {
+                    elapsed_ms: handshake_timeout.as_millis() as u64,
+                });
+            }
+        };
+        // review 修复:LSP 规范要求 client 在收到 initialize 响应后、任何
+        // 其他请求前发 `initialized` 通知 —— 此前缺失,rust-analyzer /
+        // gopls 等会拒绝或排队后续请求(didOpen / definition 静默失效)。
+        let _ = peer
+            .notify::<lsp_types::notification::Initialized>(lsp_types::InitializedParams {})
+            .await;
         // 解析 response:取 serverInfo + capabilities。
         let server_info: Option<ServerInfo> = init_result
             .get("serverInfo")
