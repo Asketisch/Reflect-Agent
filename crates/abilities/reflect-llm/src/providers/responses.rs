@@ -232,8 +232,13 @@ fn parse_responses_event(event: &str, v: &Value) -> Vec<ChatEvent> {
     let mut out = Vec::new();
     match event {
         "response.created" | "response.in_progress" => {
-            let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("");
-            let model = v.get("model").and_then(|x| x.as_str()).unwrap_or("");
+            // review 修复:Responses SSE 的 created/in_progress 事件负载是
+            // {"type": ..., "response": {...}} 嵌套结构,id/model 在
+            // `response` 之下;此前读顶层导致 MessageStart 恒为空。
+            // 兼容部分代理可能给出的顶层扁平形状。
+            let obj = v.get("response").unwrap_or(v);
+            let id = obj.get("id").and_then(|x| x.as_str()).unwrap_or("");
+            let model = obj.get("model").and_then(|x| x.as_str()).unwrap_or("");
             if !id.is_empty() || !model.is_empty() {
                 out.push(ChatEvent::MessageStart {
                     id: id.to_string(),
@@ -272,9 +277,12 @@ fn parse_responses_event(event: &str, v: &Value) -> Vec<ChatEvent> {
             }
         }
         "response.completed" => {
-            // usage 在 `response.usage`：`output_tokens` / `input_tokens` /
-            // `input_tokens_details.cached_tokens`。
-            if let Some(usage) = v.get("usage") {
+            // usage 在 `response.usage`:output_tokens / input_tokens /
+            // input_tokens_details.cached_tokens。
+            // review 修复:负载是 {"type": ..., "response": {...}} 嵌套结构,
+            // 此前读顶层 usage 导致 token 计量恒 0;兼容顶层扁平形状。
+            let obj = v.get("response").unwrap_or(v);
+            if let Some(usage) = obj.get("usage") {
                 let input = usage
                     .get("input_tokens")
                     .and_then(|x| x.as_u64())
@@ -460,11 +468,19 @@ mod tests {
 
     #[test]
     fn parse_created_emits_message_start() {
-        let v = json!({"id": "resp_123", "model": "gpt-4o"});
+        // 真实 wire 格式:{"type": ..., "response": {...}} 嵌套。
+        let v = json!({"type": "response.created", "response": {"id": "resp_123", "model": "gpt-4o"}});
         let evs = parse_responses_event("response.created", &v);
         assert!(matches!(
             evs[0],
             ChatEvent::MessageStart { ref id, ref model } if id == "resp_123" && model == "gpt-4o"
+        ));
+        // 兼容顶层扁平形状(部分代理)。
+        let flat = json!({"id": "resp_flat", "model": "gpt-4o"});
+        let evs = parse_responses_event("response.created", &flat);
+        assert!(matches!(
+            evs[0],
+            ChatEvent::MessageStart { ref id, .. } if id == "resp_flat"
         ));
     }
 
@@ -502,11 +518,15 @@ mod tests {
 
     #[test]
     fn parse_completed_emits_usage_and_stop() {
+        // 真实 wire 格式:usage 嵌套在 response 之下。
         let v = json!({
-            "usage": {
-                "input_tokens": 10,
-                "output_tokens": 5,
-                "input_tokens_details": {"cached_tokens": 3}
+            "type": "response.completed",
+            "response": {
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "input_tokens_details": {"cached_tokens": 3}
+                }
             }
         });
         let evs = parse_responses_event("response.completed", &v);

@@ -587,11 +587,16 @@ fn push_message(m: ChatMessage, out: &mut Vec<Value>) {
         }
         ChatMessage::Assistant(a) => {
             let mut content: Vec<Value> = Vec::new();
-            if let Some(t) = a.text {
-                content.push(serde_json::json!({"type": "text", "text": t}));
-            }
+            // review 修复:Anthropic 要求 assistant 回放消息中 thinking 块
+            // 位于最前(在 text / tool_use 之前),此前 [text, thinking] 的
+            // 顺序会在带 extended thinking 的多轮回放时被 API 400 拒绝。
+            // 注:thinking 块签名(signature)未持久化,回放带 thinking 的
+            // 历史在严格校验下仍可能被拒 —— 已知限制,待协议层补签名字段。
             if let Some(think) = a.thinking {
                 content.push(serde_json::json!({"type": "thinking", "thinking": think}));
+            }
+            if let Some(t) = a.text {
+                content.push(serde_json::json!({"type": "text", "text": t}));
             }
             for tc in a.tool_calls {
                 content.push(serde_json::json!({
@@ -978,14 +983,16 @@ mod tests {
         };
         let v = serde_json::to_value(AnthropicRequest::from(req)).unwrap();
         let blocks = v["messages"][0]["content"].as_array().unwrap();
-        // 顺序:[text, thinking] —— text 应有 cache_control,thinking 不应有。
-        assert_eq!(blocks[0]["type"], "text");
-        assert_eq!(blocks[0]["cache_control"]["type"], "ephemeral");
-        assert_eq!(blocks[1]["type"], "thinking");
+        // 顺序(review 修复):[thinking, text] —— Anthropic 要求 assistant
+        // 回放消息 thinking 在最前。cache_control 锚点应跳过 thinking、
+        // 落在 text 上(从右向左首个非 thinking 块)。
+        assert_eq!(blocks[0]["type"], "thinking");
         assert!(
-            blocks[1].get("cache_control").is_none(),
+            blocks[0].get("cache_control").is_none(),
             "thinking block must NOT carry cache_control, got {blocks:?}"
         );
+        assert_eq!(blocks[1]["type"], "text");
+        assert_eq!(blocks[1]["cache_control"]["type"], "ephemeral");
     }
 
     /// v1.0.0-rc2：`AnthropicClient` 重写 `provider_kind() = Anthropic`。
