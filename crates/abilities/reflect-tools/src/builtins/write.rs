@@ -82,16 +82,15 @@ impl Tool for WriteTool {
             }
             // 否则保持原样,后续会创建它(或它的父目录)。
         }
-        // 沙箱校验:每个现有祖先都必须在 workspace 内。
-        // 因为按 component 增量 canonicalize,这一步隐式完成。
-        // 绝对路径则额外校验最终路径在 workspace 下。
-        if path.is_absolute() {
-            let abs = final_path.clone();
-            if !abs.starts_with(&canonical_workspace) {
-                return Err(ToolError::PathEscape {
-                    path: path.to_path_buf(),
-                });
-            }
+        // 沙箱校验:最终路径必须在 workspace 内(绝对与相对路径一律校验)。
+        // review 修复(P0):此前仅对绝对路径校验 —— 相对路径经逐 component
+        // 增量 canonicalize 会把 `..` 解析掉,`../../etc/x` 的 final_path 已
+        // 落到 workspace 之外,却因 `path.is_absolute() == false` 完全跳过
+        // 校验,构成路径穿越写任意文件。
+        if !final_path.starts_with(&canonical_workspace) {
+            return Err(ToolError::PathEscape {
+                path: path.to_path_buf(),
+            });
         }
 
         // 自动 mkdir。
@@ -225,5 +224,68 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::InvalidArgs { .. }));
+    }
+
+    // review 回归(P0):相对路径 `..` 穿越必须被拒绝且不落盘。
+    #[tokio::test]
+    async fn rejects_relative_path_escape() {
+        let ws = tmp_workspace();
+        let outside = {
+            // 放一个 workspace 外的真实文件作为穿越目标。
+            let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+            let dir = std::env::temp_dir().join(format!(
+                "reflect_write_escape_{}_{}",
+                std::process::id(),
+                n
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        };
+        let rel = relative_path_between(&ws, &outside).join("pwned.txt");
+        let t = WriteTool;
+        let err = t
+            .execute(
+                make_ctx(&ws),
+                serde_json::json!({"path": rel.to_string_lossy(), "content": "x"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::PathEscape { .. }), "got: {err:?}");
+        assert!(!outside.join("pwned.txt").exists(), "escaped write landed");
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    // 绝对路径逃逸同样拒绝(回归已有行为的显式锁定)。
+    #[tokio::test]
+    async fn rejects_absolute_path_escape() {
+        let ws = tmp_workspace();
+        let t = WriteTool;
+        let err = t
+            .execute(
+                make_ctx(&ws),
+                serde_json::json!({"path": "/tmp/reflect_write_abs_escape_pwned.txt", "content": "x"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::PathEscape { .. }), "got: {err:?}");
+        assert!(!std::path::Path::new("/tmp/reflect_write_abs_escape_pwned.txt").exists());
+    }
+
+    /// 计算 `from` 到 `to` 的相对路径(仅测试用,基于 common prefix)。
+    fn relative_path_between(from: &std::path::Path, to: &std::path::Path) -> std::path::PathBuf {
+        let f: Vec<_> = from.components().collect();
+        let t: Vec<_> = to.components().collect();
+        let mut common = 0;
+        while common < f.len() && common < t.len() && f[common] == t[common] {
+            common += 1;
+        }
+        let mut rel = std::path::PathBuf::new();
+        for _ in common..f.len() {
+            rel.push("..");
+        }
+        for comp in &t[common..] {
+            rel.push(comp);
+        }
+        rel
     }
 }

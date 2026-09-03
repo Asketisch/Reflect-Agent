@@ -52,4 +52,16 @@ pub use reflect_protocol::{ToolError, ToolOutput};
 /// v1.x 功能 6:`AgentDefinition.readonly = true` 时从可见工具集中排除的
 /// 变更类工具名。这些工具会修改文件系统 / 执行任意命令,只读 agent 不应拥有。
 /// bash 因可执行任意写操作,整体排除(v1 不细分读写子命令)。
-pub const READONLY_DENYLIST: &[&str] = &["write", "edit", "delete", "bash", "NotebookEdit"];
+///
+/// review 修复:实际注册名是 `delete_file` / `notebook_edit`,此前列表里的
+/// `delete` / `NotebookEdit` 永不命中,只读 agent 仍持有删除与 notebook 写
+/// 工具。旧拼写保留以防外部 spec 手写旧名。
+pub const READONLY_DENYLIST: &[&str] = &[
+    "write",
+    "edit",
+    "delete",
+    "delete_file",
+    "bash",
+    "NotebookEdit",
+    "notebook_edit",
+];

@@ -193,10 +193,14 @@ impl PermissionMode {
 }
 
 /// 文件编辑类工具名 —— `AcceptEdits` 模式短路用。
+///
+/// review 修复:补上实际注册名 `delete_file` / `notebook_edit`
+/// (此前只匹配 `delete` / `Delete`,永不命中)。
 pub fn is_edit_tool_name(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "write" | "edit" | "delete" | "Write" | "Edit" | "Delete"
+        "write" | "edit" | "delete" | "delete_file" | "notebook_edit" | "Write" | "Edit"
+            | "Delete" | "NotebookEdit"
     )
 }
 

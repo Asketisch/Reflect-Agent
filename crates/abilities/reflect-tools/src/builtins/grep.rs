@@ -74,6 +74,10 @@ impl Tool for GrepTool {
             .get("path")
             .and_then(|v| v.as_str())
             .map(PathBuf::from)
+            // review 修复:显式 path 此前无沙箱校验,`grep {path: "/etc"}` 可
+            // 遍历读取 workspace 之外的文件。统一经 resolve_sandbox_path 校验。
+            .map(|p| crate::sandbox::resolve_sandbox_path(&ctx.workspace_path(), &p))
+            .transpose()?
             .unwrap_or_else(|| ctx.workspace_path());
         let use_bm25 = args
             .get("rank")

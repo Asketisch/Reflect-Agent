@@ -119,10 +119,76 @@ fn classify_segment(segment: &str) -> BashCommandClass {
         return BashCommandClass::Risky;
     }
     if SAFE_PATTERNS.iter().any(|re| re.is_match(segment.trim())) {
+        // review 修复:SAFE 分类只保证"命令本身只读"。输出重定向到文件
+        // (`>` / `>>`)或 `find -delete` / `-exec` 会让只读命令产生副作用
+        // (`echo x > ~/.bashrc`、`find . -delete` 此前被判 Safe,Plan mode
+        // 免审批直接执行 = 只读模式可写盘/删文件)。命中即降级 Risky;
+        // `>/dev/null`、`2>&1` 这类丢弃/复用 fd 的重定向不算写文件。
+        if segment_writes_files(segment) {
+            return BashCommandClass::Risky;
+        }
         return BashCommandClass::Safe;
     }
     // 未知命令保守归为 Risky,避免 Auto 模式误放行。
     BashCommandClass::Risky
+}
+
+/// 启发式判断单条命令段是否经重定向 / `find` 突变谓词产生写副作用。
+///
+/// 不解析引号(v1 启发式足够):引号内的 `>` 会被误报,方向是保守的
+/// (多拦成 Risky),不会把写命令漏放成 Safe。
+fn segment_writes_files(segment: &str) -> bool {
+    let lower = segment.to_ascii_lowercase();
+    // `find` 的突变谓词:删除或执行外部命令。
+    if lower.contains("-delete")
+        || lower.contains("-exec ")
+        || lower.contains("-execdir ")
+        || lower.contains("-ok ")
+        || lower.contains("-okdir ")
+        || lower.ends_with("-exec")
+        || lower.ends_with("-delete")
+    {
+        return true;
+    }
+    // 重定向扫描:`>` 后的目标决定是否写文件。
+    let bytes = segment.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'>' {
+            i += 1;
+            continue;
+        }
+        if i + 1 < bytes.len() && bytes[i + 1] == b'>' {
+            // `>>` 追加写,一律算写文件。
+            return true;
+        }
+        // 跳过 `>` 后的空白,看目标 token。
+        let mut j = i + 1;
+        while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
+            j += 1;
+        }
+        // `>&` / `>&1` 是 fd 复制(如 `2>&1`),不写文件。
+        if j < bytes.len() && bytes[j] == b'&' {
+            i = j + 1;
+            continue;
+        }
+        let token_end = bytes[j..]
+            .iter()
+            .position(|b| matches!(b, b' ' | b'\t' | b';' | b'|' | b'&'))
+            .map(|p| j + p)
+            .unwrap_or(bytes.len());
+        let target = segment[j..token_end].to_ascii_lowercase();
+        // 丢弃型目标(/dev/null 等)不算写文件。
+        if !(target == "/dev/null"
+            || target == "/dev/stdout"
+            || target == "/dev/stderr"
+            || target == "/dev/tty")
+        {
+            return true;
+        }
+        i = token_end.max(i + 1);
+    }
+    false
 }
 
 static DANGEROUS_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
@@ -357,6 +423,42 @@ mod tests {
         assert_eq!(
             classify_command("ls $(echo foo) && pwd"),
             BashCommandClass::Risky
+        );
+    }
+
+    /// review 回归:Safe 命令 + 文件重定向必须降级 Risky(Plan mode 下
+    /// 此前可经 `echo x > ~/.bashrc` 免审批写盘)。`>/dev/null` / `2>&1`
+    /// 保持 Safe 不退化。
+    #[test]
+    fn classify_safe_command_with_file_redirect_is_risky() {
+        assert_eq!(
+            classify_command("echo x > ~/.bashrc"),
+            BashCommandClass::Risky
+        );
+        assert_eq!(
+            classify_command("sed -n '1p' a.txt > out.txt"),
+            BashCommandClass::Risky
+        );
+        assert_eq!(
+            classify_command("git status > file.txt"),
+            BashCommandClass::Risky
+        );
+        // 追加写同样是写。
+        assert_eq!(classify_command("echo x >> log"), BashCommandClass::Risky);
+        // find 的突变谓词。
+        assert_eq!(classify_command("find . -delete"), BashCommandClass::Risky);
+        assert_eq!(
+            classify_command("find . -name '*.tmp' -exec rm {} \\;"),
+            BashCommandClass::Risky
+        );
+        // 丢弃型重定向不算写文件(既有行为不退化)。注:`>/dev/null` 必须
+        // 紧贴前一 token —— `/dev` 前有空格会命中 sensitive-path 预检
+        // (既有行为,与本次改动无关)。
+        assert_eq!(classify_command("ls >/dev/null"), BashCommandClass::Safe);
+        assert_eq!(classify_command("ls 2>&1"), BashCommandClass::Safe);
+        assert_eq!(
+            classify_command("cargo check 2>/dev/null"),
+            BashCommandClass::Safe
         );
     }
 }

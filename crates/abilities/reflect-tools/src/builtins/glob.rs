@@ -51,6 +51,10 @@ impl Tool for GlobTool {
             .get("path")
             .and_then(|v| v.as_str())
             .map(PathBuf::from)
+            // review 修复:显式 path 此前无沙箱校验,`glob {path: "../../"}` 可
+            // 遍历 workspace 之外的文件。统一经 resolve_sandbox_path 校验。
+            .map(|p| crate::sandbox::resolve_sandbox_path(&ctx.workspace_path(), &p))
+            .transpose()?
             .unwrap_or_else(|| ctx.workspace_path());
 
         // 剥掉开头的 "*." 用作后缀匹配。

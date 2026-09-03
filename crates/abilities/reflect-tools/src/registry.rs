@@ -120,21 +120,24 @@ impl Tool for FloorEnforcingTool {
     }
 }
 
-/// 权限"严格度"比较。`Prompt` / `Plan` / `AcceptEdits` / `Deny` 比 `Auto` 严;
-/// `Bypass` / `Bubble` 比 `Auto` 严格程度不同 —— 这里只关心 floor 是 `Prompt`
-/// 时是否会放宽,`Prompt` / `Deny` 都满足 >= Prompt;`Auto` / `Bypass` /
-/// `Bubble` 都不满足(它们放行/自动通过,等同低于 Prompt 的门禁)。
-/// `Plan` / `AcceptEdits` 按"至少 Prompt"算(它们会走 approval modal
-/// 或 plan gate)。`Bypass` / `Bubble` 视为放行(满足 floor)。
+/// 权限"严格度"比较:工具自声明的 `mode` 是否已满足 floor(即不必再抬高)。
+///
+/// `Prompt` 是外部工具的最低门禁 —— `Plan` / `AcceptEdits` 会走 approval
+/// modal 或 plan gate,视为满足;`Auto`(免审批)、`Bubble`(非阻塞通知 +
+/// 自动批准)、`Bypass`(静默跳过审批)都比 `Prompt` 弱,不满足。
+/// `Deny` 是最严声明,任何 floor 下都视为满足(绝不允许被 floor 放宽)。
 fn is_at_least(mode: PermissionMode, floor: PermissionMode) -> bool {
     use PermissionMode::*;
-    // 简化逻辑:floor = Prompt 时,mode 在
-    // {Prompt, Plan, AcceptEdits, Deny, Bypass, Bubble} 都算"满足"。
-    // floor = Auto 时任何非 Deny 都满足。
+    // review 修复:此前 `Prompt => !matches!(mode, Auto)` 把 Bubble / Bypass
+    // 也算"满足",外部(MCP / plugin / runtime)工具自声明 `Bubble` 即可
+    // 绕过审批。现在只允许 {Prompt, Plan, AcceptEdits} 满足 Prompt floor。
+    if mode == Deny {
+        return true;
+    }
     match floor {
-        Auto => !matches!(mode, Deny),
-        Prompt => !matches!(mode, Auto),
-        // 其他 floor(mode)不太可能被本函数调用,但保守按 mode >= floor 返 true。
+        Auto => true,
+        Prompt => matches!(mode, Prompt | Plan | AcceptEdits),
+        // 其他 floor(mode)不太可能被本函数调用,但保守按满足处理。
         _ => true,
     }
 }
@@ -858,5 +861,53 @@ mod tests {
         let tool = r.get("strict-external").expect("registered");
         // Deny 比 Prompt 严 → tool 自己的声明保留。
         assert_eq!(tool.required_permission(), PermissionMode::Deny);
+    }
+
+    /// review 回归:外部工具自声明 `Bubble` / `Bypass` 时,floor 必须把它
+    /// 抬回 `Prompt`(此前 `Bubble` 被当作满足 floor,审批被整体绕过)。
+    #[test]
+    fn floor_raises_bubble_and_bypass_to_prompt() {
+        use reflect_protocol::PermissionMode as PM;
+
+        struct Declare(PM);
+        #[async_trait]
+        impl Tool for Declare {
+            fn name(&self) -> &str {
+                "declare"
+            }
+            fn description(&self) -> &str {
+                "d"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type":"object"})
+            }
+            fn required_permission(&self) -> PM {
+                self.0
+            }
+            fn is_concurrency_safe(&self) -> bool {
+                true
+            }
+            async fn execute(&self, _: ToolContext, _: serde_json::Value) -> Result<Out, ToolError> {
+                unreachable!()
+            }
+        }
+
+        for declared in [PM::Bubble, PM::Bypass, PM::Auto] {
+            let r = ToolRegistry::default();
+            r.register_with_source_floor(ToolSource::Mcp, Arc::new(Declare(declared)));
+            let tool = r.get("declare").expect("registered");
+            assert_eq!(
+                tool.required_permission(),
+                PM::Prompt,
+                "declared {declared:?} must be raised to Prompt floor"
+            );
+        }
+        // Prompt 声明保持原样。
+        let r = ToolRegistry::default();
+        r.register_with_source_floor(ToolSource::Mcp, Arc::new(Declare(PM::Prompt)));
+        assert_eq!(
+            r.get("declare").unwrap().required_permission(),
+            PM::Prompt
+        );
     }
 }

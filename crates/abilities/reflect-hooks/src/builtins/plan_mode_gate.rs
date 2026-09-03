@@ -92,6 +92,17 @@ impl Default for PlanModeGate {
     }
 }
 
+/// 字符串级 plan 文档路径判定(不解析文件系统,hook 层无 workspace 上下文)。
+///
+/// 含 `..` 段的一律不算 plan 路径 —— 防止 `.reflect/plan/../../x`
+/// 靠子串命中放行。`write` 工具自身的 workspace 沙箱是第二道防线。
+fn is_plan_doc_path(path: &str) -> bool {
+    if path.split('/').any(|seg| seg == "..") {
+        return false;
+    }
+    path.contains(".reflect/plan/")
+}
+
 #[async_trait]
 impl Hook for PlanModeGate {
     fn name(&self) -> &str {
@@ -156,9 +167,12 @@ impl Hook for PlanModeGate {
             // 目录），让 agent 能把完整 plan markdown 落盘为持久产物，再调用
             // ExitPlanMode 从文件读取。其他路径的 write/edit 仍被 deny。
             // 对齐 Claude Code 的 isSessionPlanFile 白名单机制。
+            // review 修复:此前裸子串 `path.contains(".reflect/plan/")`,
+            // `.reflect/plan/../../x` 含子串即放行;现要求无 `..` 段。
+            // (write 工具自身还有 workspace 沙箱兜底,这里是纵深防御。)
             if tool == "write" || tool == "edit" {
                 let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                if path.contains(".reflect/plan/") {
+                if is_plan_doc_path(path) {
                     return Ok(HookDecision::Allow);
                 }
             }
@@ -594,5 +608,29 @@ mod tests {
             HookDecision::Allow,
             "edit 到 .reflect/plan/ 应在 Plan mode 放行"
         );
+    }
+
+    /// review 回归:含 `..` 段的路径即使包含 `.reflect/plan/` 子串也必须 deny
+    /// (防 `.reflect/plan/../../x` 子串绕过)。
+    #[tokio::test]
+    async fn plan_mode_denies_plan_dir_traversal() {
+        let h = PlanModeGate::default_mode();
+        for path in [
+            "/workspace/.reflect/plan/../../escaped.txt",
+            ".reflect/plan/../../../etc/cron.d/pwn",
+        ] {
+            let ev = HookEvent::PreToolUse {
+                tool: "write".into(),
+                args: serde_json::json!({"path": path}),
+                ctx: ctx_with_mode(PermissionMode::Plan),
+            };
+            assert!(
+                matches!(
+                    h.handle(&ev).await.unwrap(),
+                    HookDecision::Deny { .. }
+                ),
+                "plan 目录穿越路径应被 deny: {path}"
+            );
+        }
     }
 }
