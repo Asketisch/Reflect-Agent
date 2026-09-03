@@ -174,18 +174,19 @@ impl Tool for BashTool {
             let stdout_fut = async {
                 let mut buf = Vec::with_capacity(8192);
                 if let Some(s) = stdout.as_mut() {
-                    let _: tokio::io::Take<&mut tokio::process::ChildStdout> =
-                        s.take(OUTPUT_LIMIT as u64);
-                    let _ = s.read_to_end(&mut buf).await;
+                    // review 修复:此前 `let _ = s.take(N)` 把 Take 临时值直接丢弃,
+                    // 限流失效,read_to_end 会无上限读入内存(yes 灌到 OOM)。
+                    // 必须持有 Take 再 read_to_end。
+                    let mut limited = s.take(OUTPUT_LIMIT as u64);
+                    let _ = limited.read_to_end(&mut buf).await;
                 }
                 buf
             };
             let stderr_fut = async {
                 let mut buf = Vec::with_capacity(8192);
                 if let Some(s) = stderr.as_mut() {
-                    let _: tokio::io::Take<&mut tokio::process::ChildStderr> =
-                        s.take(OUTPUT_LIMIT as u64);
-                    let _ = s.read_to_end(&mut buf).await;
+                    let mut limited = s.take(OUTPUT_LIMIT as u64);
+                    let _ = limited.read_to_end(&mut buf).await;
                 }
                 buf
             };
@@ -236,7 +237,10 @@ impl Tool for BashTool {
             text.push_str(&stderr_str);
         }
         if text.len() > OUTPUT_LIMIT {
-            text.truncate(OUTPUT_LIMIT);
+            // review 修复:`truncate(OUTPUT_LIMIT)` 按字节切,切点落在多字节
+            // 字符中间会 panic。改走 UTF-8 安全截断。
+            let cut = reflect_protocol::truncate_utf8(&text, OUTPUT_LIMIT).to_string();
+            text = cut;
             text.push_str("\n... [truncated]");
         }
 

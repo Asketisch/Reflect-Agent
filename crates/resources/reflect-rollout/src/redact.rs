@@ -26,10 +26,12 @@ pub(crate) fn redact_value(v: &mut serde_json::Value) {
         serde_json::Value::String(s) => {
             // 1. 密钥 pattern 脱敏(合规边界)。
             *s = redact_string(s);
-            // 2. 尺寸截断。
+            // 2. 尺寸截断。review 修复:此前 `s.truncate(cut)` 按字节切,
+            //    切点落在多字节字符中间会 panic;改走 UTF-8 安全截断。
             if s.len() > MAX_JSONL_FIELD_CHARS {
-                let cut = MAX_JSONL_FIELD_CHARS.saturating_sub(JSONL_REDACTION_MARKER.len());
-                s.truncate(cut);
+                let keep = MAX_JSONL_FIELD_CHARS.saturating_sub(JSONL_REDACTION_MARKER.len());
+                let cut = reflect_protocol::truncate_utf8(s, keep).to_string();
+                *s = cut;
                 s.push_str(JSONL_REDACTION_MARKER);
             }
         }
@@ -63,6 +65,16 @@ mod tests {
     #[test]
     fn truncates_strings_over_16kb() {
         let mut v = serde_json::json!("x".repeat(20_000));
+        redact_value(&mut v);
+        let s = v.as_str().unwrap();
+        assert!(s.ends_with(JSONL_REDACTION_MARKER));
+        assert!(s.len() <= MAX_JSONL_FIELD_CHARS + JSONL_REDACTION_MARKER.len());
+    }
+
+    // review 回归:多字节字符横跨截断边界时不得 panic(此前按字节 truncate)。
+    #[test]
+    fn truncates_multibyte_strings_without_panic() {
+        let mut v = serde_json::json!("零一二三四五六七八九".repeat(2000));
         redact_value(&mut v);
         let s = v.as_str().unwrap();
         assert!(s.ends_with(JSONL_REDACTION_MARKER));

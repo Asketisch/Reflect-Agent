@@ -220,7 +220,10 @@ impl Tool for WebFetchTool {
         let markdown = htmd::convert(&html).unwrap_or_else(|_| html.into_owned());
 
         let (body_md, truncated_md) = if markdown.len() > MAX_OUTPUT_CHARS {
-            let mut s = markdown[..MAX_OUTPUT_CHARS].to_string();
+            // review 修复:此前 `&markdown[..MAX_OUTPUT_CHARS]` 按字节切片,
+            // 切点落在多字节字符中间会 panic。改走 UTF-8 安全截断。
+            let mut s =
+                reflect_protocol::truncate_utf8(&markdown, MAX_OUTPUT_CHARS).to_string();
             s.push_str(&format!(
                 "\n\n[... truncated to {MAX_OUTPUT_CHARS} chars ...]"
             ));

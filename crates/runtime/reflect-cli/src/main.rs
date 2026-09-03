@@ -835,6 +835,10 @@ fn main() -> anyhow::Result<()> {
 
 /// 字符串按 UTF-8 字符边界截断到 `max_chars`,超出追加 `…`。
 fn truncate(s: &str, max_chars: usize) -> String {
+    // 恰好等于上限时不截断(此前 off-by-one:丢最后一个字符换 '…')。
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
     let mut out = String::new();
     for (count, c) in s.chars().enumerate() {
         if count >= max_chars.saturating_sub(1) {

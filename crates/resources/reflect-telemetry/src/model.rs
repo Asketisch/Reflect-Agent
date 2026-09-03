@@ -241,9 +241,12 @@ pub fn redact_value(v: &mut serde_json::Value) {
     match v {
         serde_json::Value::String(s) => {
             *s = redact_string(s);
+            // review 修复:`s.truncate(cut)` 按字节切,切点落在多字节字符
+            // 中间会 panic;改走 UTF-8 安全截断。
             if s.len() > MAX_FIELD_CHARS {
-                let cut = MAX_FIELD_CHARS.saturating_sub(REDACTION_MARKER.len());
-                s.truncate(cut);
+                let keep = MAX_FIELD_CHARS.saturating_sub(REDACTION_MARKER.len());
+                let cut = reflect_protocol::truncate_utf8(s, keep).to_string();
+                *s = cut;
                 s.push_str(REDACTION_MARKER);
             }
         }

@@ -77,10 +77,18 @@ impl WebhookNotifier {
 }
 
 fn mask_url(url: &str) -> String {
+    // review 修复:此前 `&url[..8]` / `&url[len-4..]` 按字节切片,URL 含
+    // 非 ASCII(如中文路径)时切在多字节字符中间会 panic;改用 `get`
+    // 安全切片,取不到边界时降级为整体掩码。
     if url.len() <= 12 {
         return "***".into();
     }
-    format!("{}…{}", &url[..8], &url[url.len().saturating_sub(4)..])
+    let head = url.get(..8).unwrap_or("");
+    let tail = url.get(url.len().saturating_sub(4)..).unwrap_or("");
+    if head.is_empty() || tail.is_empty() {
+        return "***".into();
+    }
+    format!("{head}…{tail}")
 }
 
 #[cfg(test)]

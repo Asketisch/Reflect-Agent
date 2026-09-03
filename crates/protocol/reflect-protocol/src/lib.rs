@@ -26,6 +26,7 @@ pub mod op;
 pub mod question;
 pub mod recorder;
 pub mod submission;
+pub mod text;
 
 pub use error::ProtocolError;
 pub use event::{EVENT_ID_NONE, Event};
@@ -56,3 +57,4 @@ pub use recorder::{
     MessageRole, NullRecorder, RolloutRecord, RolloutRecorder, SessionInfo, derive_title,
 };
 pub use submission::{Submission, W3cTraceContext};
+pub use text::truncate_utf8;

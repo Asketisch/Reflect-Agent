@@ -201,33 +201,54 @@ fn expand_env_vars(s: &str, user_env: &HashMap<String, String>) -> String {
             .unwrap_or_default()
     };
     let mut out = String::with_capacity(s.len());
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'$' && i + 1 < bytes.len() {
-            // ${VAR} 形式
-            if bytes[i + 1] == b'{'
-                && let Some(close) = s[i + 2..].find('}')
-            {
-                let name = &s[i + 2..i + 2 + close];
-                out.push_str(&lookup(name));
-                i = i + 2 + close + 1;
-                continue;
-            }
-            // $VAR 形式(字母/数字/下划线)
-            let rest = &s[i + 1..];
-            let end = rest
-                .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-                .unwrap_or(rest.len());
-            if end > 0 {
-                let name = &rest[..end];
-                out.push_str(&lookup(name));
-                i = i + 1 + end;
-                continue;
-            }
+    // review 修复:此前按字节遍历且 `out.push(bytes[i] as char)`,非 ASCII
+    // 字节会被错误映射成 Latin-1 码点(与 `$HOME` 混排的中文路径整体
+    // mojibake)。改为 `char_indices` 按字符边界推进,非 `$` 字符原样拷贝。
+    let mut chars = s.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if c != '$' {
+            out.push(c);
+            continue;
         }
-        out.push(bytes[i] as char);
-        i += 1;
+        // 此处 i 是 '$' 的字节索引,`s[i+1..]` 必在字符边界上。
+        let rest = &s[i + 1..];
+        if let Some(stripped) = rest.strip_prefix('{') {
+            if let Some(close) = stripped.find('}') {
+                let name = &stripped[..close];
+                out.push_str(&lookup(name));
+                // 消费到 '}'(绝对字节索引 i+2+close)为止。
+                let target = i + 2 + close;
+                while let Some(&(idx, _)) = chars.peek() {
+                    if idx > target {
+                        break;
+                    }
+                    chars.next();
+                }
+                continue;
+            }
+            // 未闭合的 `${`,按普通字符输出,'{' 交由后续迭代处理。
+            out.push(c);
+            continue;
+        }
+        // $VAR 形式(字母/数字/下划线)
+        let end = rest
+            .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .unwrap_or(rest.len());
+        if end > 0 {
+            let name = &rest[..end];
+            out.push_str(&lookup(name));
+            // 消费 name 的全部字符(最后一个字节在绝对索引 i+end)。
+            let target = i + end;
+            while let Some(&(idx, _)) = chars.peek() {
+                if idx > target {
+                    break;
+                }
+                chars.next();
+            }
+            continue;
+        }
+        // 孤立 `$`,原样输出(与 shell 的 `echo $` 行为一致)。
+        out.push(c);
     }
     out
 }

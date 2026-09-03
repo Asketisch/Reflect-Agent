@@ -280,12 +280,22 @@ fn parse_agent_frontmatter(
 /// 从 agent 全名(`<plugin>:<namespace>:<basename>`)派生 subagent `role`。
 ///
 /// `SubAgentSpec.role` 必须是 `[a-z0-9_-]+`,所以把 `:` 替换成 `_`,
-/// 截断到 32 字符以防过长。这是 best-effort —— 极小概率撞名,撞了
-/// 就在 enable 时 `register_plugin_spec` 的 validate 路径报错。
+/// 再把合法字符集以外的字符(含非 ASCII,此前按字节 `truncate(32)`
+/// 切在多字节中间会 panic)折叠为 `_`,最后按**字符**截断到 32。
+/// 这是 best-effort —— 极小概率撞名,撞了就在 enable 时
+/// `register_plugin_spec` 的 validate 路径报错。
 fn derive_role(agent_name: &str) -> String {
-    let mut role = agent_name.replace(':', "_");
-    role.truncate(32);
-    role
+    let replaced = agent_name.replace(':', "_");
+    let sanitized: String = replaced
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+            c
+        } else {
+            '_'
+        })
+        .collect();
+    // 字符数截断(32 字符,而非 32 字节)。
+    sanitized.chars().take(32).collect()
 }
 
 /// 单条 register 失败 —— 给上层 UI 显示。
