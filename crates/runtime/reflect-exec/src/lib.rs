@@ -33,7 +33,7 @@ pub use jsonl::JsonlWriter;
 pub use reload::{diff_sections_for_test, handle_reload, spawn_reload_task};
 
 use clap::Args;
-use reflect_protocol::Submission;
+use reflect_protocol::{EventMsg, Submission, TurnStatus};
 
 use headless::HeadlessArgs;
 use runtime_config::apply_coordinator_from_config;
@@ -78,8 +78,8 @@ pub struct ExecArgs {
     pub agent: Option<String>,
     /// v1.x:启动后立即进入 Plan mode(只读调研,write 工具被 `PlanModeGate`
     /// hook blanket-deny)。等价 `/plan` slash,但作用在 `reflect exec` 的
-    /// headless 单 turn 模式:agent 只能跑 read-only 工具,exit code 122
-    /// 表示计划生成失败需要重试。详见 `docs/PLAN_MODE.md`。
+    /// headless 单 turn 模式:agent 只能跑 read-only 工具;turn 失败时
+    /// 进程以 exit code 122 退出(CI / 脚本可据此重试)。
     #[arg(long)]
     pub plan_mode: bool,
     /// S2.5:用内存 `InMemoryTaskStore` 而**不**用 `FileTaskStore` —— 任务
@@ -102,14 +102,43 @@ pub struct ExecArgs {
 
 /// 入口函数:既被独立 `reflect-exec` 二进制调用,也被顶层 CLI router 的
 /// `reflect exec` 子命令调用。
+///
+/// review 修复:此前 turn 失败(Error / 非 Success 的 TurnComplete)进程仍
+/// 退出 0,CI / 脚本无法感知失败,`--plan-mode` 帮助里承诺的 exit 122 也从未
+/// 实现。现在按终结事件映射退出码(见 [`async_main`]),非零码直接
+/// `process::exit`(block_on 已返回,异步侧已收尾)。
 pub fn run(args: ExecArgs) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(async_main(args))
+    let code = runtime.block_on(async_main(args))?;
+    if code != 0 {
+        std::process::exit(code);
+    }
+    Ok(())
 }
 
-async fn async_main(args: ExecArgs) -> anyhow::Result<()> {
+/// 终结事件 → 进程退出码。
+///
+/// - 正常:Success → 0;非 Success(MaxIterations / TokenBudgetExceeded)、
+///   Error 事件、TurnAborted → 1。
+/// - Plan mode(`--plan-mode`):任何失败 → 122(计划生成失败需要重试)。
+fn exit_code_for(args: &ExecArgs, msg: &EventMsg) -> i32 {
+    let failed = match msg {
+        EventMsg::TurnComplete(tc) => tc.status != TurnStatus::Success,
+        EventMsg::Error(_) | EventMsg::TurnAborted(_) => true,
+        _ => false,
+    };
+    if !failed {
+        0
+    } else if args.plan_mode {
+        122
+    } else {
+        1
+    }
+}
+
+async fn async_main(args: ExecArgs) -> anyhow::Result<i32> {
     // v1.3 SDK:装配段已抽到 `headless` 模块(与 `reflect serve` 共享),
     // exec 只保留"resume 三选一 → 提交单条 prompt → 流式输出"的编排。
     let hargs = HeadlessArgs {
@@ -136,23 +165,27 @@ async fn async_main(args: ExecArgs) -> anyhow::Result<()> {
         let mut handle = session.thread.submit(sub).await;
         let stdout = std::io::stdout();
         let mut writer = JsonlWriter::new(stdout.lock());
+        let mut code = 0;
         while let Some(event) = handle.next().await {
+            code = exit_code_for(&args, &event.msg);
             if let Err(e) = writer.write_event(&event) {
                 tracing::warn!(error = %e, "jsonl writer failed; exiting");
                 break;
             }
         }
-        return Ok(());
+        return Ok(code);
     }
 
     // ── 普通分支:单条 prompt → JSONL 流 ──
-    let prompt = args
-        .prompt
-        .ok_or_else(|| anyhow::anyhow!("usage: reflect exec <prompt>"))?;
+    let prompt = args.prompt.clone().ok_or_else(|| {
+        anyhow::anyhow!("usage: reflect exec <prompt>")
+    })?;
     let session = headless::bootstrap_normal(common, &hargs).await?;
     let sub = Submission::user_input(prompt);
     let mut handle = session.thread.submit(sub).await;
+    let mut code = 0;
     while let Some(event) = handle.next().await {
+        code = exit_code_for(&args, &event.msg);
         let mut w = JsonlWriter::new(std::io::stdout().lock());
         if let Err(e) = w.write_event(&event) {
             // broken pipe(如 | head 已关闭)—— 优雅退出
@@ -160,5 +193,5 @@ async fn async_main(args: ExecArgs) -> anyhow::Result<()> {
             break;
         }
     }
-    Ok(())
+    Ok(code)
 }

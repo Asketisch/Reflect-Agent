@@ -161,7 +161,7 @@ pub async fn process_stream_events(
     }
 
     if let Some(e) = error {
-        // Flush pending tool call before deciding retry.
+        // 决定重试前,先把未终结的 tool call 冲进缓冲。
         if let Some((id, name)) = current_tool.take() {
             let args = parse_tool_args(&current_args_str, &name);
             tool_calls.push((id, name, args));

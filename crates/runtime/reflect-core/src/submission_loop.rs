@@ -140,6 +140,12 @@ pub async fn submission_loop(
     let user_input_waiters: AskUserInputWaiters =
         Arc::new(Mutex::new(std::collections::HashMap::new()));
     let session_allow = Arc::new(Mutex::new(std::collections::HashSet::new()));
+    // review 修复:当前运行中 turn 的 (TurnId, 子取消令牌) 槽。turn 开始时
+    // 写入,`Op::Interrupt` 读取并取消 —— 让 Interrupt 成为真正的取消信号
+    // 而非仅一条通知事件。parking_lot Mutex:槽内短存取,不跨 await 持锁。
+    let current_turn: std::sync::Arc<
+        parking_lot::Mutex<Option<(TurnId, tokio_util::sync::CancellationToken)>>,
+    > = std::sync::Arc::new(parking_lot::Mutex::new(None));
     // v1.x Plan mode:全局 `PlanApprovalGate` 持有所有 pending plan 切换
     // 请求的 oneshot。`Op::EnterPlanMode` / `Op::ExitPlanMode` 注册 waiter
     // 然后 emit `PlanRequest` / `PlanReady` 等待 TUI 回执;`Op::PlanApproval`
@@ -276,9 +282,15 @@ pub async fn submission_loop(
                     .model
                     .map(|s| Arc::new(parking_lot::RwLock::new(s)))
                     .unwrap_or_else(|| Arc::clone(&cfg.model));
-                let cancel = cfg.cancel.clone();
+                // review 修复:turn 用 session cancel 的**子令牌** —— 此前
+                // 直接共享 cfg.cancel,`Op::Interrupt` 无法只取消当前 turn
+                // (cancel session 令牌会连整个会话一起杀)。子令牌继承父级
+                // (Shutdown 仍生效),`Op::Interrupt` 只 cancel 子令牌。
+                let cancel = cfg.cancel.child_token();
                 let sub_id = sub.id.clone();
                 let turn_id = TurnId::new();
+                // 记录当前 turn 的 (id, 取消令牌),供 `Op::Interrupt` 取用。
+                *current_turn.lock() = Some((turn_id, cancel.clone()));
                 let _ = turn_tx
                     .send(Event::new(
                         sub_id.clone(),
@@ -537,16 +549,6 @@ pub async fn submission_loop(
                         // v1.2 P1:goal 自校验需本轮 token 数 —— 在
                         // `final_state.total_usage` 被 move 进 TurnComplete 前捕获。
                         let goal_turn_tokens = final_state.total_usage.total_tokens as u64;
-                        let _ = turn_tx_clone
-                            .send(Event::new(
-                                sub_id_clone,
-                                EventMsg::TurnComplete(TurnCompleteEvent {
-                                    turn_id,
-                                    usage: final_state.total_usage,
-                                    status,
-                                }),
-                            ))
-                            .await;
                         // 提取本轮 assistant 的最后一条非空纯文本(goal 自校验
                         // 用)。注意:此提取不再与 recorder 绑定 —— 原先它嵌在
                         // `if let Some(rec) = recorder` 内,导致无 recorder 时
@@ -576,6 +578,11 @@ pub async fn submission_loop(
                         // Text + ToolUse,加上 tool_exec 追加的 ToolResult。
                         // content 用 protocol ContentBlock 数组的 JSON 序列化,
                         // resume 端按数组反序列化还原(blocks 形态,而非裸字符串)。
+                        //
+                        // review 修复:落盘必须在发送 TurnComplete **之前** ——
+                        // 客户端收到 TurnComplete 后可立即提交下一轮 UserInput,
+                        // 下一轮的 replay() 回填若读不到最后的 assistant 记录,
+                        // 历史会缺一段(间歇性跨轮失忆)。
                         if let Some(rec) = recorder {
                             if !final_state.latest_content.is_empty() {
                                 let _ = rec
@@ -588,6 +595,17 @@ pub async fn submission_loop(
                                     .await;
                             }
                         }
+
+                        let _ = turn_tx_clone
+                            .send(Event::new(
+                                sub_id_clone,
+                                EventMsg::TurnComplete(TurnCompleteEvent {
+                                    turn_id,
+                                    usage: final_state.total_usage,
+                                    status,
+                                }),
+                            ))
+                            .await;
 
                         // v1.2 P1:目标模式 —— turn 结束后自校验。
                         // work_context = 本轮 assistant 最后的文本。
@@ -662,11 +680,27 @@ pub async fn submission_loop(
                 // 是 Plan 时这条 hint 才有意义 —— 但写入总是无副作用,让
                 // `pre_loop` 自行决定是否消费(避免在这里再读一次锁)。
                 cfg.set_last_abort_reason(AbortReason::UserInterrupt);
+                // review 修复(P1):此前 Interrupt 是"通知式"而非"取消式" ——
+                // 只发一条带随机 TurnId 的 TurnAborted 事件,模型流与工具执行
+                // 继续跑到自然结束,TurnAborted 之后还会收到 Delta /
+                // TurnComplete(SDK 的 interrupt() 因此不可用)。现在真正
+                // cancel 当前 turn 的子令牌(LLM 流 / 工具执行 / 审批等待
+                // 都会收到取消并尽快收尾),事件携带真实 turn_id。
+                let (aborted_turn_id, cancelled) = match current_turn.lock().take() {
+                    Some((tid, token)) => {
+                        token.cancel();
+                        (tid, true)
+                    }
+                    None => (TurnId::new(), false),
+                };
+                if !cancelled {
+                    tracing::debug!("Op::Interrupt: no active turn to cancel");
+                }
                 let _ = turn_tx
                     .send(Event::new(
                         sub.id,
                         EventMsg::TurnAborted(TurnAbortedEvent {
-                            turn_id: TurnId::new(),
+                            turn_id: aborted_turn_id,
                             reason: AbortReason::UserInterrupt,
                         }),
                     ))
