@@ -210,13 +210,19 @@ impl FilePermissionStore {
     }
 
     /// 同步写:保证 parent dir 存在(避免 PermissionDenied on first write),
-    /// 然后 toml::to_string_pretty + write。
+    /// 然后 toml::to_string_pretty + 原子写(tmp + rename)。
+    ///
+    /// review 修复:此前直接 `fs::write` —— 崩溃 / 断电可留下半截 TOML,
+    /// 之后 `read()` 永远 Err,`StorePermissionResolver` 全部规则 fail-open。
+    /// tmp + rename 保证读者看到的是完整旧文件或完整新文件。
     fn write(&self, file: &PermissionFile) -> Result<(), PermissionsError> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let body = toml::to_string_pretty(file)?;
-        std::fs::write(&self.path, body)?;
+        let tmp = self.path.with_extension("toml.tmp");
+        std::fs::write(&tmp, &body)?;
+        std::fs::rename(&tmp, &self.path)?;
         Ok(())
     }
 }

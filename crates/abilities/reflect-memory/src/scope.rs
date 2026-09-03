@@ -16,14 +16,25 @@ pub const MAX_MEMORY_INJECT_CHARS: usize = 8000;
 
 /// 将 `agent_type` 净化为可用目录名。镜像 Reflect:
 /// 把 `:` `/` `\\` 替换为 `-`。
+///
+/// review 修复:`..` 不含分隔符,此前原样通过 —— `agent_type=".."` 会把
+/// MEMORY.md 写到 `agent-memory/..` 之外(`.reflect/MEMORY.md`),LLM 可经
+/// memory 工具触发。补充把 `.` 段与控制字符折叠为 `-`。
 pub fn sanitize_agent_type(agent_type: &str) -> String {
-    agent_type
+    let cleaned: String = agent_type
         .chars()
         .map(|c| match c {
             ':' | '/' | '\\' => '-',
+            c if c.is_control() => '-',
             _ => c,
         })
-        .collect()
+        .collect();
+    // 清洗后仍为 `.` / `..`(纯点段)一律折叠为 `-`,杜绝目录穿越。
+    if cleaned == "." || cleaned == ".." {
+        "-".to_string()
+    } else {
+        cleaned
+    }
 }
 
 /// 计算 `(scope, agent_type)` 对应的磁盘路径。`Session` 返回错误

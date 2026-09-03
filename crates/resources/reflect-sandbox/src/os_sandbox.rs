@@ -371,7 +371,18 @@ impl OsSandbox {
         let seq = SEATBELT_PROFILE_SEQ.fetch_add(1, Ordering::Relaxed);
         let tmp =
             std::env::temp_dir().join(format!("reflect-sandbox-{}-{seq}.sb", std::process::id()));
-        std::fs::write(&tmp, &profile)?;
+        // review 修复:文件名可预测且 `fs::write` 跟随 symlink —— 同机低权
+        // 用户可预置 symlink 让我们覆写任意文件,或抢先把 profile 换成宽松版
+        // 弱化沙箱。改用 `OpenOptions::create_new` + 0600:已存在即失败、
+        // 不会被 symlink 重定向,且只有创建者可读。
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        f.write_all(profile.as_bytes())?;
         Ok((
             "/usr/bin/sandbox-exec".to_string(),
             vec![

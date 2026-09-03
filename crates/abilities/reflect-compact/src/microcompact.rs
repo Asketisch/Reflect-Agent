@@ -174,11 +174,17 @@ fn replace_compactable(
         ChatMessage::Tool(t) => {
             // 通过 Assistant tool_calls 查找生成该结果的工具名,
             // 然后判断是否在 PRESERVE_TOOL_NAMES 中。
+            // review 修复:表内混有大小写(write 小写 / TaskCreate 驼峰),
+            // 精确比较会让注册名大小写不一致的工具(如 `Write`)的结果被
+            // 误替换掉。改 eq_ignore_ascii_case。
             let tool_name = call_id_map
                 .get(&t.call_id)
                 .map(String::as_str)
                 .unwrap_or("");
-            if PRESERVE_TOOL_NAMES.contains(&tool_name) {
+            let preserved = PRESERVE_TOOL_NAMES
+                .iter()
+                .any(|p| p.eq_ignore_ascii_case(tool_name));
+            if preserved {
                 (ChatMessage::Tool(t), false)
             } else {
                 (

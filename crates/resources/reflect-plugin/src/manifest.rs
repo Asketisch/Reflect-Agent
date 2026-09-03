@@ -71,10 +71,22 @@ impl std::str::FromStr for PluginDependency {
         let parts: Vec<&str> = s.split('@').collect();
         match parts.len() {
             1 => Ok(PluginDependency::Bare(parts[0].to_string())),
-            2 => Ok(PluginDependency::Qualified {
-                name: parts[0].to_string(),
-                marketplace: parts[1].to_string(),
-            }),
+            2 => {
+                // review 修复:`formatter@^1.0` 这类"版本后缀"此前被误当作
+                // marketplace 名,后续解析去 known.marketplaces["^1.0"] 找
+                // 必然失败(DependencyCrossMarketplace)。以约束符号(^ ~ =
+                // > <)开头的第二段视为版本约束,降级为 Bare(仅名字)。
+                // 数字开头的段不视为约束(marketplace 合法名允许数字开头,
+                // 避免 `name@1password` 被误伤)。
+                if starts_with_version_constraint(parts[1]) {
+                    Ok(PluginDependency::Bare(parts[0].to_string()))
+                } else {
+                    Ok(PluginDependency::Qualified {
+                        name: parts[0].to_string(),
+                        marketplace: parts[1].to_string(),
+                    })
+                }
+            }
             3 => {
                 // 中间是 marketplace,末尾是 version 约束 —— 静默 strip。
                 Ok(PluginDependency::Qualified {
@@ -87,6 +99,14 @@ impl std::str::FromStr for PluginDependency {
             ))),
         }
     }
+}
+
+/// 判断段是否以版本约束符号开头(`^` / `~` / `=` / `>` / `<`)。
+fn starts_with_version_constraint(s: &str) -> bool {
+    matches!(
+        s.chars().next(),
+        Some('^' | '~' | '=' | '>' | '<')
+    )
 }
 
 impl std::fmt::Display for PluginDependency {
@@ -520,11 +540,13 @@ args = ["format.js"]
         let m = PluginManifest::from_toml_str(toml).unwrap();
         assert_eq!(m.name, "code-formatter");
         assert_eq!(m.dependencies.len(), 2);
-        assert!(matches!(
-            m.dependencies[1],
-            PluginDependency::Qualified { ref name, ref marketplace }
-            if name == "formatter" && marketplace == "^1.0"
-        ));
+        // review 修复:`formatter@^1.0` 的 `^1.0` 是版本约束而非 marketplace
+        // 名,应降级为 Bare(此前被误解析成 marketplace="^1.0",依赖解析必败)。
+        assert!(
+            matches!(m.dependencies[1], PluginDependency::Bare(ref n) if n == "formatter"),
+            "version-suffix dependency should degrade to Bare, got {:?}",
+            m.dependencies[1]
+        );
         let inline = match &m.mcp_servers {
             McpServerSpec::Inline(map) => map,
             other => panic!("expected Inline, got {other:?}"),

@@ -21,12 +21,29 @@ pub const RESERVED_MARKETPLACE_NAMES: &[&str] = &["inline", "builtin"];
 
 /// 插件唯一标识 = `<plugin>@<marketplace>`。
 ///
-/// `#derive(Serialize, Deserialize)]` 把 plugin_id 序列化为单一字符串,
-/// 便于在 `installed_plugins.json`、`settings.json` 与 protocol 事件里
-/// 复用同一形态。
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
+/// 序列化为单一字符串,便于在 `installed_plugins.json`、`settings.json`
+/// 与 protocol 事件里复用同一形态。
+///
+/// review 修复:此前 `#[derive(Deserialize)] + #[serde(transparent)]` 会
+/// 跳过校验 —— `installed_plugins.json` 里损坏的 id(无 `@`)能反序列化
+/// 成功,之后 `name()` / `marketplace()` 的 `expect("validated ID always
+/// contains '@'")` 直接 panic。改为自定义 Deserialize 走 `PluginId::parse`
+/// 校验,损坏数据在反序列化时即报错。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 pub struct PluginId(String);
+
+impl<'de> Deserialize<'de> for PluginId {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        // 走 parse_user_input(结构校验 + 允许 `inline` / `builtin` 保留
+        // marketplace)而非严格 `parse` —— 落盘状态里的 `xxx@inline`
+        // (本地安装)必须能反序列化回来。
+        PluginId::parse_user_input(&s).map_err(serde::de::Error::custom)
+    }
+}
 
 impl PluginId {
     /// 从字符串构造并校验。

@@ -51,7 +51,11 @@ impl Default for LangfuseConfig {
 ///
 /// `enabled = false`(`None` config)时所有方法是 no-op。
 pub struct LangfuseExporter {
-    tx: Option<mpsc::Sender<TraceEvent>>,
+    /// review 修复:包 `Mutex<Option<_>>` —— 此前 `shutdown()` 只 take
+    /// JoinHandle、从不 drop `tx`,channel 永不关闭,`rx.recv()` 不会返回
+    /// None,后台 task 排空承诺不成立(2s 超时必然打满)。shutdown 先
+    /// take + drop tx 再等 task。
+    tx: Mutex<Option<mpsc::Sender<TraceEvent>>>,
     join: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
@@ -66,7 +70,7 @@ impl LangfuseExporter {
             } else {
                 let handle = tokio::spawn(run(c, rx));
                 let exp = Arc::new(Self {
-                    tx: Some(tx),
+                    tx: Mutex::new(Some(tx)),
                     join: Mutex::new(Some(handle)),
                 });
                 return exp;
@@ -75,14 +79,14 @@ impl LangfuseExporter {
             None
         };
         Arc::new(Self {
-            tx,
+            tx: Mutex::new(tx),
             join: Mutex::new(None),
         })
     }
 
     /// 投递一个 span 事件(非阻塞,队列满则丢弃 + warn)。
     pub fn send(&self, ev: TraceEvent) {
-        if let Some(tx) = &self.tx
+        if let Some(tx) = self.tx.lock().as_ref()
             && let Err(e) = tx.try_send(ev)
         {
             tracing::warn!(error = %e, "langfuse 队列满,丢弃事件");
@@ -91,14 +95,18 @@ impl LangfuseExporter {
 
     /// 是否启用(后台 task 在跑)。
     pub fn enabled(&self) -> bool {
-        self.tx.is_some()
+        self.tx.lock().is_some()
     }
 
     /// 优雅停掉后台 task:发完剩余事件后退出。`None` config 时直接返回。
     ///
-    /// 注:不强制 abort —— 让后台 drain channel 后自然退出(对齐 telemetry
-    /// best-effort 哲学:投递不丢比快速停机更重要)。最大等待由调用方控制。
+    /// 注:不强制 abort —— drop sender 后让后台 drain channel 自然退出
+    /// (对齐 telemetry best-effort 哲学:投递不丢比快速停机更重要)。
+    /// 最大等待由调用方控制。
     pub async fn shutdown(&self) {
+        // review 修复:先 take + drop tx(关闭 channel,recv 返回 None,
+        // 后台 task 排空剩余批次后退出),再等 JoinHandle。
+        drop(self.tx.lock().take());
         // 取出 JoinHandle —— 必须在 await 前释放锁,避免持有 `parking_lot`
         // 的非异步 `MutexGuard` 跨 await(后台 task 可能并发访问 `join`)。
         let handle = self.join.lock().take();

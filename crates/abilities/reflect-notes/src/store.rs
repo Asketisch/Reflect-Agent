@@ -149,30 +149,32 @@ impl NoteStore for InMemoryNoteStore {
             return None;
         }
         // Review 2026-06-30 P2-1 修复:`META_MESSAGE_BUDGET_BYTES` 字节预算。
-        // 按插入顺序从前往后写;超出预算立即停笔(被截断的是最早的
-        // note,与 FIFO 淘汰语义一致)。预算余量 = 头部 + 截断说明 +
-        // 行格式化开销。
+        // review 修复:此前按插入顺序从前往后写、超预算 break —— 丢的是
+        // **最新**的笔记,与设计意图(新笔记更相关,淘汰旧笔记)相反。
+        // 现从最新端往前收集,装得下的连续最新段按时间序输出;
+        // 被截断的是最旧的 note(与 FIFO 淘汰语义一致)。
         let header = "[Session Memory — 本次会话关键笔记]\n";
         let truncation_marker = "… (older notes truncated to fit budget)\n";
         let marker_len = truncation_marker.len();
-        let mut s = String::from(header);
-        let mut emitted = 0usize;
-        for (i, n) in notes.iter().enumerate() {
-            // 行字节长度(格式化后的近似);`s.len()` 是已写入字节。
-            let line_bytes = format!("{}. {}\n", i + 1, n.text);
-            let projected = s.len().saturating_add(line_bytes.len());
-            // 给截断说明预留空间(若之后需要追加)。
-            if projected.saturating_add(marker_len) > META_MESSAGE_BUDGET_BYTES {
+        // 从最新端往前累计字节,找到能放进预算的连续后缀。
+        // 截断说明的预算始终预留(保守):仅当确实有旧 note 被截掉时追加。
+        let mut start_idx = notes.len();
+        let mut bytes_needed = header.len() + marker_len;
+        for (i, n) in notes.iter().enumerate().rev() {
+            let line_bytes = format!("{}. {}\n", i + 1, n.text).len();
+            let projected = bytes_needed + line_bytes;
+            if projected > META_MESSAGE_BUDGET_BYTES {
                 break;
             }
-            s.push_str(&line_bytes);
-            emitted += 1;
+            bytes_needed += line_bytes;
+            start_idx = i;
         }
-        if emitted < notes.len() {
-            // 仍剩预算空间就补上截断说明,否则省略(预算已满)。
-            if s.len().saturating_add(marker_len) <= META_MESSAGE_BUDGET_BYTES {
-                s.push_str(truncation_marker);
-            }
+        let mut s = String::from(header);
+        for (i, n) in notes.iter().enumerate().skip(start_idx) {
+            s.push_str(&format!("{}. {}\n", i + 1, n.text));
+        }
+        if start_idx > 0 {
+            s.push_str(truncation_marker);
         }
         Some(s)
     }
@@ -258,12 +260,14 @@ mod tests {
 
     /// Review 2026-06-30 P2-1:`as_meta_message` 在字节预算内截断,
     /// 且截断说明被附上(只要预算还放得下)。
+    ///
+    /// review 修复后的语义:保留的是**最新**的连续后缀(新笔记更相关),
+    /// 被截断的是最旧的 note —— 此前实现反了(丢最新),测试随之更新。
     #[test]
     fn meta_message_respects_byte_budget_and_annotates_truncation() {
         let s = InMemoryNoteStore::new();
         // 用 ~600 字符的 note 塞 30 条:30 × 610 ≈ 18 KiB 远超 8 KiB
-        // 预算,~13 行可保留,17 行被截断。同时确认"最旧的被截"
-        // —— 索引越大越新,故保留区是 0..=12,被截的是 13..=29。
+        // 预算,只能保留最新的一段。索引越大越新,被截的是最旧的 0..=k。
         let big = "x".repeat(600);
         for i in 0..30 {
             s.add(format!("{big}-{i:02}")).unwrap();
@@ -280,13 +284,9 @@ mod tests {
             "truncation marker must be present, got head: {:?}",
             &msg[..msg.len().min(200)]
         );
-        // 保留区包含最早的几条(序号小的);最末尾应出现截断说明。
-        assert!(msg.contains("-00"), "oldest retained: {msg}");
-        assert!(msg.contains("-12"), "boundary kept: {msg}");
-        assert!(
-            !msg.contains("-29"),
-            "newest should be truncated under tight budget"
-        );
+        // 最新的(-29)必须保留;最旧的(-00)应被截掉。
+        assert!(msg.contains("-29"), "newest must be retained: {msg}");
+        assert!(!msg.contains("-00"), "oldest truncated: {msg}");
     }
 
     /// Review 2026-06-30 P2-1:预算极紧张时(只剩截断说明长度),跳过 marker。

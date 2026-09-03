@@ -137,19 +137,52 @@ pub fn smart_prune(
             drop_idx += 1;
             continue;
         }
-        keep.remove(drop_idx);
-        // 删除后下标发生位移;对所有大于 drop_idx 的固定下标减 1。
-        pinned.remove(&drop_idx);
-        let mut new_pinned: std::collections::HashSet<usize> = std::collections::HashSet::new();
-        for p in &pinned {
-            if *p > drop_idx {
-                new_pinned.insert(*p - 1);
-            } else {
-                new_pinned.insert(*p);
-            }
+        // review 修复:此前逐条 remove,没有 tool 配对保护 —— 循环在
+        // "删掉 Assistant(tool_use)"与"删掉它的 Tool result"之间因达标
+        // 退出会留下半截配对,OpenAI / Anthropic 直接 400。现在:
+        // 目标的配对对端若受保护(pinned / keep 窗口)则跳过目标;
+        // 否则整对原子删除。
+        let cur: Vec<ChatMessage> = keep.iter().map(|(_, m)| m.clone()).collect();
+        let use_idx = crate::tool_pair::find_tool_use_indices(&cur);
+        let result_idx = crate::tool_pair::find_tool_result_indices(&cur);
+        let partner_positions: Vec<usize> = match &cur[drop_idx] {
+            ChatMessage::Tool(t) => use_idx.get(&t.call_id).copied().into_iter().collect(),
+            ChatMessage::Assistant(a) => a
+                .tool_calls
+                .iter()
+                .filter_map(|tc| result_idx.get(&tc.id))
+                .copied()
+                .collect(),
+            _ => Vec::new(),
+        };
+        if partner_positions
+            .iter()
+            .any(|q| pinned.contains(q) || *q >= keep_start)
+        {
+            // 配对对端受保护:跳过此条,保住整对。
+            drop_idx += 1;
+            continue;
         }
-        pinned = new_pinned;
-        removed_count += 1;
+        // 原子删除目标 + 配对对端(去重升序后从高位往低位删,并按既有
+        // 逻辑位移 pinned)。
+        let mut victims = partner_positions;
+        victims.push(drop_idx);
+        victims.sort_unstable();
+        victims.dedup();
+        for &v in victims.iter().rev() {
+            keep.remove(v);
+            pinned.remove(&v);
+            let mut new_pinned: std::collections::HashSet<usize> = std::collections::HashSet::new();
+            for p in &pinned {
+                if *p > v {
+                    new_pinned.insert(*p - 1);
+                } else {
+                    new_pinned.insert(*p);
+                }
+            }
+            pinned = new_pinned;
+            removed_count += 1;
+        }
         current_tokens = crate::tokens::estimate_messages(
             &keep.iter().map(|(_, m)| m.clone()).collect::<Vec<_>>(),
         );
