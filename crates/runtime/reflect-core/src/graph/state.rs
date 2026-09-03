@@ -44,6 +44,13 @@ pub struct AgentState {
     pub last_llm_input_tokens: Option<u32>,
     /// LLM 近期输出的 content blocks(文本 + 工具调用)。
     pub latest_content: Vec<ContentBlock>,
+    /// v1.5 持久化保真:本 turn 内**已完成步骤**的 content 归档
+    /// (assistant 文本 + tool_use + tool_result)。`model_call` 每次构造
+    /// 新的 `latest_content` 前,把上一轮内容移入本累加器;turn 结束时
+    /// `turn_content ++ latest_content` = 完整时序。此前 rollout 只落盘
+    /// 最后一次 model_call 的块,中间工具调用在 resume / `session search`
+    /// 视角下完全丢失(实战测试实证)。
+    pub turn_content: Vec<ContentBlock>,
     /// v1.x M2-fix:本回合内 `pre_loop` 一旦已用 `ctx.messages`(初始用户
     /// 输入)填充过 `state.messages` 即为 `true`。同回合内后续的
     /// `pre_loop` 调用**不得**清空 `state.messages` —— 否则 `model_call` /

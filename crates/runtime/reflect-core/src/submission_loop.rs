@@ -480,7 +480,7 @@ pub async fn submission_loop(
                     let turn_span_guard = telemetry_sink
                         .as_ref()
                         .map(|sink| sink.enter_turn(&turn_id.to_string()));
-                    let final_state = graph.run().await;
+                    let mut final_state = graph.run().await;
                     // 显式标完成(带 status),防止 guard 只写兜底的 note。
                     if let Some(g) = &turn_span_guard {
                         let status = if final_state.completed_normally {
@@ -583,13 +583,23 @@ pub async fn submission_loop(
                         // 客户端收到 TurnComplete 后可立即提交下一轮 UserInput,
                         // 下一轮的 replay() 回填若读不到最后的 assistant 记录,
                         // 历史会缺一段(间歇性跨轮失忆)。
+                        //
+                        // v1.5 持久化保真:turn_content(已完成步骤)++
+                        // latest_content(最后一步)= 完整时序。此前多步 turn
+                        // 只落盘最后一步,中间工具调用在 resume / session
+                        // search 视角下完全丢失(实战测试实证)。
                         if let Some(rec) = recorder {
-                            if !final_state.latest_content.is_empty() {
-                                let _ = rec
-                                    .record(RolloutRecord::message(
+                            if !final_state.turn_content.is_empty()
+                                || !final_state.latest_content.is_empty()
+                            {
+                                let mut all_content = std::mem::take(
+                                    &mut final_state.turn_content,
+                                );
+                                all_content.extend(final_state.latest_content.iter().cloned());
+                                let _ = rec.record(RolloutRecord::message(
                                         turn_id,
                                         MessageRole::Assistant,
-                                        serde_json::to_value(&final_state.latest_content)
+                                        serde_json::to_value(&all_content)
                                             .unwrap_or(serde_json::Value::Null),
                                     ))
                                     .await;

@@ -143,6 +143,16 @@ pub async fn bootstrap_common(args: &HeadlessArgs) -> anyhow::Result<HeadlessCom
         )
     })?;
 
+    // v1.5 实战修复:新用户首次运行(HOME 下无 `~/.reflect/`)时,notify
+    // watcher 要求被监听路径存在,否则 bootstrap 直接失败。先确保父目录
+    // 存在(与 login 写配置时的目录语义一致)。
+    if let Some(parent) = config_path.parent()
+        && !parent.exists()
+    {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            anyhow::anyhow!("failed to create config dir {}: {e}", parent.display())
+        })?;
+    }
     let watcher = ConfigWatcher::spawn(config_path.clone(), initial_cfg.clone()).map_err(|e| {
         anyhow::anyhow!(
             "failed to spawn config watcher at {}: {e}",

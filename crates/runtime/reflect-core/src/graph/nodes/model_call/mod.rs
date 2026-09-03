@@ -348,7 +348,11 @@ pub async fn model_call(state: &mut AgentState, ctx: &NodeContext) -> Option<Gra
     };
 
     // 构造 latest_content:text + tool_use 块。
-    state.latest_content.clear();
+    // v1.5 持久化保真:上一轮步骤的 content(text + tool_use + tool_result)
+    // 移入 turn_content 累加器 —— 若直接 clear,这些块在 turn 结束后的
+    // rollout 记录里彻底丢失,只有最后一次 model_call 的内容会落盘
+    // (实战测试实证:mock 调 write 工具后,rollout 里查不到工具调用)。
+    state.turn_content.append(&mut state.latest_content);
     // 完整 assistant 文本快照:此时 text_buf 尚未被 move 进 latest_content,
     // 先 clone 一份供 telemetry 落库用(下方 push 会消费 text_buf 所有权)。
     let text_for_telemetry = text_buf.clone();
