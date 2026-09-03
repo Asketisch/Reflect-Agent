@@ -219,9 +219,12 @@ pub fn search_text(
         }
         let path = entry.path();
         if let Some(glob) = include {
+            // review 修复:`trim_start_matches("*.")` 会把 `"*.rs"` 剥成
+            // `"rs"` 再做 ends_with,名为 `errors` / `managers`(不带点)
+            // 的文件被误命中。改按 `.ext` 带点比较。
             let path_s = path.to_string_lossy();
-            let ext = glob.trim_start_matches("*.");
-            if !path_s.ends_with(ext) && !path_s.ends_with(glob) {
+            let dotted = format!(".{}", glob.trim_start_matches("*."));
+            if !path_s.ends_with(&dotted) && !path_s.ends_with(glob) {
                 continue;
             }
         }

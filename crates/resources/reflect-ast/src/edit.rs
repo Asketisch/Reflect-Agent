@@ -20,7 +20,7 @@ use similar::TextDiff;
 use crate::grid::AstError;
 
 /// 一次替换的字节范围(0-indexed,半开区间 `[start_byte, end_byte)`)。
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ByteRange {
     pub start: usize,
     pub end: usize,
@@ -69,7 +69,12 @@ pub fn apply_replace(
     target_kind: &str,
     replacement: &str,
 ) -> Result<(String, String), AstError> {
-    let ranges = collect_node_ranges(tree, target_kind);
+    let mut ranges = collect_node_ranges(tree, target_kind);
+    // review 修复:同类节点天然嵌套(`a + b + c` 的 binary_expression、
+    // 嵌套 if 等),嵌套子 range 会让倒序 splice 触发 non-monotonic
+    // 断言(debug panic;release 走防御分支静默返回原文、0 diff,用户
+    // 以为替换成功实际什么都没写)。只保留最外层目标节点。
+    drop_contained_ranges(&mut ranges);
     if ranges.is_empty() {
         let empty_diff = TextDiff::from_lines(source, source);
         return Ok((source.to_string(), format!("{}", empty_diff.unified_diff())));
@@ -89,6 +94,22 @@ fn collect_node_ranges(tree: &tree_sitter::Tree, target: &str) -> Vec<ByteRange>
     let mut cursor = tree.walk();
     walk_collect(&mut cursor, target, &mut ranges);
     ranges
+}
+
+/// 过滤被其它已收集 range 完全包含(或相等)的子 range,只留最外层。
+fn drop_contained_ranges(ranges: &mut Vec<ByteRange>) {
+    ranges.sort_by_key(|r| (r.start, std::cmp::Reverse(r.end)));
+    let mut result: Vec<ByteRange> = Vec::with_capacity(ranges.len());
+    for &r in ranges.iter() {
+        if let Some(&last) = result.last()
+            && r.end <= last.end
+        {
+            // r ⊆ last(含相等):被外层吞掉。
+            continue;
+        }
+        result.push(r);
+    }
+    *ranges = result;
 }
 
 fn walk_collect(
@@ -207,6 +228,37 @@ mod tests {
         let tree = g.parse(crate::grid::LanguageId("rust"), src).unwrap();
         let (new, _diff) = apply_replace(src, &tree, "nonexistent_kind", "X").unwrap();
         assert_eq!(new, src);
+    }
+
+    /// review 回归:同类节点嵌套(binary_expression)只替换最外层,
+    /// 不再触发 non-monotonic 断言 / 静默 0 diff。
+    #[test]
+    fn apply_replace_nested_same_kind_nodes_replaces_outermost() {
+        let g = grid();
+        // `1 + 2 + 3` 解析为 binary_expression(binary_expression(1,2),3)。
+        let src = "let x = 1 + 2 + 3;";
+        let tree = g.parse(crate::grid::LanguageId("rust"), src).unwrap();
+        let (new, diff) = apply_replace(src, &tree, "binary_expression", "SUM").unwrap();
+        assert_eq!(new, "let x = SUM;");
+        assert!(diff.contains("+let x = SUM;"), "diff: {diff}");
+    }
+
+    #[test]
+    fn drop_contained_ranges_dedupes_and_keeps_outermost() {
+        let mut ranges = vec![
+            ByteRange { start: 0, end: 10 },
+            ByteRange { start: 2, end: 5 }, // ⊆ 第一个
+            ByteRange { start: 0, end: 10 }, // 与第一个相等
+            ByteRange { start: 12, end: 20 },
+        ];
+        drop_contained_ranges(&mut ranges);
+        assert_eq!(
+            ranges,
+            vec![
+                ByteRange { start: 0, end: 10 },
+                ByteRange { start: 12, end: 20 },
+            ]
+        );
     }
 
     #[test]

@@ -122,14 +122,24 @@ async fn run_command(cmd: &str) -> CommandResult {
     let mut stderr = child.stderr.take();
     let mut out_buf = Vec::with_capacity(8192);
     let mut err_buf = Vec::with_capacity(8192);
+    // review 修复:此前先串行 read_to_end stdout 再 stderr —— 若进程
+    // stderr 写满 64KB 管道而 stdout 无输出,子进程写 stderr 阻塞等我们读,
+    // 我们等 stdout 数据,双方互等(经典 pipe 死锁),最后 5 分钟超时被
+    // 误判"测试失败"否决 turn。改为 tokio::join! 并发排空两个管道。
+    let mut child = child;
     let collect = async {
-        if let Some(s) = stdout.as_mut() {
-            let _ = s.take(OUTPUT_LIMIT as u64).read_to_end(&mut out_buf).await;
-        }
-        if let Some(s) = stderr.as_mut() {
-            let _ = s.take(OUTPUT_LIMIT as u64).read_to_end(&mut err_buf).await;
-        }
-        child.wait().await
+        let out_fut = async {
+            if let Some(s) = stdout.as_mut() {
+                let _ = s.take(OUTPUT_LIMIT as u64).read_to_end(&mut out_buf).await;
+            }
+        };
+        let err_fut = async {
+            if let Some(s) = stderr.as_mut() {
+                let _ = s.take(OUTPUT_LIMIT as u64).read_to_end(&mut err_buf).await;
+            }
+        };
+        let ((), (), wait) = tokio::join!(out_fut, err_fut, child.wait());
+        wait
     };
     let exit = timeout(VERIFY_TIMEOUT, collect).await;
     let (passed, cannot_verify) = match exit {
