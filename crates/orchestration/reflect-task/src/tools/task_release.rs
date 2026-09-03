@@ -87,6 +87,18 @@ impl Tool for TaskReleaseTool {
     async fn execute(&self, ctx: ToolContext, args: Value) -> Result<ToolOutput, ToolError> {
         let list_id = list_id_from_args_or_ctx(&args, &ctx);
         let task_id = parse_u32_arg(&args, "taskId")?;
+        // review 修复:此前无状态校验,对 `Completed` 任务执行 release 会把它
+        // 退回 `Pending`(已完成任务"复活")。默认拒绝;显式 `force: true`
+        // 才放行(测试/调度场景的强制重置)。
+        let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+        let current = self.manager.get_task(&list_id, task_id, false).await?;
+        if current.status == TaskStatus::Completed && !force {
+            return Err(ToolError::Execution(format!(
+                "task #{} is already completed; release would resurrect it. \
+                 如确需重置,请传 force: true",
+                task_id
+            )));
+        }
 
         // 三态 patch:清空 claimed_by 与 claimed_at,把 status 退回 Pending。
         let patch = TaskPatch {
@@ -217,6 +229,53 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::InvalidArgs { .. }));
+    }
+
+    /// review 回归:对 Completed 任务执行 release 默认拒绝(防"完成后复活"),
+    /// `force: true` 才放行。
+    #[tokio::test]
+    async fn release_rejects_completed_task_unless_forced() {
+        let manager = mgr();
+        manager
+            .create_task(
+                &"L".into(),
+                "alpha".into(),
+                "".into(),
+                None,
+                None,
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        manager
+            .update_task(
+                &"L".into(),
+                1,
+                TaskPatch {
+                    status: Some(TaskStatus::Completed),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let tool = TaskReleaseTool::new(manager.clone());
+        let err = tool
+            .execute(
+                ToolContext::default(),
+                serde_json::json!({"taskId": 1, "listId": "L"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::Execution(_)), "got: {err:?}");
+        // force 放行。
+        tool.execute(
+            ToolContext::default(),
+            serde_json::json!({"taskId": 1, "listId": "L", "force": true}),
+        )
+        .await
+        .unwrap();
+        let t = manager.get_task(&"L".into(), 1, false).await.unwrap();
+        assert_eq!(t.status, TaskStatus::Pending);
     }
 
     #[test]

@@ -230,13 +230,26 @@ impl NodeRunner for TeamNodeRunner {
             })
             .expect("role default is Some");
 
-        // 4. 取出 spec(由 step 1 注入)。
-        let spec = ctx.factory.get_spec(&role).ok_or_else(|| {
-            PipelineError::node_msg(
-                self.name.clone(),
-                format!("role '{role}' not found in factory after inject"),
-            )
-        })?;
+        // 4. review 修复:此前经 factory.dynamic_specs 全局表(`get_spec`)
+        // 取 spec —— 同层并行节点共享同一 factory,两个团队有同名 role
+        // (如都有 `team-lead`)时会拿到对方团队的 spec 并 spawn。改为按本
+        // 节点 team 直接构造 spec,spawn 用显式传入的 spec,不经全局表。
+        // (inject_team 仍执行,仅供 list_specs 可观测性。)
+        let member = self
+            .team
+            .members
+            .iter()
+            .find(|m| {
+                let r = if m.role.is_empty() { &m.name } else { &m.role };
+                r == &role
+            })
+            .ok_or_else(|| {
+                PipelineError::node_msg(
+                    self.name.clone(),
+                    format!("role '{role}' not found in team '{}'", self.team.name),
+                )
+            })?;
+        let spec = member_to_spec(member);
 
         // 5. spawn 子代理并排空结果。
         let started = std::time::Instant::now();

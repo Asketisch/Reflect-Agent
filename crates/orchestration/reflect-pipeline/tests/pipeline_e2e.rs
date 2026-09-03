@@ -212,7 +212,7 @@ async fn abort_policy_stops_after_first_failure() {
 }
 
 #[tokio::test]
-async fn continue_collect_runs_all_nodes_after_failure() {
+async fn continue_collect_skips_transitive_downstream_after_failure() {
     let runners: Vec<Arc<dyn NodeRunner>> = vec![
         Arc::new(FixedRunner {
             name: "plan".into(),
@@ -239,14 +239,16 @@ async fn continue_collect_runs_all_nodes_after_failure() {
 
     let report = pipeline.run(ctx()).await.expect("run");
 
-    // ContinueCollect 把所有节点都跑完(不跳过,只标记 failed);整体 status = partial。
+    // review 修复后的语义:ContinueCollect 不再让失败节点的传递性下游照跑
+    // (旧语义会拿 Null 输入产出误导性结果),而是 skip;策略差异只体现在
+    // 整体 status = partial(Abort 则是 failed)。
     assert_eq!(report.status, "partial");
     assert_eq!(report.failure_policy, "continue_collect");
     let statuses: Vec<&str> = report.nodes.iter().map(|n| n.status.as_str()).collect();
     assert_eq!(
         statuses,
-        vec!["success", "failed", "success", "success"],
-        "ContinueCollect 应当跑完所有节点,failed 节点不阻塞后续"
+        vec!["success", "failed", "skipped", "skipped"],
+        "ContinueCollect 下失败节点的传递性下游应被 skip"
     );
 }
 

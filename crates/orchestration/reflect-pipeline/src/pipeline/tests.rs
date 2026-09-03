@@ -312,9 +312,14 @@ async fn run_abort_stops_after_first_failure() {
     assert_eq!(report.status, "failed");
 }
 
-/// `ContinueCollect` 策略下,plan 失败时 prd / exec 仍跑。
+/// `ContinueCollect` 策略下,失败节点的**传递性下游**仍被 skip(防拿 Null
+/// 输入产出误导性结果);策略差异只体现在整体状态(failed → partial)。
+///
+/// review 修复:旧语义是"ContinueCollect 下下游照跑",与本文件顶部文档
+/// "只跑上游全 Success 的节点"矛盾,且失败上游的 outputs 不存在,下游拿到
+/// Null 输入产出无意义结果,故收紧。
 #[tokio::test]
-async fn run_continue_collect_runs_all_nodes() {
+async fn run_continue_collect_skips_transitive_downstream() {
     let mut p = Pipeline::empty().with_failure_policy(FailurePolicy::ContinueCollect);
     p.add_node("plan", make_fail_runner("plan")).unwrap();
     p.add_node("prd", make_runner("prd")).unwrap();
@@ -334,13 +339,41 @@ async fn run_continue_collect_runs_all_nodes() {
     assert_eq!(report.nodes.len(), 3);
     assert_eq!(report.nodes[0].status, "failed");
     assert_eq!(
-        report.nodes[1].status, "success",
-        "prd 仍跑(ContinueCollect)"
+        report.nodes[1].status, "skipped",
+        "prd 是失败节点的下游,应被 skip"
     );
     assert_eq!(
-        report.nodes[2].status, "success",
-        "exec 仍跑(ContinueCollect)"
+        report.nodes[2].status, "skipped",
+        "exec 是失败节点的传递性下游,应被 skip"
     );
+    // ContinueCollect + any_failed → "partial"(与 Abort 的差异点)。
+    assert_eq!(report.status, "partial");
+}
+
+/// `ContinueCollect` 下**无依赖关系的旁支节点**不受失败影响,照常执行
+/// —— 这是 ContinueCollect 的本意(收集尽可能多的成功结果)。
+#[tokio::test]
+async fn run_continue_collect_runs_independent_branches() {
+    let mut p = Pipeline::empty().with_failure_policy(FailurePolicy::ContinueCollect);
+    // plan 失败,但 side 与 plan 无依赖,应照跑。
+    p.add_node("plan", make_fail_runner("plan")).unwrap();
+    p.add_node("side", make_runner("side")).unwrap();
+    p.add_node("prd", make_runner("prd")).unwrap();
+    p.add_edge("plan", "prd").unwrap();
+
+    let ctx = PipelineContext {
+        topic: "t".into(),
+        inputs: HashMap::new(),
+        factory: Arc::new(dummy_factory()),
+        manager: Arc::new(dummy_manager()),
+        cancel: CancellationToken::new(),
+        human_gate: None,
+    };
+    let report = p.run(ctx).await.unwrap();
+    let side = report.nodes.iter().find(|r| r.name == "side").unwrap();
+    assert_eq!(side.status, "success", "无依赖旁支应照跑");
+    let prd = report.nodes.iter().find(|r| r.name == "prd").unwrap();
+    assert_eq!(prd.status, "skipped", "失败节点的下游仍应 skip");
     assert_eq!(report.status, "partial");
 }
 

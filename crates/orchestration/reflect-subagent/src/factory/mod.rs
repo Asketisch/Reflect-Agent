@@ -64,6 +64,12 @@ pub struct SubAgentFactory {
     parent_skills: Mutex<Option<Arc<reflect_skills::SkillsCatalog>>>,
     /// 父级 tool registry —— 子 agent 接收其过滤后的视图。
     parent_tools: Arc<ToolRegistry>,
+    /// review 修复:按 role 覆盖子代理的工具来源。同名工具(如 discussion
+    /// 的 `send_message`,每个 participant 实例携带不同 `self_id`)无法共存
+    /// 于单一 registry(map 按 name 覆盖,后注册者吞掉先注册者,所有子代理
+    /// 共用最后一个身份)。`Some` 时 `spawn` 按 `spec.role` 从对应 registry
+    /// 过滤,而非 `parent_tools`。
+    role_tools: Mutex<HashMap<String, Arc<ToolRegistry>>>,
     /// 父级 cancel token —— 子 agent 继承它。
     cancel: CancellationToken,
     /// 父级 recorder(可选),用于写入 `Fork` 记录 + 创建子 agent JSONL 文件。
@@ -144,6 +150,7 @@ impl SubAgentFactory {
             child_registry: Mutex::new(child_registry),
             parent_skills: Mutex::new(None),
             parent_tools,
+            role_tools: Mutex::new(HashMap::new()),
             cancel,
             recorder,
             _no_parent_m4: (),
@@ -193,6 +200,23 @@ impl SubAgentFactory {
     /// 读当前 child registry 快照(若有)。`spawn` 与测试窥探用。
     pub fn current_child_registry(&self) -> Option<SharedModelRegistry> {
         self.child_registry.lock().clone()
+    }
+
+    // ── review 修复: per-role 工具注册表(同名工具多身份共存) ──────────
+
+    /// 为指定 `role` 注入专属工具注册表。`spawn` 时若该 role 有覆盖,
+    /// 子代理的 `allowed_tools` 过滤从该 registry 选取,而非共享的
+    /// `parent_tools`。适用于"同名工具、不同实例"的场景(典型:
+    /// discussion 每个 participant 的 `send_message` 携带不同 `self_id`)。
+    pub fn set_role_tools(&self, role: &str, registry: Arc<ToolRegistry>) {
+        self.role_tools
+            .lock()
+            .insert(role.to_string(), registry);
+    }
+
+    /// 读取指定 role 的工具注册表覆盖(若有)。
+    pub fn role_tools(&self, role: &str) -> Option<Arc<ToolRegistry>> {
+        self.role_tools.lock().get(role).cloned()
     }
 
     // ── v1.x 功能 6: parent skills 注入(subagent 支持 skill) ──────────
@@ -395,6 +419,9 @@ impl SubAgentFactory {
             // 子 factory 继承父级 parent_skills —— 孙级也能用 skill。
             parent_skills: Mutex::new(self.parent_skills.lock().clone()),
             parent_tools: self.parent_tools.clone(),
+            // per-role 工具注册表同样父子共享 —— 孙级 spawn 的身份路由
+            // 语义与父级一致(discussion 场景下子代理可能再 spawn)。
+            role_tools: Mutex::new(self.role_tools.lock().clone()),
             cancel: self.cancel.clone(),
             recorder: self.recorder.clone(),
             _no_parent_m4: (),
@@ -475,9 +502,15 @@ impl SubAgentFactory {
         // 子 registry 重建,父级主 session 的 plugin 加载 / MCP server 启动
         // 等副作用仍由主 session 持有,worker 只读 filter 视图。
         let child_tools = Arc::new(ToolRegistry::default());
+        // review 修复:role 有专属工具注册表时从它过滤(同名工具多身份),
+        // 否则从共享的 parent_tools 过滤。
+        let role_registry = self.role_tools(&spec.role);
+        let tool_source: &ToolRegistry = role_registry
+            .as_deref()
+            .unwrap_or(&self.parent_tools);
         if self.coordinator_mode.load(Ordering::SeqCst) {
             // coordinator 启用:从父 registry 排除 internal tools。
-            let worker_registry = build_worker_tool_registry(&self.parent_tools);
+            let worker_registry = build_worker_tool_registry(tool_source);
             for name in worker_registry.list() {
                 if let Some(t) = worker_registry.get(&name) {
                     child_tools.register(t);
@@ -486,7 +519,7 @@ impl SubAgentFactory {
         } else {
             // 默认路径:按 spec.allowed_tools 过滤。
             for name in &spec.allowed_tools {
-                if let Some(t) = self.parent_tools.get(name) {
+                if let Some(t) = tool_source.get(name) {
                     child_tools.register(t);
                 }
             }
@@ -721,8 +754,22 @@ impl SpawnedChild {
                 break;
             }
         }
-        let text = crate::data_transfer::extract_result(&events, &data_transfer.result_extractor)
-            .ok_or_else(|| SubAgentError::SpawnFailed("no result extractable".into()))?;
+        // review 修复:此前 `extract_result(...).ok_or_else(...)?` 在执行
+        // `fetch_sub` 之前提前返回 —— 抽取失败(子代理没产出可提取结果)会
+        // 永久消耗一个 in-flight 槽位,16 次后 factory 拒绝一切 spawn。
+        // 现在所有退出路径都恰好释放一次槽位。
+        let text = match crate::data_transfer::extract_result(
+            &events,
+            &data_transfer.result_extractor,
+        ) {
+            Some(text) => text,
+            None => {
+                if let Some(arc) = in_flight_arc {
+                    arc.fetch_sub(1, Ordering::SeqCst);
+                }
+                return Err(SubAgentError::SpawnFailed("no result extractable".into()));
+            }
+        };
         let token_usage = usage_from_turn_complete.or(usage_from_token_count);
         // 释放 in_flight Arc(fetch_sub 一次),让 in-flight 槽位归位。
         if let Some(arc) = in_flight_arc {

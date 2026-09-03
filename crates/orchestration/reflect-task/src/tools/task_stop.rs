@@ -89,6 +89,11 @@ impl Tool for TaskStopTool {
             status: Some(TaskStatus::Pending),
             // `owner: Some(None)` 在 TaskPatch 语义里表示"显式清空"。
             owner: Some(None),
+            // review 修复:停止后 `claimed_by` / `claimed_at` 一并清空,
+            // 避免出现"Pending 但仍记着旧 claimer"的自洽性缺口
+            // (对齐 TaskRelease 的三态清理)。
+            claimed_by: Some(None),
+            claimed_at: Some(None),
             ..Default::default()
         };
         let outcome = self.manager.update_task(&list_id, task_id, patch).await?;

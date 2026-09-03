@@ -215,7 +215,11 @@ impl MessageBus {
             }
         };
 
-        // 3. 逐个投递(await 时不持 mailboxes 锁)
+        // 3. 逐个投递(await 时不持 mailboxes 锁)。
+        // review 修复:此前对 bounded mailbox `send().await` —— mailbox 的
+        // 唯一消费者是 `read_messages` 工具,LLM 可以选择不调用;长讨论中
+        // 邮箱写满后 `route` 永久挂起,整场讨论死锁且无诊断。现降级为
+        // `try_send`:满时丢弃投递但**仍记入 transcript**,并记 warn。
         for target in &targets {
             // 拿 sender clone(避免 await 期间持锁)
             let tx = {
@@ -225,11 +229,25 @@ impl MessageBus {
                     .ok_or_else(|| BusError::UnknownAgent(target.clone()))?;
                 mb.tx.clone()
             };
-            tx.send(msg.clone())
-                .await
-                .map_err(|_| BusError::MailboxClosed {
-                    agent: target.clone(),
-                })?;
+            if let Err(e) = tx.try_send(msg.clone()) {
+                match e {
+                    mpsc::error::TrySendError::Full(_) => {
+                        // Mailbox 满(LLM 没消费):降级投递(不阻塞),
+                        // transcript 仍留痕,讨论不至于死锁。
+                        tracing::warn!(
+                            agent = %target.0,
+                            id = msg.id.0,
+                            "mailbox 满,消息未投递到邮箱(仍保留在 transcript)"
+                        );
+                    }
+                    mpsc::error::TrySendError::Closed(_) => {
+                        // receiver 已 drop 是结构性错误,保留报错语义。
+                        return Err(BusError::MailboxClosed {
+                            agent: target.clone(),
+                        });
+                    }
+                }
+            }
         }
 
         // 4. append transcript(短锁)

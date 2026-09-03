@@ -14,6 +14,10 @@ use crate::spec::SubAgentSpec;
 pub struct CallSubAgentTool {
     pub factory: Arc<SubAgentFactory>,
     pub spec: SubAgentSpec,
+    /// review 修复:缓存 `call_<role>` 工具名。此前每次 `name()` 都
+    /// `Box::leak` 一份新字符串,而 `name()` 在每轮序列化工具列表时都会被
+    /// 调用,长会话泄漏 O(turns × tools)。
+    tool_name_cache: std::sync::OnceLock<String>,
 }
 
 impl std::fmt::Debug for CallSubAgentTool {
@@ -26,22 +30,21 @@ impl std::fmt::Debug for CallSubAgentTool {
 
 impl CallSubAgentTool {
     pub fn new(factory: Arc<SubAgentFactory>, spec: SubAgentSpec) -> Self {
-        Self { factory, spec }
+        Self {
+            factory,
+            spec,
+            tool_name_cache: std::sync::OnceLock::new(),
+        }
     }
 }
 
 #[async_trait]
 impl Tool for CallSubAgentTool {
     fn name(&self) -> &str {
-        // 工具名以 owned `String` 形式存在 spec 内部。
-        // 用 `Box::leak` 缓存指针?否 —— 用 thread-local 缓存让借用检查器满意。
-        // 更简单的做法:直接返回一个泄漏的 str。
-        // Spec 只在启动时构造一次,小量泄漏可接受。
-        //
-        // 为了避免泄漏,可在注册时把 `self.spec.role` 前缀拼好后用精确名称注册
-        // (registry 仅在注册时使用 `tool.name()`)。调用方(exec / bootstrap)
-        // 已知名称,无需回查。
-        &self.spec.role_for_tool_name()
+        // 工具名以 owned `String` 形式存在 spec 内部,`Tool::name` 要求
+        // borrowed `&str` —— 用实例级 OnceLock 缓存,首次计算后零分配,
+        // 随实例一起释放,不再泄漏。
+        self.tool_name_cache.get_or_init(|| self.spec.tool_name())
     }
 
     fn description(&self) -> &str {
@@ -139,16 +142,14 @@ impl Tool for CallSubAgentTool {
     }
 }
 
-// `name()` 内使用的 helper trait。`SubAgentSpec::tool_name()` 每次调用都
-// 分配一个新的 `String`,这与 `&str` 返回类型冲突。所以通过本实现预计算
-// 并存储一个泄漏的 str。
+// `SubAgentSpec::role_for_tool_name` 已废弃:此前每次调用 `Box::leak` 一份
+// 新字符串,而 `Tool::name()` 每轮序列化工具列表都会调用,长会话泄漏
+// O(turns × tools)。工具名现由 `CallSubAgentTool` 的实例级 `OnceLock` 缓存。
+#[allow(dead_code)]
 impl SubAgentSpec {
-    /// 以 borrowed `&str` 形式返回 `call_<role>`。每个 spec 一次性泄漏,
-    /// 因为 spec 仅在启动时构造一次,代价可接受。
-    pub fn role_for_tool_name(&self) -> &str {
-        // 按需计算;通过类似 thread-local 的方式泄漏缓存。
-        let s = self.tool_name();
-        Box::leak(s.into_boxed_str())
+    /// 兼容保留:仅供测试/外部诊断使用,内部不再调用。
+    pub fn role_for_tool_name(&self) -> String {
+        self.tool_name()
     }
 }
 
