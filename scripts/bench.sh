@@ -93,8 +93,10 @@ echo
 
 # 1. 冷启动
 run_bench "cold_start" "$BIN" --version
-# 2. 首事件
-run_bench "first_event" "$BIN" exec "noop"
+# 2. 首事件(mock provider —— review 修复:此前无 provider 配置,测的是
+#    fail-fast 报错路径而非首事件;现与 single_turn 同环境)
+run_bench "first_event" \
+    env OPENAI_API_KEY=sk-test REFLECT_MODEL=mock "$BIN" exec "noop"
 # 3. 单轮对话(mock provider,避免网络)
 run_bench "single_turn" \
     env OPENAI_API_KEY=sk-test REFLECT_MODEL=mock "$BIN" exec "noop"

@@ -1,5 +1,5 @@
 # ── Reflect Makefile ───────────────────────────────────────────────
-.PHONY: build run test test-fast test-changed check check-fast watch clean gc gc-deep dmg dist dist-dry help
+.PHONY: build run headless test test-fast test-changed check check-fast watch clean gc gc-deep dmg dist dist-dry help install
 
 BINARY_NAME := reflect
 INSTALL_DIR := /usr/local/bin
@@ -8,9 +8,13 @@ INSTALL_DIR := /usr/local/bin
 build:
 	cargo build --release -p reflect-cli
 
-## run: 构建并直接启动 TUI
+## run: 构建并打印 CLI 帮助(本仓库二进制无 TUI 子命令,TUI 在 Reflect-CLI 仓库)
 run: build
-	./target/release/$(BINARY_NAME)
+	./target/release/$(BINARY_NAME) --help
+
+## headless: mock provider 跑一轮 headless 对话(离线自检)
+headless: build
+	REFLECT_MODEL=mock ./target/release/$(BINARY_NAME) exec "noop"
 
 ## install: 构建 + 安装到 /usr/local/bin
 install:
@@ -28,9 +32,9 @@ dist:
 dist-dry:
 	scripts/build.sh --dist --dry-run
 
-## test: 跑全部测试(cargo test,全量兼容)
+## test: 跑全部测试(cargo test,全量兼容;--all-targets 与 CI 对齐)
 test:
-	cargo test --workspace
+	cargo test --workspace --all-targets
 
 ## test-fast: 用 nextest 跑全部测试(进程级并行,更快;需 cargo-nextest)
 test-fast:
@@ -44,7 +48,7 @@ test-changed:
 check:
 	cargo check --workspace
 
-## check-fast: 快速类型检查单个 crate(示例:make check-fast C=reflect-tui)
+## check-fast: 快速类型检查单个 crate(示例:make check-fast C=reflect-core)
 check-fast:
 	cargo check -p $(C)
 
@@ -74,12 +78,13 @@ gc-deep: gc
 help:
 	@echo "可用目标:"
 	@echo "  build         - 以 release 模式编译"
-	@echo "  run           - 构建并启动 TUI"
+	@echo "  run           - 构建并打印 CLI 帮助(本仓库无 TUI 子命令)"
+	@echo "  headless      - mock provider 跑一轮 headless 对话(离线自检)"
 	@echo "  install       - 构建 + 安装到 $(INSTALL_DIR)"
 	@echo "  dmg           - 构建 macOS DMG 安装包(dist/)"
 	@echo "  dist          - 构建并打包当前平台分发包(DMG/tar.gz/zip)到 dist/"
 	@echo "  dist-dry      - 预览 dist 打包命令(不实际执行)"
-	@echo "  test          - cargo test(全量兼容)"
+	@echo "  test          - cargo test --all-targets(全量兼容,与 CI 对齐)"
 	@echo "  test-fast     - nextest 加速跑全部测试(需 cargo-nextest)"
 	@echo "  test-changed  - nextest 只跑变更影响测试(开发循环)"
 	@echo "  check         - cargo check 全 workspace"
