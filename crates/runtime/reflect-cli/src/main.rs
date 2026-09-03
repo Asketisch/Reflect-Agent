@@ -291,6 +291,19 @@ enum SessionAction {
         #[arg(long, short = 'o')]
         out: Option<std::path::PathBuf>,
     },
+    /// v1.5 新功能:跨会话全文搜索 —— 在全部本地 session 的消息内容里
+    /// 找回"上次那个报错 / 修法出现在哪个 session"。纯读,按最近活跃
+    /// 优先;输出可直接配合 `reflect exec --resume <id>` 续跑。
+    Search {
+        /// 搜索词(大小写不敏感子串)。
+        query: String,
+        /// 最多显示条数。
+        #[arg(long, short = 'n', default_value_t = 20)]
+        limit: usize,
+        /// 以 JSON 行输出(每条命中一行,便于脚本消费)。
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// `reflect traces ...` —— 列 / 看本地 LLM 调用记录(v1.2 P1)。
@@ -702,6 +715,11 @@ fn main() -> anyhow::Result<()> {
             SessionAction::Fork { id, branch } => session::fork(&id, branch.as_deref()),
             SessionAction::Rename { id, name } => session::rename(&id, &name),
             SessionAction::Export { id, out } => session::export(&id, out.as_deref()),
+            SessionAction::Search {
+                query,
+                limit,
+                json,
+            } => session::search(&query, limit, json),
         },
         Command::Traces { action } => match action {
             TracesAction::Ls { limit } => traces::ls(limit),

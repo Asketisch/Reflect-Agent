@@ -14,6 +14,23 @@ pub struct ToolCallBeginEvent {
     pub child_id: Option<String>,
 }
 
+/// 流式工具参数增量(v1.5 additive 变体,Protocol v0 冻结规则下新增 = 兼容)。
+///
+/// 模型生成 tool_use 参数期间,把 LLM 层的 `ChatEvent::ToolUseDelta`
+/// 原样转发给客户端:call_id 由首个未终结的 ToolUseStart 提供。客户端
+/// (TUI / SDK)可在**模型仍在生成时**渐进渲染 write / edit 等长参数
+/// 工具的输入,不再面对 `ToolCallBegin(args 恒 null)` 的黑盒等待。
+///
+/// 兼容策略:`#[serde(default)]` 的字段形态与其它事件一致;老客户端
+/// 收到未知 `type` 按 PROTOCOL.md 约定忽略即可。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallArgsDeltaEvent {
+    /// 进行中的 tool_use 调用标识(与后续 `ToolCallBegin` 的工具对应)。
+    pub call_id: String,
+    /// 本次增量追加的原始 JSON 参数片段(未解析,由消费方累积)。
+    pub delta: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallEndEvent {
     pub call_id: String,

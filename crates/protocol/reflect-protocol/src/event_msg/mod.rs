@@ -43,7 +43,9 @@ pub use plan::{
 };
 pub use plugin::{PluginLoadedEvent, QuotaExhaustedEvent};
 pub use routing::{RoutingEvent, RoutingEventKind};
-pub use tool::{ToolCallBeginEvent, ToolCallEndEvent, ToolExecutionRequestEvent};
+pub use tool::{
+    ToolCallArgsDeltaEvent, ToolCallBeginEvent, ToolCallEndEvent, ToolExecutionRequestEvent,
+};
 pub use turn::{
     AbortReason, TokenUsage, TurnAbortedEvent, TurnCompleteEvent, TurnRewoundEvent,
     TurnStartedEvent, TurnStatus,
@@ -81,8 +83,11 @@ pub enum EventMsg {
     /// Token 用量快照(通常在 turn 结束时 emit)。
     TokenCount(TokenCountEvent),
 
-    // 工具(2;v1 新增 ToolCallOutputDelta)
+    // 工具(3)
     ToolCallBegin(ToolCallBeginEvent),
+    /// v1.5:流式工具参数增量(模型生成 tool_use 参数期间逐段转发,
+    /// `call_id` 与后续 `ToolCallBegin` 的工具对应;新增变体 = additive 兼容)。
+    ToolCallArgsDelta(ToolCallArgsDeltaEvent),
     ToolCallEnd(ToolCallEndEvent),
     /// v1.3 SDK:请求客户端执行其注册的远程自定义工具(实现留在客户端
     /// 进程,core 只做转发与等待)。回执走 `Op::ToolExecutionResponse`。
@@ -221,6 +226,7 @@ impl EventMsg {
             EventMsg::ThinkingDelta(_) => "thinking_delta",
             EventMsg::TokenCount(_) => "token_count",
             EventMsg::ToolCallBegin(_) => "tool_call_begin",
+            EventMsg::ToolCallArgsDelta(_) => "tool_call_args_delta",
             EventMsg::ToolCallEnd(_) => "tool_call_end",
             EventMsg::ToolExecutionRequest(_) => "tool_execution_request",
             EventMsg::ApprovalRequest(_) => "approval_request",
@@ -377,6 +383,11 @@ mod tests {
                 tool_name: "t".into(),
                 args: serde_json::Value::Null,
                 child_id: None,
+            }),
+            // v1.5:流式工具参数增量(additive 变体的 wire 形态锁定)。
+            EventMsg::ToolCallArgsDelta(ToolCallArgsDeltaEvent {
+                call_id: "c".into(),
+                delta: "{\"path\":\"a".into(),
             }),
             EventMsg::SessionConfigured(SessionConfiguredEvent::new("m", "p")),
             EventMsg::ApprovalRequest(ApprovalRequestEvent {

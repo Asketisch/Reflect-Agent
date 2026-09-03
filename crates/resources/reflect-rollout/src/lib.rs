@@ -25,11 +25,13 @@ pub mod index;
 pub mod path;
 pub mod reader;
 pub mod redact;
+pub mod search;
 pub mod types;
 pub mod writer;
 
 pub use export::{MAX_MARKDOWN_CHARS, to_markdown};
 pub use reader::{replay, replay_path};
+pub use search::{SearchHit, SearchOptions, search_sessions};
 pub use writer::JsonlRolloutWriter;
 
 // `RolloutRecord` 在此 re-export,是因为 `redact.rs` 通过

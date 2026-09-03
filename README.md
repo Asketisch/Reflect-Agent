@@ -286,6 +286,7 @@ RUST_LOG=debug reflect exec "hello" 2>debug.log
 
 # 续 session
 reflect session ls
+reflect session search "那个报错"   # 跨会话全文搜索(v1.5)
 reflect exec -c "继续上次"
 ```
 

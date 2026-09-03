@@ -39,7 +39,8 @@ pub use event_msg::{
     PlanApprovedEvent, PlanDraftUpdatedEvent, PlanReadyEvent, PlanRejectedEvent, PlanRequestEvent,
     PlanStepEvent, PlanStepStatus, PluginLoadedEvent, QuotaExhaustedEvent, RoutingEvent,
     RoutingEventKind, StreamErrorEvent, ThinkingDelta, TokenCountEvent, TokenUsage,
-    ToolCallBeginEvent, ToolCallEndEvent, ToolExecutionRequestEvent, TriedCredential,
+    ToolCallArgsDeltaEvent, ToolCallBeginEvent, ToolCallEndEvent, ToolExecutionRequestEvent,
+    TriedCredential,
     TurnAbortedEvent, TurnCompleteEvent, TurnRewoundEvent, TurnStartedEvent, TurnStatus,
 };
 pub use item::{

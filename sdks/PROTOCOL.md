@@ -74,7 +74,7 @@ turn 事件(带 submission `id`)按时间序输出,典型一轮:
 
 ```
 turn_started → [thinking_delta | agent_message_delta | agent_message]*
-             → [tool_call_begin → tool_execution_request? → tool_call_end]*
+             → [tool_call_args_delta* → tool_call_begin → tool_execution_request? → tool_call_end]*
              → [approval_request?] → turn_complete
 ```
 
@@ -86,6 +86,7 @@ SDK 关心的核心变体(完整列表见 `event_msg/mod.rs`):
 | `turn_started` | `turn_id` | turn 开始 |
 | `agent_message_delta` | `delta` | 增量文本 |
 | `agent_message` | `text` | 完整消息(非流式 provider) |
+| `tool_call_args_delta` | `call_id`, `delta` | **v1.5 新增(additive)**:模型生成工具参数期间的原始 JSON 片段;客户端可渐进渲染,累积结果 = 后续 `tool_call_begin` 工具的完整参数。老客户端按未知 `type` 忽略即可 |
 | `tool_call_begin` / `tool_call_end` | `call_id`, `tool_name`, `output`, `is_error` | 内置工具调用 |
 | `tool_execution_request` | `call_id`, `tool`, `args` | **远程工具**:请求客户端本地执行(见 §5) |
 | `approval_request` | `request_id`, `kind`, `risk` | 等待 `tool_approval` 回执 |

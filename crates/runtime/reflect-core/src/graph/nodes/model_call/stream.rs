@@ -131,6 +131,22 @@ pub async fn process_stream_events(
                     }
                     Some(Ok(ChatEvent::ToolUseDelta(partial))) => {
                         current_args_str.push_str(&partial);
+                        // v1.5 新功能:把流式工具参数增量转发给客户端 ——
+                        // 此前只缓冲不转发,tool_call_begin 携带 args: null,
+                        // 消费方在模型生成期间只能干等。additive 变体,
+                        // 老客户端按未知 type 忽略。
+                        if let Some((id, _)) = &current_tool {
+                            let _ = ctx.event_tx.send(Event::new(
+                                ctx.sub_id.clone(),
+                                EventMsg::ToolCallArgsDelta(
+                                    reflect_protocol::ToolCallArgsDeltaEvent {
+                                        call_id: id.clone(),
+                                        delta: partial,
+                                    },
+                                ),
+                            ))
+                            .await;
+                        }
                     }
                     Some(Ok(ChatEvent::MessageStopTruncated { .. })) => {
                         truncated = true;
@@ -284,5 +300,116 @@ fn build_cooldown_reason(e: &LlmError) -> reflect_llm::CooldownReason {
         }
         LlmError::Auth => reflect_llm::CooldownReason::Auth,
         _ => reflect_llm::CooldownReason::Auth,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::stream;
+    use std::sync::Arc;
+
+    /// 最小 `NodeContext`(与 check_stop 测试同款),额外保留 event 接收端,
+    /// 供断言转发的事件序列。
+    fn minimal_ctx() -> (
+        NodeContext,
+        tokio::sync::mpsc::Receiver<reflect_protocol::Event>,
+    ) {
+        let (event_tx, rx) = tokio::sync::mpsc::channel::<reflect_protocol::Event>(64);
+        let ctx = NodeContext {
+            turn_id: reflect_protocol::TurnId::new(),
+            session_id: reflect_protocol::ThreadId::new(),
+            model: Arc::new(parking_lot::RwLock::new("stub/model".to_string())),
+            policy: Arc::new(reflect_llm::RoutingPolicy::default()),
+            registry: Arc::new(reflect_llm::ModelRegistry::new()),
+            hook_engine: Arc::new(reflect_hooks::HookEngine::new()),
+            tools_queue: Arc::new(reflect_tools::ToolExecutionQueue::with_defaults(
+                Arc::new(reflect_tools::ToolRegistry::new()),
+                Arc::new(reflect_hooks::HookEngine::new()),
+                reflect_tools::ToolContext::default(),
+            )),
+            sub_id: "sub-test".into(),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            event_tx,
+            messages: vec![],
+            max_iterations: 32,
+            m4: None,
+            recorder: None,
+            approval_gate: None,
+            effort: Arc::new(parking_lot::RwLock::new(
+                reflect_protocol::ReasoningEffortMirror::Medium,
+            )),
+            session_usage: Arc::new(parking_lot::RwLock::new(
+                reflect_protocol::TokenUsage::default(),
+            )),
+            token_budget: Arc::new(parking_lot::RwLock::new(None)),
+            force_compact_next: Arc::new(parking_lot::RwLock::new(false)),
+            telemetry: None,
+            goal: None,
+            quota_tracker: None,
+            plan_approval_gate: None,
+            plan_session_subs: None,
+            cfg: crate::config::AgentConfig::new("stub/model", "/tmp"),
+        };
+        (ctx, rx)
+    }
+
+    /// v1.5 新功能回归:`ToolUseDelta` 必须以 `ToolCallArgsDelta` 事件转发,
+    /// call_id 对应进行中的 tool_use;并行多工具时增量按 Start 边界归属。
+    #[tokio::test]
+    async fn tool_use_delta_is_forwarded_as_args_delta() {
+        let (ctx, mut rx) = minimal_ctx();
+        let events = vec![
+            Ok(ChatEvent::ToolUseStart {
+                id: "call-1".into(),
+                name: "write".into(),
+                input_json: String::new(),
+            }),
+            Ok(ChatEvent::ToolUseDelta("{\"path\":\"a".into())),
+            Ok(ChatEvent::ToolUseDelta(".txt\"}".into())),
+            // 第二个并行工具:上一工具的增量必须归属 call-1。
+            Ok(ChatEvent::ToolUseStart {
+                id: "call-2".into(),
+                name: "edit".into(),
+                input_json: String::new(),
+            }),
+            Ok(ChatEvent::ToolUseDelta("{\"x\":1}".into())),
+            Ok(ChatEvent::MessageStop),
+        ];
+        let mut s = Box::pin(stream::iter(events));
+        let mut tried = Vec::new();
+        let result = process_stream_events(
+            &mut s,
+            &mut tried,
+            "mock",
+            "label",
+            &ctx,
+            std::time::Duration::from_secs(1),
+        )
+        .await;
+        let (_text, tool_calls, _usage, _provider, _label, _truncated, _think) = result.unwrap();
+        // 两个工具的参数都被完整解析。
+        assert_eq!(tool_calls.len(), 2);
+        assert_eq!(tool_calls[0].0, "call-1");
+        assert_eq!(tool_calls[0].2["path"], "a.txt");
+        assert_eq!(tool_calls[1].0, "call-2");
+        assert_eq!(tool_calls[1].2["x"], 1);
+
+        // 事件序列:每个 delta 都带正确的 call_id 转发。
+        let mut args_deltas: Vec<(String, String)> = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let EventMsg::ToolCallArgsDelta(d) = ev.msg {
+                args_deltas.push((d.call_id, d.delta));
+            }
+        }
+        assert_eq!(
+            args_deltas,
+            vec![
+                ("call-1".to_string(), "{\"path\":\"a".to_string()),
+                ("call-1".to_string(), ".txt\"}".to_string()),
+                ("call-2".to_string(), "{\"x\":1}".to_string()),
+            ],
+            "ToolCallArgsDelta 必须按 Start 边界归属 call_id"
+        );
     }
 }
