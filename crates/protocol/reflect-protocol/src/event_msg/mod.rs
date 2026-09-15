@@ -1,7 +1,7 @@
 //! EventMsg —— core 可 emit 的全部事件的标签联合类型。
 //!
 //! v0 有 17 个变体。后续新增变体是 additive、非破坏性的(serde 增量化)。
-//! M1/M2 暂不提供 `ToolCallOutputDelta`(推迟到 v1)。
+//! v1.4 A3 提供 `ToolCallOutputDelta`(工具输出流式增量,原推迟项落地)。
 //! M6 新增 `ApprovalRequest`(与 `Op::ToolApproval` / `Op::HookApproval` 配对)。
 //! M7 新增 `ConfigReloaded`。
 //! M10/v0.2.4 新增 `CollabStarted` / `CollabMessage` / `CollabFinished`,
@@ -43,7 +43,9 @@ pub use plan::{
 };
 pub use plugin::{PluginLoadedEvent, QuotaExhaustedEvent};
 pub use routing::{RoutingEvent, RoutingEventKind};
-pub use tool::{ToolCallBeginEvent, ToolCallEndEvent, ToolExecutionRequestEvent};
+pub use tool::{
+    ToolCallBeginEvent, ToolCallEndEvent, ToolCallOutputDeltaEvent, ToolExecutionRequestEvent,
+};
 pub use turn::{
     AbortReason, TokenUsage, TurnAbortedEvent, TurnCompleteEvent, TurnRewoundEvent,
     TurnStartedEvent, TurnStatus,
@@ -81,9 +83,13 @@ pub enum EventMsg {
     /// Token 用量快照(通常在 turn 结束时 emit)。
     TokenCount(TokenCountEvent),
 
-    // 工具(2;v1 新增 ToolCallOutputDelta)
+    // 工具(3;v1.4 A3 新增 ToolCallOutputDelta)
     ToolCallBegin(ToolCallBeginEvent),
     ToolCallEnd(ToolCallEndEvent),
+    /// v1.4 A3:工具输出流式增量 —— 长工具(构建 / 测试)执行期间逐段
+    /// 上报 stdout/stderr,客户端实时可见;最终完整输出仍以
+    /// `ToolCallEnd` 为准(增量只是预览,不做脱敏)。
+    ToolCallOutputDelta(ToolCallOutputDeltaEvent),
     /// v1.3 SDK:请求客户端执行其注册的远程自定义工具(实现留在客户端
     /// 进程,core 只做转发与等待)。回执走 `Op::ToolExecutionResponse`。
     ToolExecutionRequest(ToolExecutionRequestEvent),
@@ -222,6 +228,7 @@ impl EventMsg {
             EventMsg::TokenCount(_) => "token_count",
             EventMsg::ToolCallBegin(_) => "tool_call_begin",
             EventMsg::ToolCallEnd(_) => "tool_call_end",
+            EventMsg::ToolCallOutputDelta(_) => "tool_call_output_delta",
             EventMsg::ToolExecutionRequest(_) => "tool_execution_request",
             EventMsg::ApprovalRequest(_) => "approval_request",
             EventMsg::AskUserQuestion(_) => "ask_user_question",

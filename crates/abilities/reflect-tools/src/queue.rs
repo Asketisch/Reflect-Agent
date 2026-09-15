@@ -183,6 +183,25 @@ impl ToolExecutionQueue {
         calls: Vec<ToolCallRequest>,
         gate: Option<Arc<ApprovalGate>>,
     ) -> Vec<ToolResult> {
+        self.execute_all_with_progress(calls, gate, None).await
+    }
+
+    /// v1.4 A3:`execute_all_with_gate` 的流式增量变体。`progress_tx` 为
+    /// `Some` 时,每个调用的 `ToolContext.progress` 被注入一个转发闭包,
+    /// 工具(bash 等)执行期间逐段上报的输出经它转成
+    /// `EventMsg::ToolCallOutputDelta` 事件发出 —— 客户端实时可见长命令
+    /// 进展,无需等 `ToolCallEnd`。`None` 与旧路径完全一致(零开销)。
+    ///
+    /// 转发闭包是同步的(工具在 async 上下文里调用),用 `try_send`
+    /// 非阻塞投递:通道满则丢弃该帧 —— 增量只是预览,最终完整输出以
+    /// `ToolCallEnd` 为准,丢帧不损失语义(与会话级 fan_out 的丢帧策略
+    /// 一致)。
+    pub async fn execute_all_with_progress(
+        &self,
+        calls: Vec<ToolCallRequest>,
+        gate: Option<Arc<ApprovalGate>>,
+        progress_tx: Option<tokio::sync::mpsc::Sender<reflect_protocol::Event>>,
+    ) -> Vec<ToolResult> {
         // 按并发安全性切分。需保留原始下标,保证最终结果顺序与输入一致。
         let mut indexed_safe: Vec<(usize, ToolCallRequest)> = Vec::new();
         let mut indexed_unsafe: Vec<(usize, ToolCallRequest)> = Vec::new();
@@ -196,15 +215,18 @@ impl ToolExecutionQueue {
         // unsafe:串行,按原始顺序。
         let mut unsafe_results: Vec<(usize, ToolResult)> = Vec::new();
         for (idx, call) in indexed_unsafe {
-            let r = self.execute_single(call, gate.as_ref()).await;
+            let r = self
+                .execute_single(call, gate.as_ref(), progress_tx.clone())
+                .await;
             unsafe_results.push((idx, r));
         }
 
         // safe:通过 join_all 并发执行。
         let safe_futures = indexed_safe.into_iter().map(|(idx, call)| {
             let gate_ref = gate.as_ref();
+            let progress_tx = progress_tx.clone();
             async move {
-                let r = self.execute_single(call, gate_ref).await;
+                let r = self.execute_single(call, gate_ref, progress_tx).await;
                 (idx, r)
             }
         });
@@ -223,6 +245,7 @@ impl ToolExecutionQueue {
         &self,
         call: ToolCallRequest,
         gate: Option<&Arc<ApprovalGate>>,
+        progress_tx: Option<tokio::sync::mpsc::Sender<reflect_protocol::Event>>,
     ) -> ToolResult {
         // 限制并发数。
         let _permit = match self.semaphore.acquire().await {
@@ -255,6 +278,29 @@ impl ToolExecutionQueue {
         // 构造本次调用的上下文。
         let mut ctx = self.base_ctx.clone();
         ctx.call_id = call.id.clone();
+        // v1.4 A3:注入进度转发闭包(见 `execute_all_with_progress` 文档):
+        // 工具逐段上报的输出 → `ToolCallOutputDelta` 事件。try_send 满则
+        // 丢帧(增量是预览,End 事件才是权威完整输出)。`Event.id` 用
+        // `EVENT_ID_NONE` —— 增量发生在调用中途,不与某个 Submission
+        // 绑定,客户端按 `call_id` 与 Begin/End 关联。
+        if let Some(tx) = progress_tx {
+            let call_id = call.id.clone();
+            ctx.progress = Some(crate::tool::ProgressSink(std::sync::Arc::new(
+                move |is_stderr, delta| {
+                    let ev = reflect_protocol::Event::new(
+                        reflect_protocol::EVENT_ID_NONE,
+                        reflect_protocol::EventMsg::ToolCallOutputDelta(
+                            reflect_protocol::ToolCallOutputDeltaEvent {
+                                call_id: call_id.clone(),
+                                delta: delta.to_string(),
+                                is_stderr,
+                            },
+                        ),
+                    );
+                    let _ = tx.try_send(ev);
+                },
+            )));
+        }
         // 用会话级共享句柄刷新 `ctx.permission_mode`。`base_ctx.permission_mode`
         // 是构造时的死值(默认 Auto),否则运行时 `/mode plan` 切换后 PreToolUse
         // hook(如 `PlanModeGate`)仍看到旧值,只读 gate 形同虚设。`None`(未

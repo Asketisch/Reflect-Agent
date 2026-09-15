@@ -41,3 +41,49 @@ pub struct ToolExecutionRequestEvent {
     /// LLM 发起的调用参数(已解析的 JSON 对象)。
     pub args: serde_json::Value,
 }
+
+/// v1.4 A3:工具输出流式增量 —— 长时间运行的工具(bash 构建 / 测试等)
+/// 在执行期间逐段上报输出,客户端无需等 `ToolCallEnd` 才能看到进展。
+///
+/// 与 `ToolCallEndEvent` 的关系:增量是**预览**,最终完整输出(含
+/// elapsed_ms / metadata / 脱敏)仍以 End 事件为准;增量不做脱敏(内容
+/// 只是进程原样 stdout/stderr 分片,持久化层照常在 End 后脱敏落盘)。
+/// `call_id` 与 Begin/End 配对;`is_stderr` 区分流(界面可着色)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallOutputDeltaEvent {
+    pub call_id: String,
+    /// 本段增量文本(按行或按块,由工具侧决定粒度)。
+    pub delta: String,
+    /// 本段是否来自标准错误流。
+    #[serde(default)]
+    pub is_stderr: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// v1.4 A3:增量事件 serde 往返 —— `is_stderr` 缺省反序列化为 false
+    /// (旧 payload / 简化写入方兼容)。
+    #[test]
+    fn tool_call_output_delta_serde_roundtrip() {
+        let ev = ToolCallOutputDeltaEvent {
+            call_id: "call-42".into(),
+            delta: "compiling foo...\n".into(),
+            is_stderr: true,
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let back: ToolCallOutputDeltaEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.call_id, "call-42");
+        assert!(back.is_stderr);
+        assert_eq!(back.delta, "compiling foo...\n");
+    }
+
+    /// `is_stderr` 字段缺省 → false(#[serde(default)] 兼容性)。
+    #[test]
+    fn tool_call_output_delta_is_stderr_defaults_false() {
+        let back: ToolCallOutputDeltaEvent =
+            serde_json::from_str(r#"{"call_id":"c","delta":"d"}"#).unwrap();
+        assert!(!back.is_stderr);
+    }
+}

@@ -105,7 +105,7 @@ pub async fn tool_exec(state: &mut AgentState, ctx: &NodeContext) -> Option<Grap
         .collect();
     let results = ctx
         .tools_queue
-        .execute_all_with_gate(calls, ctx.approval_gate.clone())
+        .execute_all_with_progress(calls, ctx.approval_gate.clone(), Some(ctx.event_tx.clone()))
         .await;
     // 移除 ToolUse 块,用它们的结果替换。
     state

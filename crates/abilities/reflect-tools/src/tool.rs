@@ -112,6 +112,40 @@ pub struct ToolContext {
     /// 写入(共享句柄,热重载切 model 后刷新)。`get_context_remaining`
     /// 用它做「已用 / 总量」的分母。`None` = 未知 model。
     pub context_window_size: Arc<RwLock<Option<u32>>>,
+    /// v1.4 A3:工具输出流式增量回调。`None`(默认)= 工具不上报增量
+    /// (零开销,所有既有工具行为不变);`Some` 时长时间运行的工具
+    /// (bash 等)在执行期间逐段上报输出,由 `ToolExecutionQueue` 转发为
+    /// `EventMsg::ToolCallOutputDelta`。回调参数:`(is_stderr, delta)`。
+    pub progress: Option<ProgressSink>,
+}
+
+/// v1.4 A3:进度回调句柄。newtype 包裹 `Arc<dyn Fn>` —— 让
+/// `ToolContext` 的 `Debug` / `Clone` derive 保持可用(裸 trait 对象
+/// 两者都不可派生)。
+#[derive(Clone)]
+pub struct ProgressSink(pub Arc<dyn ToolProgressFn>);
+
+/// 进度回调的函数对象形态:`(is_stderr, delta) -> ()`。
+/// 单独定义 trait alias 形态,避免 clippy type_complexity。
+pub trait ToolProgressFn: Fn(bool, &str) + Send + Sync {}
+impl<T: Fn(bool, &str) + Send + Sync> ToolProgressFn for T {}
+
+impl std::fmt::Debug for ProgressSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProgressSink(..)")
+    }
+}
+
+impl ProgressSink {
+    /// 构造一个进度回调句柄(便捷:`Arc<dyn Fn>` 自动满足 `ToolProgressFn`)。
+    pub fn new(f: impl Fn(bool, &str) + Send + Sync + 'static) -> Self {
+        Self(Arc::new(f))
+    }
+
+    /// 上报一段增量。`is_stderr` 区分标准错误流;`delta` 为原始分片。
+    pub fn emit(&self, is_stderr: bool, delta: &str) {
+        (self.0)(is_stderr, delta);
+    }
 }
 
 impl ToolContext {
@@ -173,6 +207,7 @@ impl Default for ToolContext {
             session_usage: Arc::new(RwLock::new(reflect_protocol::TokenUsage::default())),
             token_budget: Arc::new(RwLock::new(None)),
             context_window_size: Arc::new(RwLock::new(None)),
+            progress: None,
         }
     }
 }
