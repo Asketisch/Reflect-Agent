@@ -74,14 +74,55 @@ pub async fn pre_loop(state: &mut AgentState, ctx: &NodeContext) -> Option<Graph
     } else {
         llm_reported
     };
-    let (compacted, evt) = m4
-        .compactor
-        .compact_with_prior_and_tokens(
-            state.messages.messages.clone(),
-            state.compaction_summary.as_deref(),
-            llm_reported,
+    // v1.5 E1:PreCompact hook —— 压缩前最后关口。Deny 跳过本轮压缩
+    // (本轮照常执行,阈值下一轮再议);InjectMessage 在压缩后追加
+    // System 提醒。ctx 无 hook_engine 的测试路径跳过 dispatch。
+    let (compact_denied, compact_injected) = {
+        let hook_ctx = reflect_hooks::HookContext {
+            session_id: ctx.session_id,
+            turn_id: ctx.turn_id,
+            workspace: ctx.cfg.current_workspace(),
+            permission_mode: ctx.cfg.permission_mode(),
+        };
+        let trigger = if force_compact { "manual" } else { "threshold" };
+        let decision = ctx
+            .hook_engine
+            .dispatch(&reflect_hooks::HookEvent::PreCompact {
+                trigger: trigger.into(),
+                ctx: hook_ctx,
+            })
+            .await;
+        let resolved = decision.resolve();
+        (
+            resolved.deny_reason.is_some(),
+            resolved
+                .injected
+                .iter()
+                .map(|m| m.content.clone())
+                .collect::<Vec<_>>(),
         )
-        .await;
+    };
+
+    let (compacted, evt) = if compact_denied {
+        tracing::info!("PreCompact hook denied; skipping compaction this round");
+        (
+            state.messages.messages.clone(),
+            reflect_protocol::ContextCompactedEvent {
+                strategy: ContextCompactedStrategy::Noop,
+                removed_messages: 0,
+                before_tokens: 0,
+                after_tokens: 0,
+            },
+        )
+    } else {
+        m4.compactor
+            .compact_with_prior_and_tokens(
+                state.messages.messages.clone(),
+                state.compaction_summary.as_deref(),
+                llm_reported,
+            )
+            .await
+    };
     state.compact_triggered = !matches!(evt.strategy, ContextCompactedStrategy::Noop);
     if state.compact_triggered {
         // 在 `evt` 被移入 wire event 之前捕获我们需要的字段。
@@ -132,6 +173,11 @@ pub async fn pre_loop(state: &mut AgentState, ctx: &NodeContext) -> Option<Graph
         }
     }
     state.messages.messages = compacted;
+    // v1.5 E1:PreCompact 的 InjectMessage 以 System 消息追加(压缩后
+    // 可见,天然进入下一请求上下文)。
+    for content in compact_injected {
+        state.messages.messages.push(ChatMessage::System(content));
+    }
 
     // 1.5 v1.4 A2:回合中途转向收割。ToolExec → PreLoop 回环的每次入口
     // 都执行 —— 用户对正在跑的回合「边跑边改需求」:Now 优先级消息作为

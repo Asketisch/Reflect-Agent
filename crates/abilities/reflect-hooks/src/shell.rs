@@ -65,6 +65,8 @@ impl ShellHook {
             "posttoolusefailure" => Some(HookEventKind::PostToolUseFailure),
             "stop" => Some(HookEventKind::Stop),
             "sessionstart" => Some(HookEventKind::SessionStart),
+            "userpromptsubmit" => Some(HookEventKind::UserPromptSubmit),
+            "precompact" => Some(HookEventKind::PreCompact),
             "taskcreated" => Some(HookEventKind::TaskCreated),
             "taskcompleted" => Some(HookEventKind::TaskCompleted),
             "taskupdated" => Some(HookEventKind::TaskUpdated),

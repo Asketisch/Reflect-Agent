@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use reflect_hooks::{HookEngine, HookEvent};
+use reflect_hooks::{HookContext, HookEngine, HookEvent};
 use reflect_llm::{ChatMessage, SharedModelRegistry, SharedQuotaTracker};
 use reflect_protocol::{
     AbortReason, ContextCompactedEvent, ContextCompactedStrategy, Event, EventMsg, MessageRole,
@@ -314,6 +314,71 @@ pub async fn submission_loop(
                         }),
                     ))
                     .await;
+
+                // v1.5 E1:UserPromptSubmit hook —— prompt 进模型前的最后
+                // 一道用户可编程关卡。Deny 拒绝整个回合(Error + Abort,
+                // prompt 不进模型也不落盘);InjectMessage 以
+                // `<system-reminder>` 附加引导后照常执行。
+                {
+                    let hook_ctx = HookContext {
+                        session_id,
+                        turn_id,
+                        workspace: cfg.current_workspace(),
+                        permission_mode: cfg.permission_mode(),
+                    };
+                    let prompt_text = merged_items
+                        .iter()
+                        .filter_map(|i| match i {
+                            UserInputItem::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let decision = hook_engine
+                        .dispatch(&HookEvent::UserPromptSubmit {
+                            text: prompt_text,
+                            ctx: hook_ctx,
+                        })
+                        .await;
+                    let resolved = decision.resolve();
+                    if let Some(reason) = resolved.deny_reason {
+                        tracing::info!(reason = %reason, "UserPromptSubmit denied; rejecting turn");
+                        let _ = turn_tx
+                            .send(Event::new(
+                                sub.id.clone(),
+                                EventMsg::Error(reflect_protocol::ErrorEvent {
+                                    message: format!("prompt rejected by hook: {reason}"),
+                                    code: "prompt_rejected".into(),
+                                    details: Some(serde_json::json!({ "reason": reason })),
+                                }),
+                            ))
+                            .await;
+                        let _ = turn_tx
+                            .send(Event::new(
+                                sub.id.clone(),
+                                EventMsg::TurnAborted(TurnAbortedEvent {
+                                    turn_id,
+                                    reason: AbortReason::Error {
+                                        code: "prompt_rejected".into(),
+                                        message: reason,
+                                    },
+                                }),
+                            ))
+                            .await;
+                        continue; // 跳过本回合:不落盘、不进模型。
+                    }
+                    if !resolved.injected.is_empty() {
+                        let guidance = resolved
+                            .injected
+                            .iter()
+                            .map(|m| m.content.clone())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        merged_items.push(UserInputItem::Text {
+                            text: format!("<system-reminder>{guidance}</system-reminder>"),
+                        });
+                    }
+                }
 
                 // 由用户输入构造初始 message 列表。
                 // v1.2 P0:Text + Image items 合并为同一个 UserContent blocks 数组,

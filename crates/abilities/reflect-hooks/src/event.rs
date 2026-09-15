@@ -19,6 +19,12 @@ pub enum HookEventKind {
     PostToolUseFailure,
     Stop,
     SessionStart,
+    /// v1.5 E1:用户输入提交时触发(引擎把 prompt 交给模型之前)。
+    /// Deny 可拒绝整个回合;InjectMessage 以 system-reminder 附加引导。
+    UserPromptSubmit,
+    /// v1.5 E1:上下文压缩即将执行时触发。Deny 跳过本轮压缩;
+    /// InjectMessage 在压缩后追加 System 提醒。
+    PreCompact,
     // ── v1.1.0:task 生命周期事件(reflect-task) ──
     /// `TaskCreate` 工具成功落盘后触发。
     TaskCreated,
@@ -78,6 +84,14 @@ pub enum HookEvent {
         session_id: ThreadId,
         config: serde_json::Value,
     },
+    /// v1.5 E1:用户输入提交时触发(进模型前)。hook 收到 prompt 文本;
+    /// Deny 拒绝整个回合(prompt 不进模型、不落盘),InjectMessage 以
+    /// `<system-reminder>` 附加引导后照常执行。
+    UserPromptSubmit { text: String, ctx: HookContext },
+    /// v1.5 E1:上下文压缩即将执行时触发。`trigger` = `"manual"`(/compact)
+    /// 或 `"threshold"`(超阈值)。Deny 跳过本轮压缩;InjectMessage 在
+    /// 压缩后追加 System 提醒。
+    PreCompact { trigger: String, ctx: HookContext },
     // ── v1.1.0:task 生命周期事件(reflect-task) ──
     /// `TaskCreate` 工具成功落盘后触发。`task` 是任务的 JSON 快照
     /// (使用 `serde_json::Value` 避免 `hooks ↔ task` 反向依赖)。
@@ -104,6 +118,8 @@ impl HookEvent {
             HookEvent::PostToolUseFailure { .. } => HookEventKind::PostToolUseFailure,
             HookEvent::Stop { .. } => HookEventKind::Stop,
             HookEvent::SessionStart { .. } => HookEventKind::SessionStart,
+            HookEvent::UserPromptSubmit { .. } => HookEventKind::UserPromptSubmit,
+            HookEvent::PreCompact { .. } => HookEventKind::PreCompact,
             HookEvent::TaskCreated { .. } => HookEventKind::TaskCreated,
             HookEvent::TaskCompleted { .. } => HookEventKind::TaskCompleted,
             HookEvent::TaskUpdated { .. } => HookEventKind::TaskUpdated,
