@@ -15,9 +15,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::StreamExt;
 use reflect_llm::client::ModelClient;
-use reflect_llm::event::ChatEvent;
 use reflect_llm::request::{ChatRequest, SystemBlock, SystemBlocks};
 use reflect_llm::{ChatMessage, ContentBlock, UserContent};
 use tokio::io::AsyncReadExt;
@@ -55,44 +53,24 @@ pub async fn verify(
             ephemeral: false,
         }]),
         tools: vec![],
+        // v1.4 B1/B2:声明 JsonObject 结构化输出 + 走非流式便捷接口。
+        // provider 支持时由服务端约束 JSON(Anthropic 侧经内部强制工具
+        // 透明实现);不支持/解析失败的容错仍由 `parse_verdict` 的
+        // extract 逻辑兜底 —— 双保险,行为向后兼容。
+        response_format: Some(reflect_llm::ResponseFormat::JsonObject),
         ..Default::default()
     };
     // v1.2 P1:整体调用计时 + provider 名(供落库)。
     let call_started = std::time::Instant::now();
     let provider = client.name().to_string();
-    let mut stream = client
-        .stream(request.clone(), cancel.clone())
+    // v1.4 B2:非流式收集委托给 `ModelClient::complete`(默认实现内部
+    // 走 stream 拼接 delta 并捕获最后 Usage 快照)—— 校验器不再自带
+    // 一份流收集循环。中途流错误在 complete 内部即为 Err。
+    let out = client
+        .complete(request.clone(), cancel.clone())
         .await
-        .map_err(|e| VerifyError::StreamInit(e.to_string()))?;
-    let mut text = String::new();
-    // v1.2 P1:累积 token usage(此前 `Usage { .. } => {}` 丢了)。
-    let mut usage_input: u64 = 0;
-    let mut usage_output: u64 = 0;
-    let mut usage_cached: u64 = 0;
-    let mut usage_cache_write: u64 = 0;
-    while let Some(evt) = stream.next().await {
-        if cancel.is_cancelled() {
-            return Err(VerifyError::Cancelled);
-        }
-        match evt {
-            Ok(ChatEvent::ContentDelta(d)) => text.push_str(&d),
-            Ok(ChatEvent::Error(e)) => return Err(VerifyError::Llm(e.to_string())),
-            Ok(ChatEvent::Usage {
-                input_tokens,
-                output_tokens,
-                cached_tokens,
-                cache_write_tokens,
-            }) => {
-                usage_input = input_tokens as u64;
-                usage_output = output_tokens as u64;
-                usage_cached = cached_tokens as u64;
-                usage_cache_write = cache_write_tokens as u64;
-            }
-            Ok(ChatEvent::MessageStop) => {}
-            Ok(_) => {}
-            Err(e) => return Err(VerifyError::Llm(e.to_string())),
-        }
-    }
+        .map_err(|e| VerifyError::Llm(e.to_string()))?;
+    let text = out.text;
     // v1.2 P1:落库(若有 sink)。verifier 用 &dyn ModelClient 无法获知
     // 具体 model 名,model_id 留空(provider 仍记录 client.name())。
     if let Some(sink) = telemetry
@@ -112,6 +90,8 @@ pub async fn verify(
             "finish_reason": "stop",
             "text": text,
         });
+        let usage = out.usage.unwrap_or_default();
+        let (usage_input, usage_output) = (usage.input_tokens as u64, usage.output_tokens as u64);
         sink.record_model_call(
             None,
             None,
@@ -121,8 +101,8 @@ pub async fn verify(
             reflect_telemetry::UsageSnapshot {
                 input_tokens: usage_input,
                 output_tokens: usage_output,
-                cached_tokens: usage_cached,
-                cache_write_tokens: usage_cache_write,
+                cached_tokens: usage.cached_tokens as u64,
+                cache_write_tokens: usage.cache_write_tokens as u64,
                 total_tokens: usage_input + usage_output,
                 cost_usd: None,
             },

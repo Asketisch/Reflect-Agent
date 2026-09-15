@@ -317,6 +317,28 @@ pub struct OpenAIRequest {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<String>,
+    /// v1.4 B1:结构化输出(`response_format` 参数)。`None` 不序列化,
+    /// 与历史请求体逐字节一致。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<Value>,
+}
+
+/// v1.4 B1:`ResponseFormat` → OpenAI `response_format` wire 形态。
+/// `Text` 映射为 `{"type":"text"}`(显式纯文本);`None` 完全省略。
+pub(crate) fn openai_response_format(rf: &crate::request::ResponseFormat) -> Value {
+    use crate::request::ResponseFormat;
+    match rf {
+        ResponseFormat::Text => serde_json::json!({"type": "text"}),
+        ResponseFormat::JsonObject => serde_json::json!({"type": "json_object"}),
+        ResponseFormat::JsonSchema {
+            name,
+            schema,
+            strict,
+        } => serde_json::json!({
+            "type": "json_schema",
+            "json_schema": {"name": name, "schema": schema, "strict": strict}
+        }),
+    }
 }
 
 impl From<ChatRequest> for OpenAIRequest {
@@ -359,6 +381,7 @@ impl From<ChatRequest> for OpenAIRequest {
             stop: req.stop,
             stream: true,
             reasoning_effort,
+            response_format: req.response_format.as_ref().map(openai_response_format),
         }
     }
 }
@@ -489,6 +512,7 @@ mod tests {
     #[test]
     fn openai_request_basic() {
         let req = ChatRequest {
+            response_format: None,
             model: "gpt-4o".into(),
             messages: vec![ChatMessage::User(UserContent {
                 blocks: vec![ContentBlock::text("hi")],
@@ -605,6 +629,7 @@ mod tests {
     #[test]
     fn openai_request_body_has_no_cache_control() {
         let req = ChatRequest {
+            response_format: None,
             model: "gpt-4o".into(),
             messages: vec![ChatMessage::User(UserContent {
                 blocks: vec![ContentBlock::text("hi")],
@@ -640,5 +665,50 @@ mod tests {
             !body.contains("cache_control"),
             "OpenAI 出站 body 不应含 cache_control,wire 是 no-op;got: {body}"
         );
+    }
+    // ── v1.4 B1:response_format 映射 ─────────────────────────────
+
+    #[test]
+    fn openai_response_format_none_omitted() {
+        let req = ChatRequest {
+            model: "gpt-4o".into(),
+            messages: vec![ChatMessage::User(UserContent {
+                blocks: vec![crate::request::ContentBlock::text("hi")],
+            })],
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(OpenAIRequest::from(req)).unwrap();
+        assert!(
+            wire.get("response_format").is_none(),
+            "无 response_format 时不得序列化该字段: {wire}"
+        );
+    }
+
+    #[test]
+    fn openai_response_format_json_object_mapping() {
+        let req = ChatRequest {
+            model: "gpt-4o".into(),
+            response_format: Some(crate::ResponseFormat::JsonObject),
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(OpenAIRequest::from(req)).unwrap();
+        assert_eq!(wire["response_format"]["type"], "json_object");
+    }
+
+    #[test]
+    fn openai_response_format_json_schema_mapping() {
+        let req = ChatRequest {
+            model: "gpt-4o".into(),
+            response_format: Some(crate::ResponseFormat::JsonSchema {
+                name: "answer".into(),
+                schema: serde_json::json!({"type": "object", "properties": {}}),
+                strict: true,
+            }),
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(OpenAIRequest::from(req)).unwrap();
+        assert_eq!(wire["response_format"]["type"], "json_schema");
+        assert_eq!(wire["response_format"]["json_schema"]["name"], "answer");
+        assert_eq!(wire["response_format"]["json_schema"]["strict"], true);
     }
 }

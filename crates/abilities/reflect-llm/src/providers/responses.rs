@@ -331,6 +331,10 @@ pub struct ResponsesRequest {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<String>,
+    /// v1.4 B1:结构化输出(`text.format` 子对象)。`None` 不序列化,
+    /// 历史请求体不变。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<Value>,
 }
 
 impl From<ChatRequest> for ResponsesRequest {
@@ -358,6 +362,29 @@ impl From<ChatRequest> for ResponsesRequest {
                 }),
             })
             .collect();
+        // v1.4 B1:结构化输出 → Responses `text.format`。Responses 的
+        // wire 形态与 Chat Completions 的 `response_format` 同构。
+        let text = req.response_format.as_ref().map(|rf| {
+            let format = match rf {
+                crate::request::ResponseFormat::Text => {
+                    serde_json::json!({"type": "text"})
+                }
+                crate::request::ResponseFormat::JsonObject => {
+                    serde_json::json!({"type": "json_object"})
+                }
+                crate::request::ResponseFormat::JsonSchema {
+                    name,
+                    schema,
+                    strict,
+                } => serde_json::json!({
+                    "type": "json_schema",
+                    "name": name,
+                    "schema": schema,
+                    "strict": strict,
+                }),
+            };
+            serde_json::json!({"format": format})
+        });
         Self {
             model: req.model,
             input,
@@ -367,6 +394,7 @@ impl From<ChatRequest> for ResponsesRequest {
             top_p: req.top_p,
             stream: true,
             instructions,
+            text,
         }
     }
 }
@@ -574,5 +602,33 @@ mod tests {
         assert_eq!(r.input[0]["role"], "user");
         assert_eq!(r.input[0]["content"], "hi");
         assert!(r.stream);
+    }
+    // ── v1.4 B1:text.format 映射 ────────────────────────────────
+
+    #[test]
+    fn responses_json_schema_sets_text_format() {
+        let req = ChatRequest {
+            model: "gpt-4o".into(),
+            response_format: Some(crate::ResponseFormat::JsonSchema {
+                name: "answer".into(),
+                schema: serde_json::json!({"type": "object"}),
+                strict: false,
+            }),
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(ResponsesRequest::from(req)).unwrap();
+        assert_eq!(wire["text"]["format"]["type"], "json_schema");
+        assert_eq!(wire["text"]["format"]["name"], "answer");
+        assert_eq!(wire["text"]["format"]["strict"], false);
+    }
+
+    #[test]
+    fn responses_no_response_format_no_text() {
+        let req = ChatRequest {
+            model: "gpt-4o".into(),
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(ResponsesRequest::from(req)).unwrap();
+        assert!(wire.get("text").is_none());
     }
 }
