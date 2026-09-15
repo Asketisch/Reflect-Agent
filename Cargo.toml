@@ -112,6 +112,7 @@ toml               = "0.8"
 async-trait        = "0.1"
 anyhow             = "1"
 thiserror          = "1"
+tiktoken-rs = "0.12"
 clap               = { version = "4", features = ["derive"] }
 # S2:TUI 反射 `TaskManager::list_tasks`(async)—— 用 pollster 在 sync 上下文
 # block_on,免去给整个 App 套 tokio runtime。pollster 无依赖、~200 LOC。

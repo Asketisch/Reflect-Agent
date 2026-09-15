@@ -16,6 +16,12 @@ path = "src/lib.rs"
 # 此处不再声明 [[bin]]。`src/main.rs` 保留作为 archaeology,
 # 不再编译为可执行文件 —— 所有调用走 `reflect_exec::run`。
 
+[features]
+default = []
+# v1.4 D1:真实分词器(直通 reflect-compact/tokenizer)。开启后启动期
+# 注册 tiktoken 估算器,压缩触发 / 上下文余量计算用精确计数。
+tokenizer = ["reflect-compact/tokenizer"]
+
 [dependencies]
 reflect-core      = { workspace = true }
 reflect-llm       = { workspace = true }

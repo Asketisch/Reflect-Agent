@@ -237,6 +237,20 @@ pub async fn bootstrap_common(args: &HeadlessArgs) -> anyhow::Result<HeadlessCom
     reflect_task::register_task_tools(&tools, task_manager.clone());
     bootstrap::TOOLS.with(|t| *t.borrow_mut() = Some(tools.clone()));
 
+    // v1.4 D1:tokenizer feature 开启时注册 tiktoken 全局估算器
+    // (set-once;失败仅 warn,回退启发式,不阻塞启动)。
+    #[cfg(feature = "tokenizer")]
+    match reflect_compact::global_tiktoken_estimator() {
+        Ok(est) => {
+            if reflect_compact::set_global_estimator(est) {
+                tracing::info!("tiktoken estimator registered (tokenizer feature)");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "tiktoken estimator init failed; using heuristic");
+        }
+    }
+
     // 3. Ctrl-C 取消令牌 + workspace 解析。
     let cancel = CancellationToken::new();
     {
