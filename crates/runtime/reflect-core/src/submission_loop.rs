@@ -124,6 +124,7 @@ pub struct NodeContext {
     pub cfg: AgentConfig,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn submission_loop(
     mut sub_rx: mpsc::Receiver<Submission>,
     turn_subs: Arc<Mutex<HashMap<String, mpsc::Sender<Event>>>>,
@@ -132,6 +133,7 @@ pub async fn submission_loop(
     registry: SharedModelRegistry,
     _tools: Arc<ToolRegistry>,
     tools_queue: Arc<ToolExecutionQueue>,
+    background_tasks: Arc<BackgroundTaskQueue>,
 ) {
     // Hook engine 由 `tools_queue` 持有(M6)。此处不构造它;
     // queue 提供 `register_hook` 供调用方扩展。
@@ -159,7 +161,6 @@ pub async fn submission_loop(
     let plan_approval_gate = Arc::new(PlanApprovalGate::new());
     // P2:session 级 steering 队列与后台任务注入队列。
     let steering_queue = Arc::new(Mutex::new(SteeringQueue::new()));
-    let background_tasks = Arc::new(BackgroundTaskQueue::new());
     // v1.4 A1:在飞回合表 —— turn 级取消令牌的登记处。每个 UserInput
     // turn spawn 前登记(turn_id → 从会话令牌派生的 child_token),
     // turn 任务退出时注销。`Op::Interrupt`(不带 child_id)对表中所有

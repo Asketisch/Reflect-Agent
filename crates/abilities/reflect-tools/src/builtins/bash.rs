@@ -86,7 +86,8 @@ impl Tool for BashTool {
             "type": "object",
             "properties": {
                 "cmd": {"type": "string", "description": "Shell command to execute"},
-                "timeout_ms": {"type": "integer", "minimum": 0, "description": "Timeout in milliseconds (default 120000)"}
+                "timeout_ms": {"type": "integer", "minimum": 0, "description": "Timeout in milliseconds (default 120000)"},
+                "run_in_background": {"type": "boolean", "description": "Run in background: return a task id immediately; output is injected at the next turn boundary (query via background_status)"}
             },
             "required": ["cmd"],
             "additionalProperties": false
@@ -125,6 +126,30 @@ impl Tool for BashTool {
             .and_then(|v| v.as_u64())
             .unwrap_or(120_000);
         let timeout = Duration::from_millis(timeout_ms);
+
+        // v1.5 R2:后台执行 —— 立即返回任务 id,输出经队列在下一回合
+        // 边界注入(或 background_status 查询)。宿主未接后台生成器时
+        // 明确报错,不静默降级为前台执行。
+        if args.get("run_in_background").and_then(|v| v.as_bool()) == Some(true) {
+            let spawner = ctx
+                .background
+                .as_ref()
+                .ok_or_else(|| ToolError::InvalidArgs {
+                    message: "run_in_background: 本线程未接入后台任务生成器".into(),
+                })?;
+            let task_id = spawner.spawn_bash(&cmd, &ctx.workspace_path())?;
+            return Ok(ToolOutput {
+                content: vec![reflect_protocol::ContentBlock::text(format!(
+                    "[background task {task_id} started] 命令已在后台执行;完成结果将在下一个回合边界自动注入,也可用 background_status 查询。"
+                ))],
+                is_error: false,
+                metadata: serde_json::json!({
+                    "background": true,
+                    "task_id": task_id,
+                }),
+                elapsed_ms: 0,
+            });
+        }
 
         // v1.3:OS 沙箱。`OsSandbox::default()` v1.3 起 enabled + strict,
         // `enforce_or_fail()` 集中决定 fail-closed 行为:

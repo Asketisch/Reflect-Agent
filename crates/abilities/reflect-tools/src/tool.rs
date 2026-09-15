@@ -126,6 +126,9 @@ pub struct ToolContext {
     /// `Some(true)` = 强制启用 OS 沙箱;`Some(false)` = 本 turn 关闭 OS
     /// 层(路径沙箱仍由各文件工具自身的 workspace 校验承担)。
     pub os_sandbox: Option<bool>,
+    /// v1.5 R2:后台任务生成器(宿主实现)。`None`(默认)= 工具不支持
+    /// 后台执行;`Some` 时 bash 的 `run_in_background` 参数可用。
+    pub background: Option<Arc<dyn TaskSpawner>>,
     /// v1.4 C1:父会话历史尾部快照(最近若干条,由 `tool_exec` 注入)。
     /// 仅子代理编排工具(`CallSubAgentTool`)读取:按
     /// `DataTransferConfig.pass_context_messages` / 调用参数截取后传给
@@ -214,6 +217,28 @@ impl ProgressSink {
     }
 }
 
+/// v1.5 R2:后台任务信息快照(状态查询工具渲染用)。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BackgroundTaskInfo {
+    pub id: String,
+    /// running / completed / failed
+    pub status: String,
+    /// 完成时的输出(截断后);未完成为 `None`。
+    pub result: Option<String>,
+}
+
+/// v1.5 R2:后台任务生成器 —— 由宿主(core)实现,工具侧只发请求。
+/// 实现方负责:进程生命周期、输出捕获(限量)、结果投递(turn 边界
+/// 注入 / 状态查询)。会话级取消令牌由实现方持有(后台任务存活期
+/// 跨越单个 turn,不跟随工具调用的取消令牌)。
+pub trait TaskSpawner: Send + Sync + std::fmt::Debug {
+    /// 后台执行一条 shell 命令,立即返回任务 id。
+    fn spawn_bash(&self, cmd: &str, cwd: &std::path::Path) -> Result<String, ToolError>;
+
+    /// 全部任务快照。
+    fn snapshot(&self) -> Vec<BackgroundTaskInfo>;
+}
+
 impl ToolContext {
     /// 从路径构造 `ToolContext`(测试 / 单次调用用)。
     pub fn for_workspace(workspace: impl Into<PathBuf>) -> Self {
@@ -276,6 +301,7 @@ impl Default for ToolContext {
             progress: None,
             event_forwarder: None,
             os_sandbox: None,
+            background: None,
             parent_tail_json: Arc::new(RwLock::new(Vec::new())),
         }
     }
