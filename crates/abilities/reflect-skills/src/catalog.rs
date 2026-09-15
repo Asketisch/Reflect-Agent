@@ -45,6 +45,8 @@ pub const ALWAYS_ON_TOOLS: &[&str] = &[
     "EnterPlanMode",
     "ExitPlanMode",
     "PlanWrite",
+    // v1.4 D3:渐进披露第三级 —— 附属资源按需读取,常驻可见。
+    "read_skill_resource",
 ];
 
 /// 可用 skill 与当前激活 skill 集合的线程安全 catalog
@@ -297,6 +299,7 @@ mod tests {
             body: "body".into(),
             plugin_id: None,
             when_paths: vec![],
+            version: None,
         }
     }
 

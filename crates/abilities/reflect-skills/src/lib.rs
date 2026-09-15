@@ -51,4 +51,4 @@ pub use discovery::{relativize, skill_matches_path, skills_for_path};
 pub use loader::{parse_skill_file, parse_skill_str};
 pub use model::{SkillError, SkillMeta};
 pub use scanner::scan_skills_dirs;
-pub use tool::LoadSkillTool;
+pub use tool::{LoadSkillTool, ReadSkillResourceTool};

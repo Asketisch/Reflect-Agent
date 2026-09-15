@@ -97,6 +97,7 @@ pub async fn register(
             body: String::new(),
             plugin_id: Some(loaded.plugin_id.to_string()),
             when_paths: vec![],
+            version: None,
         })
         .collect();
     if !skill_metas.is_empty() {
@@ -479,6 +480,7 @@ mod tests {
                 body: String::new(),
                 plugin_id: Some(id.to_string()),
                 when_paths: vec![],
+                version: None,
             })
             .collect();
         catalog.lock().add_plugin_skills(id.as_str(), &skill_metas);

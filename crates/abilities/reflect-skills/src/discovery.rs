@@ -84,6 +84,7 @@ mod tests {
             body: String::new(),
             plugin_id: None,
             when_paths: when.into_iter().map(String::from).collect(),
+            version: None,
         }
     }
 
