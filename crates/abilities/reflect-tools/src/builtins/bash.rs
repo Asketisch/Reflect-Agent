@@ -213,21 +213,37 @@ impl Tool for BashTool {
         let mut child_handle = Some(child);
 
         let result = tokio::time::timeout(timeout, async {
-            // Concurrently drain both pipes while waiting.
-            let stdout_fut = drain_pipe(stdout.as_mut(), progress.as_ref(), false);
-            let stderr_fut = drain_pipe(stderr.as_mut(), progress.as_ref(), true);
-            let (out_bytes, err_bytes) = tokio::join!(stdout_fut, stderr_fut);
-            // Reap the child & capture exit code(M3:此前 M1 从不 wait)。
-            // drain 已把 stdout/stderr 读空,wait 通常立即返回。
-            let exit_code = if let Some(mut ch) = child_handle.take() {
-                match ch.wait().await {
-                    Ok(status) => status.code().unwrap_or(-1),
-                    Err(_) => -1,
+            // v1.4 C2:取消令牌贯通 —— select! biased 监听 ctx.cancel,
+            // 触发时 start_kill 子进程并 reap(此前 kill_on_cancel 是死变量,
+            // 中断 / 关闭只取消 LLM 流,正在跑的 bash 进程会跑满超时)。
+            // 被 kill 的命令 exit_code 落到信号杀死路径(-1 / None)。
+            tokio::select! {
+                biased;
+                _ = kill_on_cancel.cancelled() => {
+                    if let Some(mut ch) = child_handle.take() {
+                        let _ = ch.start_kill();
+                        let _ = ch.wait().await;
+                    }
+                    (Vec::new(), Vec::new(), -1)
                 }
-            } else {
-                -1
-            };
-            (out_bytes, err_bytes, exit_code)
+                triple = async {
+                    // Concurrently drain both pipes while waiting.
+                    let stdout_fut = drain_pipe(stdout.as_mut(), progress.as_ref(), false);
+                    let stderr_fut = drain_pipe(stderr.as_mut(), progress.as_ref(), true);
+                    let (out_bytes, err_bytes) = tokio::join!(stdout_fut, stderr_fut);
+                    // Reap the child & capture exit code(M3:此前 M1 从不 wait)。
+                    // drain 已把 stdout/stderr 读空,wait 通常立即返回。
+                    let exit_code = if let Some(mut ch) = child_handle.take() {
+                        match ch.wait().await {
+                            Ok(status) => status.code().unwrap_or(-1),
+                            Err(_) => -1,
+                        }
+                    } else {
+                        -1
+                    };
+                    (out_bytes, err_bytes, exit_code)
+                } => triple,
+            }
         });
 
         let (out_bytes, err_bytes, exit_code) = match result.await {
@@ -250,7 +266,6 @@ impl Tool for BashTool {
         // M3:child 已在 timeout 块内 `wait()` reap,exit_code 已捕获。
         // 若 timeout 触发,上面 `Err(_)` 分支已 return;若 child_handle 仍在
         // (理论上不会,drain+wait 在块内完成),靠 `kill_on_drop` 兜底。
-        let _ = kill_on_cancel;
 
         let stdout_str = String::from_utf8_lossy(&out_bytes).to_string();
         let stderr_str = String::from_utf8_lossy(&err_bytes).to_string();

@@ -367,7 +367,8 @@ depends_on = ["prd"]
 runner = "team"
 depends_on = ["exec"]
 "#;
-    let p = Pipeline::from_toml(toml_src, |label, _params| Some(make_runner(label))).unwrap();
+    let p =
+        Pipeline::from_toml(toml_src, |label, _runner, _params| Some(make_runner(label))).unwrap();
     assert_eq!(p.node_count(), 4);
     let order = p.graph.topo_sort().unwrap();
     assert_eq!(
@@ -391,7 +392,8 @@ depends_on = ["exec"]
 runner = "team"
 depends_on = ["plan"]
 "#;
-    let err = Pipeline::from_toml(toml_src, |label, _params| Some(make_runner(label))).unwrap_err();
+    let err = Pipeline::from_toml(toml_src, |label, _runner, _params| Some(make_runner(label)))
+        .unwrap_err();
     assert!(matches!(err, PipelineError::Cyclic(_)));
 }
 
@@ -402,7 +404,7 @@ fn from_toml_missing_runner() {
 [nodes.plan]
 runner = "team"
 "#;
-    let err = Pipeline::from_toml(toml_src, |_label, _params| None).unwrap_err();
+    let err = Pipeline::from_toml(toml_src, |_label, _runner, _params| None).unwrap_err();
     assert!(matches!(err, PipelineError::MissingRunner(_)));
 }
 
@@ -415,7 +417,8 @@ failure_policy = "explode"
 [nodes.plan]
 runner = "team"
 "#;
-    let err = Pipeline::from_toml(toml_src, |label, _params| Some(make_runner(label))).unwrap_err();
+    let err = Pipeline::from_toml(toml_src, |label, _runner, _params| Some(make_runner(label)))
+        .unwrap_err();
     match err {
         PipelineError::Config(msg) => assert!(msg.contains("explode")),
         other => panic!("expected Config, got {other:?}"),
@@ -430,7 +433,8 @@ fn from_toml_unknown_runner_field_accepted() {
 runner = "future"
 depends_on = []
 "#;
-    let p = Pipeline::from_toml(toml_src, |label, _params| Some(make_runner(label))).unwrap();
+    let p =
+        Pipeline::from_toml(toml_src, |label, _runner, _params| Some(make_runner(label))).unwrap();
     assert_eq!(p.node_count(), 1);
 }
 
@@ -470,4 +474,138 @@ fn dummy_manager() -> reflect_task::TaskManager {
         Arc::new(InMemoryTaskStore::new()),
         Arc::new(InMemoryTeamStore::new()),
     )
+}
+
+// ── v1.4 C2:节点级重试 ───────────────────────────────────────
+
+/// 连续失败 N 次后成功的 flaky runner(重试测试用)。
+struct FlakyRunner {
+    name: String,
+    fail_times: std::sync::atomic::AtomicU32,
+}
+
+#[async_trait::async_trait]
+impl crate::runner::NodeRunner for FlakyRunner {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    async fn run(
+        &self,
+        _ctx: &crate::runner::NodeContext,
+    ) -> Result<NodeOutcome, crate::error::PipelineError> {
+        let n = self
+            .fail_times
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        if n > 0 {
+            Ok(NodeOutcome::failure(format!("flaky #{n}")))
+        } else {
+            Ok(NodeOutcome::success(serde_json::json!({"ok": true})))
+        }
+    }
+}
+
+/// from_toml 解析 [nodes.X.retry]:max_attempts / backoff_ms 落表。
+#[test]
+fn from_toml_parses_retry_config() {
+    let toml_src = r#"
+[nodes.a]
+runner = "team"
+[nodes.a.retry]
+max_attempts = 3
+backoff_ms = 10
+"#;
+    let p = Pipeline::from_toml(toml_src, |label, _runner, _params| {
+        Some(Arc::new(FlakyRunner {
+            name: label.to_string(),
+            fail_times: std::sync::atomic::AtomicU32::new(0),
+        }))
+    })
+    .unwrap();
+    // 执行后节点成功(不失败则重试逻辑根本不触发,只验证解析不报错)。
+    let ctx = crate::pipeline::PipelineContext {
+        topic: "t".into(),
+        inputs: Default::default(),
+        factory: Arc::new(dummy_factory()),
+        manager: Arc::new(dummy_manager()),
+        cancel: CancellationToken::new(),
+        human_gate: None,
+    };
+    let report = tokio::runtime::Runtime::new().unwrap().block_on(p.run(ctx));
+    assert!(report.is_ok());
+}
+
+/// 重试循环:失败 2 次后第 3 次成功 → 节点 Success。
+#[test]
+fn retry_recovers_after_transient_failures() {
+    let mut p = Pipeline::empty();
+    p.add_node(
+        "a",
+        Arc::new(FlakyRunner {
+            name: "a".into(),
+            fail_times: std::sync::atomic::AtomicU32::new(2),
+        }),
+    )
+    .unwrap();
+    // 手工注入重试配置(from_toml 路径已单独测)。
+    p.set_retry(
+        "a",
+        RetryConfig {
+            max_attempts: 3,
+            backoff_ms: 0,
+        },
+    );
+    let ctx = crate::pipeline::PipelineContext {
+        topic: "t".into(),
+        inputs: Default::default(),
+        factory: Arc::new(dummy_factory()),
+        manager: Arc::new(dummy_manager()),
+        cancel: CancellationToken::new(),
+        human_gate: None,
+    };
+    let report = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(p.run(ctx))
+        .unwrap();
+    let node = report
+        .nodes
+        .iter()
+        .find(|n| n.name == "a")
+        .expect("node report");
+    assert_eq!(node.status, "success");
+
+    // 对照:max_attempts 不足 → 仍失败。
+    let mut p2 = Pipeline::empty();
+    p2.add_node(
+        "a",
+        Arc::new(FlakyRunner {
+            name: "a".into(),
+            fail_times: std::sync::atomic::AtomicU32::new(2),
+        }),
+    )
+    .unwrap();
+    p2.set_retry(
+        "a",
+        RetryConfig {
+            max_attempts: 2,
+            backoff_ms: 0,
+        },
+    );
+    let ctx2 = crate::pipeline::PipelineContext {
+        topic: "t".into(),
+        inputs: Default::default(),
+        factory: Arc::new(dummy_factory()),
+        manager: Arc::new(dummy_manager()),
+        cancel: CancellationToken::new(),
+        human_gate: None,
+    };
+    let report2 = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(p2.run(ctx2))
+        .unwrap();
+    let node2 = report2
+        .nodes
+        .iter()
+        .find(|n| n.name == "a")
+        .expect("node report");
+    assert_eq!(node2.status, "failed");
 }

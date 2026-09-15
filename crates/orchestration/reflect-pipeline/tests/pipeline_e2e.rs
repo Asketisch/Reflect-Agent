@@ -158,7 +158,7 @@ async fn linear_chain_e2e_4_nodes_in_order() {
             payload: serde_json::json!({"result": "VERIFY"}),
         }),
     ];
-    let pipeline = Pipeline::from_toml(LINEAR_TOML, |label, _params| {
+    let pipeline = Pipeline::from_toml(LINEAR_TOML, |label, _runner, _params| {
         runners.iter().find(|r| r.name() == label).cloned()
     })
     .expect("parse");
@@ -196,7 +196,7 @@ async fn abort_policy_stops_after_first_failure() {
             payload: serde_json::json!({"result": "V"}),
         }),
     ];
-    let pipeline = Pipeline::from_toml(LINEAR_TOML, |label, _params| {
+    let pipeline = Pipeline::from_toml(LINEAR_TOML, |label, _runner, _params| {
         runners.iter().find(|r| r.name() == label).cloned()
     })
     .expect("parse");
@@ -231,7 +231,7 @@ async fn continue_collect_runs_all_nodes_after_failure() {
             payload: serde_json::json!({"result": "V"}),
         }),
     ];
-    let pipeline = Pipeline::from_toml(LINEAR_TOML, |label, _params| {
+    let pipeline = Pipeline::from_toml(LINEAR_TOML, |label, _runner, _params| {
         runners.iter().find(|r| r.name() == label).cloned()
     })
     .expect("parse")
@@ -271,7 +271,7 @@ async fn runner_records_duration_per_node() {
             payload: serde_json::json!({"result": "V"}),
         }),
     ];
-    let pipeline = Pipeline::from_toml(LINEAR_TOML, |label, _params| {
+    let pipeline = Pipeline::from_toml(LINEAR_TOML, |label, _runner, _params| {
         runners.iter().find(|r| r.name() == label).cloned()
     })
     .expect("parse");
@@ -297,7 +297,7 @@ team = "a"
 template = "x"
 depends_on = []
 "#;
-    let err = Pipeline::from_toml(bad, |_, _| None::<Arc<dyn NodeRunner>>).unwrap_err();
+    let err = Pipeline::from_toml(bad, |_, _, _| None::<Arc<dyn NodeRunner>>).unwrap_err();
     assert_eq!(err.kind(), "config");
 }
 

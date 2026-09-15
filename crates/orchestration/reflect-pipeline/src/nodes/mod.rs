@@ -18,6 +18,7 @@
 pub mod human_gate;
 pub mod join;
 pub mod loop_control;
+pub mod shell;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -29,6 +30,7 @@ use serde::Deserialize;
 use tracing::{debug, warn};
 
 use crate::error::PipelineError;
+use crate::nodes::shell::{ShellNodeParams, ShellNodeRunner};
 use crate::runner::{NodeContext, NodeOutcome, NodeRunner, NodeStatus};
 use crate::template;
 
@@ -292,6 +294,27 @@ pub fn executor_node(name: impl Into<String>, team: TeamFile) -> TeamNodeRunner 
 /// `verifier` 预设 — `Verify: {{nodes.exec.outputs.result}}`。
 pub fn verifier_node(name: impl Into<String>, team: TeamFile) -> TeamNodeRunner {
     TeamNodeRunner::new(name, team, "Verify: {{nodes.exec.outputs.result}}")
+}
+
+/// v1.4 C2:默认 runner 分发器 —— `Pipeline::from_toml` 的 runner_for
+/// 闭包推荐实现。按 TOML 的 `runner` 字段分发:
+/// - `"shell"` → [`ShellNodeRunner::from_params`](解析 params.command);
+/// - 其余(`"team"` 等)→ 走 label 预设(`preset_for`)。
+///
+/// 闭包签名变更(v1.4):runner 类型透传给分发器,不再靠 params 内容猜。
+pub fn default_runner_for(
+    label: &str,
+    runner: &str,
+    params: Option<&toml::Value>,
+    team_for_label: impl Fn(&str) -> Option<TeamFile>,
+) -> Option<Arc<dyn NodeRunner>> {
+    if runner == "shell" {
+        let p = params?;
+        let parsed: ShellNodeParams = p.clone().try_into().ok()?;
+        return Some(Arc::new(ShellNodeRunner::from_params(label, &parsed).ok()?));
+    }
+    let _ = runner;
+    preset_for(label, team_for_label)
 }
 
 /// 预设注册器 —— 帮 `Pipeline::from_toml` 的 runner_for 闭包根据节点 label
