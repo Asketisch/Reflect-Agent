@@ -191,5 +191,58 @@ pub fn records_to_preload(records: &[RolloutRecord]) -> Vec<ChatMessage> {
     if let Some(s) = last_summary {
         messages.insert(0, ChatMessage::System(s));
     }
-    messages
+    repair_orphan_tool_calls(messages)
+}
+
+/// v1.4 A1:孤儿 tool_use 修复。
+///
+/// 中断 / 崩溃路径落盘的半截 assistant 内容可能含无 result 的 tool_use
+/// (模型发起了调用但工具未执行完)。Anthropic / OpenAI 会拒绝
+/// 「assistant 含 tool_use 却无对应 tool_result」的消息序列,这里为每个
+/// 孤儿 call_id 合成一条 error ToolResult,保证恢复后的历史角色交替
+/// 完整、可直接送 provider。对存量会话文件(磁盘上已有的半对记录,
+/// 如进程被 kill 的场景)同样是健壮性提升。
+fn repair_orphan_tool_calls(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    use std::collections::HashSet;
+
+    // 第一遍:收集已有 ToolResult 应答的 call_id 集合。
+    let answered: HashSet<String> = messages
+        .iter()
+        .filter_map(|m| match m {
+            ChatMessage::Tool(result) => Some(result.call_id.clone()),
+            _ => None,
+        })
+        .collect();
+
+    // 第二遍:重建序列,给每个孤儿 tool_use 紧跟着插入合成 error result。
+    let mut repaired = Vec::with_capacity(messages.len());
+    let mut changed = false;
+    for msg in messages {
+        match msg {
+            ChatMessage::Assistant(content) => {
+                let orphans: Vec<String> = content
+                    .tool_calls
+                    .iter()
+                    .filter(|c| !answered.contains(&c.id))
+                    .map(|c| c.id.clone())
+                    .collect();
+                repaired.push(ChatMessage::Assistant(content));
+                for call_id in orphans {
+                    changed = true;
+                    repaired.push(ChatMessage::Tool(reflect_llm::ToolResult {
+                        call_id,
+                        content: vec![reflect_llm::ContentBlock::Text {
+                            text: "[interrupted] 工具执行被中断,结果丢失。".to_string(),
+                        }],
+                        is_error: true,
+                    }));
+                }
+            }
+            other => repaired.push(other),
+        }
+    }
+    if changed {
+        tracing::debug!("resume:为孤儿 tool_use 合成了 error ToolResult");
+    }
+    repaired
 }

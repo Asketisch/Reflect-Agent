@@ -332,6 +332,13 @@ pub async fn bootstrap_normal(
         &initial_cfg,
     );
     factory.set_telemetry(telemetry_sink.clone());
+    // v1.4 A1:子代理运行注册表 + 主会话令牌注入 —— 同一 `Arc` 双侧共享
+    // (主 cfg 的 `Op::Interrupt { child_id }` 路由侧 / 工厂的 spawn 登记
+    // 侧);同时把主会话 Ctrl-C 令牌覆盖进 factory,让子代理的 child_token
+    // 挂在会话令牌之下,Shutdown / Ctrl-C 能级联取消在飞子代理。
+    let subagent_runtime = Arc::new(reflect_core::SubagentRuntimeRegistry::new());
+    factory.set_runtime_registry(subagent_runtime.clone());
+    factory.set_cancel(cancel.clone());
 
     // Coordinator 模式整合:team spec 注入 factory + 统一开关。
     let coord_enabled = CoordinatorConfig::from_env_or_config(
@@ -376,6 +383,7 @@ pub async fn bootstrap_normal(
         .with_tool_env(tool_env)
         .with_telemetry(telemetry_sink.clone())
         .with_cancel(cancel.clone())
+        .with_subagent_runtime(subagent_runtime.clone())
         .with_context_window_overrides(
             initial_cfg
                 .context_windows

@@ -26,6 +26,7 @@ pub mod config;
 pub mod graph;
 pub mod resume;
 pub mod steering_queue;
+pub mod subagent_registry;
 pub mod submission_loop;
 pub mod turn;
 pub mod workspace;
@@ -36,6 +37,7 @@ pub use background_tasks::{
 };
 pub use config::AgentConfig;
 pub use steering_queue::{SteeringMessage, SteeringPriority, SteeringQueue};
+pub use subagent_registry::SubagentRuntimeRegistry;
 pub use submission_loop::NodeContext;
 pub use turn::TurnHandle;
 pub use workspace::detect_project_root;

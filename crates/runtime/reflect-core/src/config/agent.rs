@@ -160,6 +160,14 @@ pub struct AgentConfig {
     /// 默认 `None`;`Clone` 共享同一把 `RwLock`,与 `permission_mode`
     /// 镜像。
     pub last_abort_reason: Arc<RwLock<Option<AbortReason>>>,
+    /// v1.4 A1:子代理运行注册表(在飞子代理的取消令牌表)。
+    ///
+    /// `None`(默认)= 本线程不追踪子代理(测试 / 纯库使用),
+    /// `Op::Interrupt { child_id }` 定向分支在此情况下退化为 warn;
+    /// `Some` = 注册表由调用方创建后同时注入本配置与 `SubAgentFactory`
+    /// (两者共享同一 `Arc`),`spawn` 登记、`SpawnedChild` 终态注销。
+    /// `Clone` 走 `Arc`,所有副本共享同一张表。
+    pub subagent_runtime: Option<Arc<crate::subagent_registry::SubagentRuntimeRegistry>>,
 }
 
 impl Default for AgentConfig {
@@ -196,6 +204,7 @@ impl AgentConfig {
             session_id: None,
             preload_messages: Arc::new(RwLock::new(Vec::new())),
             last_abort_reason: Arc::new(RwLock::new(None)),
+            subagent_runtime: None,
         }
     }
 
@@ -350,6 +359,18 @@ impl AgentConfig {
     /// 用。生产代码不需要这条路径 (`reflect-exec` 自己 wire Ctrl-C)。
     pub fn with_cancel(mut self, cancel: CancellationToken) -> Self {
         self.cancel = cancel;
+        self
+    }
+
+    /// v1.4 A1:注入子代理运行注册表。调用方(exec bootstrap)创建一个
+    /// `Arc<SubagentRuntimeRegistry>` 后,同时传给本方法与
+    /// `SubAgentFactory::set_runtime_registry`,让 `Op::Interrupt
+    /// { child_id }` 能定向路由到在飞子代理。
+    pub fn with_subagent_runtime(
+        mut self,
+        registry: Arc<crate::subagent_registry::SubagentRuntimeRegistry>,
+    ) -> Self {
+        self.subagent_runtime = Some(registry);
         self
     }
 

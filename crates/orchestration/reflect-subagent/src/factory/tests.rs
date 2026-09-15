@@ -685,3 +685,62 @@ fn in_flight_does_not_leak_across_repeated_spawn_drop_cycles() {
         "100 次 spawn+drop 后计数应归 0,不能泄漏"
     );
 }
+
+// ── v1.4 A1:运行注册表 + 父级令牌覆盖 ─────────────────────────
+
+/// `set_runtime_registry` 写入 / `runtime_registry` 读出;child_factory
+/// 继承同一 Arc —— 孙级 spawn 登记进同一张表,跨级定向中断才能路由。
+#[test]
+fn runtime_registry_set_and_inherited_by_child_factory() {
+    let factory = dummy_factory();
+    assert!(
+        factory.runtime_registry().is_none(),
+        "默认不注入运行注册表(测试 / 旧调用方)"
+    );
+    let reg = Arc::new(reflect_core::SubagentRuntimeRegistry::new());
+    factory.set_runtime_registry(reg.clone());
+
+    let readback = factory.runtime_registry().expect("set 后必须可读");
+    assert!(
+        Arc::ptr_eq(&readback, &reg),
+        "runtime_registry 必须返回注入的同一 Arc"
+    );
+
+    let child = factory.child_factory();
+    let child_reg = child.runtime_registry().expect("child_factory 必须继承");
+    assert!(
+        Arc::ptr_eq(&child_reg, &reg),
+        "child_factory 必须与父共享同一运行注册表 Arc"
+    );
+}
+
+/// `set_cancel` 端到端:注入运行注册表 + 父令牌后 spawn,子代理登记进
+/// 表;父令牌 cancel 级联子令牌(空 LLM 池让子 turn 快速失败也无妨,
+/// 本测试只断言注册表生命周期与级联语义)。
+#[tokio::test]
+async fn spawn_registers_child_and_parent_cancel_cascades() {
+    let factory = dummy_factory();
+    let runtime = Arc::new(reflect_core::SubagentRuntimeRegistry::new());
+    factory.set_runtime_registry(runtime.clone());
+    let session_token = CancellationToken::new();
+    factory.set_cancel(session_token.clone());
+
+    let child = factory
+        .spawn(dummy_spec("explorer"), Vec::new(), "find foo".into())
+        .await
+        .expect("spawn 应成功(空池不影响 spawn 本身)");
+    let child_id = child.session_id.to_string();
+
+    // spawn 后立即登记,条目可在飞期间被定向中断查询。
+    assert_eq!(runtime.child_ids(), vec![child_id.clone()]);
+
+    // 父令牌取消 → 子令牌级联取消(Shutdown / Ctrl-C 语义)。
+    // 取消后 drain 收尾,SpawnedChild 终态注销条目。
+    session_token.cancel();
+    let _ = child.collect_result().await;
+    assert!(
+        runtime.is_empty(),
+        "collect 终态后注册表条目应注销,当前残留:{:?}",
+        runtime.child_ids()
+    );
+}

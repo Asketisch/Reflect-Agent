@@ -150,6 +150,15 @@ pub async fn submission_loop(
     // P2:session 级 steering 队列与后台任务注入队列。
     let steering_queue = Arc::new(Mutex::new(SteeringQueue::new()));
     let background_tasks = Arc::new(BackgroundTaskQueue::new());
+    // v1.4 A1:在飞回合表 —— turn 级取消令牌的登记处。每个 UserInput
+    // turn spawn 前登记(turn_id → 从会话令牌派生的 child_token),
+    // turn 任务退出时注销。`Op::Interrupt`(不带 child_id)对表中所有
+    // 令牌执行 cancel,让正在 `graph.run()` 里跑的 turn 真正停下来
+    // (模型流 / bash 击杀 / 审批等待都监听该令牌)—— 此前 Interrupt
+    // 只发事件不取消,正在跑的 turn 打不断。会话级 `Op::Shutdown` 走
+    // `cfg.cancel.cancel()`(父令牌),级联所有 child_token,不经本表。
+    let active_turns: Arc<Mutex<HashMap<TurnId, CancellationToken>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     // 是否安装回合级 ApprovalGate。M6 v0:通过 `AgentConfig.approvals`
     // 标志(由 TUI / lib facade 设置)或 `REFLECT_APPROVALS=1` 环境变量
     // 显式开启。headless `reflect-exec` 保持关闭,让既有 JSONL 路径
@@ -279,6 +288,12 @@ pub async fn submission_loop(
                 let cancel = cfg.cancel.clone();
                 let sub_id = sub.id.clone();
                 let turn_id = TurnId::new();
+                // v1.4 A1:派生本回合专属 child_token —— 会话级取消
+                // (`Op::Shutdown`)经父令牌自动级联,而 `Op::Interrupt`
+                // 只取消本回合令牌,粒度从「会话」细化到「回合」。
+                // 登记进在飞回合表供 Interrupt 路由;turn 任务退出时注销。
+                let turn_cancel = cancel.child_token();
+                active_turns.lock().insert(turn_id, turn_cancel.clone());
                 let _ = turn_tx
                     .send(Event::new(
                         sub_id.clone(),
@@ -391,7 +406,11 @@ pub async fn submission_loop(
                     hook_engine: hook_engine.clone(),
                     tools_queue: tools_queue.clone(),
                     sub_id: sub_id.clone(),
-                    cancel: cancel.clone(),
+                    // v1.4 A1:回合级令牌(非会话级)—— `Op::Interrupt`
+                    // 经在飞回合表 cancel 它;`Op::Shutdown` 经父令牌级联。
+                    // 对 graph 各节点而言与旧会话令牌语义兼容(select! /
+                    // kill_on_cancel 不变)。
+                    cancel: turn_cancel.clone(),
                     event_tx: turn_tx.clone(),
                     messages,
                     max_iterations,
@@ -460,6 +479,13 @@ pub async fn submission_loop(
                 let cfg_goal_clone = cfg.goal.clone();
                 let steering_queue_clone = steering_queue.clone();
                 let cfg_telemetry_clone = cfg.telemetry.clone();
+                // v1.4 A1:取消判定三件套 —— 回合令牌(被 Interrupt cancel)、
+                // 会话令牌(被 Shutdown cancel,级联回合令牌)、在飞回合表
+                // (终态注销)。区分两者才能只对「用户中断」发 TurnAborted,
+                // Shutdown 已有自己的 ShutdownComplete 事件。
+                let turn_cancel_clone = turn_cancel.clone();
+                let session_cancel_clone = cfg.cancel.clone();
+                let active_turns_clone = active_turns.clone();
                 // v1.2 P1:turn 级 telemetry span(RAII guard,drop 时自动写
                 // `turn.completed` + duration)。guard 在 spawned task 内创建,
                 // 这样 drop 时机 = turn 真正完成(而非 spawn 时刻)。
@@ -627,7 +653,43 @@ pub async fn submission_loop(
                                 }
                             }
                         }
+                    } else if turn_cancel_clone.is_cancelled()
+                        && !session_cancel_clone.is_cancelled()
+                    {
+                        // v1.4 A1:回合被 `Op::Interrupt` 取消(非 Shutdown
+                        // 级联)—— 用**真实** turn_id 发中止事件。旧实现由
+                        // Interrupt 分支现编一个 `TurnId::new()`,客户端无法
+                        // 把事件对应到实际在飞的回合。
+                        let _ = turn_tx_clone
+                            .send(Event::new(
+                                sub_id_clone,
+                                EventMsg::TurnAborted(TurnAbortedEvent {
+                                    turn_id,
+                                    reason: AbortReason::UserInterrupt,
+                                }),
+                            ))
+                            .await;
+                        // 中断可能留下半截助手消息:把已产出的内容完整落盘
+                        //(`latest_content` 可含孤儿 tool_use —— resume 端
+                        // `records_to_preload` 会过滤无 result 的在飞工具对,
+                        // 保证恢复不因半对消息报错),复用正常路径的格式。
+                        if let Some(rec) = recorder {
+                            if !final_state.latest_content.is_empty() {
+                                let _ = rec
+                                    .record(RolloutRecord::message(
+                                        turn_id,
+                                        MessageRole::Assistant,
+                                        serde_json::to_value(&final_state.latest_content)
+                                            .unwrap_or(serde_json::Value::Null),
+                                    ))
+                                    .await;
+                            }
+                        }
                     }
+                    // v1.4 A1:turn 已终态(完成 / 取消 / 异常),统一注销
+                    // 在飞回合表条目。陈旧条目(极端时序下 Interrupt 先到)
+                    // 的 remove 是幂等 no-op。
+                    active_turns_clone.lock().remove(&turn_id);
                 });
             }
             reflect_protocol::Op::Compact => {
@@ -654,7 +716,7 @@ pub async fn submission_loop(
                     ))
                     .await;
             }
-            reflect_protocol::Op::Interrupt { .. } => {
+            reflect_protocol::Op::Interrupt { child_id } => {
                 // v1.x Plan mode:把 abort reason 同步写到 `AgentConfig` 上,
                 // 让下一次 turn 的 `pre_loop` 一次性消费并注入 ephemeral
                 // system block("## Previous Turn"),提醒 LLM 上轮被中断、
@@ -662,15 +724,60 @@ pub async fn submission_loop(
                 // 是 Plan 时这条 hint 才有意义 —— 但写入总是无副作用,让
                 // `pre_loop` 自行决定是否消费(避免在这里再读一次锁)。
                 cfg.set_last_abort_reason(AbortReason::UserInterrupt);
-                let _ = turn_tx
-                    .send(Event::new(
-                        sub.id,
-                        EventMsg::TurnAborted(TurnAbortedEvent {
-                            turn_id: TurnId::new(),
-                            reason: AbortReason::UserInterrupt,
-                        }),
-                    ))
-                    .await;
+                if let Some(child) = child_id {
+                    // v1.4 A1(原 B3 预留):定向中断单个子代理。查子代理
+                    // 运行注册表并 cancel 对应令牌;被中断子代理的
+                    // `TurnAborted`(带其真实 turn_id)由它自己的 spawn 任务
+                    // 在取消路径 emit,这里不重复发。父会话不受影响。
+                    let hit = cfg
+                        .subagent_runtime
+                        .as_ref()
+                        .is_some_and(|reg| reg.cancel_child(&child));
+                    if hit {
+                        tracing::info!(child_id = %child, "subagent interrupt dispatched");
+                    } else {
+                        tracing::warn!(
+                            child_id = %child,
+                            "interrupt targeted unknown/finished subagent; no-op"
+                        );
+                    }
+                } else {
+                    // v1.4 A1:真中断 —— 对所有在飞回合的 turn 级令牌执行
+                    // cancel。graph 各节点(模型流 select! / bash
+                    // kill_on_cancel / 审批等待)收到取消信号后尽快收尾,
+                    // 回合任务在 `!completed_normally` 分支用**真实 turn_id**
+                    // emit `TurnAborted`。此前实现只发一条现编 turn_id 的
+                    // 事件、正在跑的 turn 照常跑完,中断名存实亡。
+                    let cancelled: Vec<TurnId> = {
+                        let mut turns = active_turns.lock();
+                        turns
+                            .drain()
+                            .map(|(id, tok)| {
+                                tok.cancel();
+                                id
+                            })
+                            .collect()
+                    };
+                    if cancelled.is_empty() {
+                        // 无在飞回合(空闲期按 Esc):保持旧回执行为 ——
+                        // 发一条事件让客户端知道请求被接受;此时没有真实
+                        // turn_id 可引用,沿用新生成 id 的历史约定。
+                        let _ = turn_tx
+                            .send(Event::new(
+                                sub.id,
+                                EventMsg::TurnAborted(TurnAbortedEvent {
+                                    turn_id: TurnId::new(),
+                                    reason: AbortReason::UserInterrupt,
+                                }),
+                            ))
+                            .await;
+                    } else {
+                        tracing::info!(
+                            turns = ?cancelled,
+                            "interrupt cancelled in-flight turn(s)"
+                        );
+                    }
+                }
             }
             // 批次十九 → 批次二十二:`Op::Rewind` —— 对话回退。
             // 现在真正做持久化截断:调 `RolloutRecorder::truncate_after` 删除
