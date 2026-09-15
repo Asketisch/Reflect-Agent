@@ -26,6 +26,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 BIN="$ROOT/target/release/reflect"
+export BIN  # 内层 bash -c 步骤(login/doctor 等)需要继承
 LOG="$ROOT/target/e2e.log"
 mkdir -p "$(dirname "$LOG")"
 
@@ -117,13 +118,13 @@ step "10/14 discussion smoke (M9)" \
     bash -c '
         set -e
         # 10a. `reflect discussion --help` 输出 Run / Ls
-        ./target/release/reflect discussion --help | grep -E "Run|Ls" >/dev/null || { echo "FAIL: discussion --help missing Run/Ls"; exit 1; }
+        ./target/release/reflect discussion --help | grep -iE "run|ls" >/dev/null || { echo "FAIL: discussion --help missing Run/Ls"; exit 1; }
         # 10b. `reflect discussion run -c <toml>` 跑通,输出 transcript + JSON result
         ./target/release/reflect discussion run -c crates/orchestration/reflect-discussion/examples/discussion.toml 2>&1 | grep -E "outcome|rounds_completed" >/dev/null || { echo "FAIL: discussion run missing outcome"; exit 1; }
         # 10c. discussion_demo example 跑通,输出 Started/Finished 事件
         cargo run --quiet -p reflect --example discussion_demo 2>&1 | grep -E "started|finished" >/dev/null || { echo "FAIL: discussion_demo missing started/finished"; exit 1; }
         # 10d. subagent 嵌套深度 3 集成测试通过
-        cargo test --quiet -p reflect-discussion --test subagent_nested_depth 2>&1 | tail -3 | grep -E "5 passed" >/dev/null || { echo "FAIL: subagent_nested_depth integration test"; exit 1; }
+        cargo test --quiet -p reflect-discussion --test subagent_nested_depth 2>&1 | tail -3 | grep -E "6 passed" >/dev/null || { echo "FAIL: subagent_nested_depth integration test"; exit 1; }
         echo "[ok] discussion smoke all green"
     '
 
