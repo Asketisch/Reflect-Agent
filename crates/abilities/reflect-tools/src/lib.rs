@@ -13,6 +13,7 @@
 //! 按并发安全性切分的 `ToolExecutionQueue`。
 
 pub mod approval;
+pub mod human_input;
 // v1.4 D2:BM25 抽为独立叶 crate(reflect-bm25),memory 检索共用;
 // 此处整体 re-export,`crate::bm25::*` 路径与外部 `reflect_tools::bm25`
 // 使用方保持源码兼容。
@@ -56,3 +57,4 @@ pub use reflect_protocol::{ToolError, ToolOutput};
 /// 变更类工具名。这些工具会修改文件系统 / 执行任意命令,只读 agent 不应拥有。
 /// bash 因可执行任意写操作,整体排除(v1 不细分读写子命令)。
 pub const READONLY_DENYLIST: &[&str] = &["write", "edit", "delete", "bash", "NotebookEdit"];
+pub use human_input::HumanInputStore;

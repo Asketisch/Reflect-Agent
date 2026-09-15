@@ -129,6 +129,10 @@ pub struct ToolContext {
     /// v1.5 R2:后台任务生成器(宿主实现)。`None`(默认)= 工具不支持
     /// 后台执行;`Some` 时 bash 的 `run_in_background` 参数可用。
     pub background: Option<Arc<dyn TaskSpawner>>,
+    /// v1.5 E2:人工输入持久化存储。`None`(默认)= `request_human_input`
+    /// 维持旧行为(仅 TUI gate 等待);`Some` 时支持挂起文件 + 外部进程
+    /// 应答文件(跨进程/跨重启闭环)。
+    pub human_input: Option<Arc<crate::human_input::HumanInputStore>>,
     /// v1.4 C1:父会话历史尾部快照(最近若干条,由 `tool_exec` 注入)。
     /// 仅子代理编排工具(`CallSubAgentTool`)读取:按
     /// `DataTransferConfig.pass_context_messages` / 调用参数截取后传给
@@ -302,6 +306,7 @@ impl Default for ToolContext {
             event_forwarder: None,
             os_sandbox: None,
             background: None,
+            human_input: None,
             parent_tail_json: Arc::new(RwLock::new(Vec::new())),
         }
     }

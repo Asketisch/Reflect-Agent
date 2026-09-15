@@ -79,6 +79,10 @@ impl AgentThread {
             cfg.cancel.clone(),
         ));
         base_ctx.background = Some(background_bridge);
+        // v1.5 E2:人工输入持久化存储 —— request_human_input 的挂起 /
+        // 应答文件闭环(~/.reflect/human_input 或 env 覆盖)。缺失 HOME
+        // 时为 None(工具退化为 TUI-only)。
+        base_ctx.human_input = reflect_tools::HumanInputStore::from_env_or_default().map(Arc::new);
         // v1.x:允许外部注入从 config.toml `[hooks]` 构建的 HookEngine(含
         // builtin hook + 插件 hook)。此前硬编码 `HookEngine::new()`,导致
         // `[hooks]` 配置整段死信。`None` 时回退空 engine(向后兼容)。
