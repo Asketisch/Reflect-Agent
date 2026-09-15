@@ -23,6 +23,7 @@
 pub mod agent_thread;
 pub mod background_tasks;
 pub mod config;
+pub mod eval;
 pub mod graph;
 pub mod resume;
 pub mod steering_queue;
@@ -36,6 +37,9 @@ pub use background_tasks::{
     BackgroundTask, BackgroundTaskQueue, BackgroundTaskStatus, spawn_background_stub,
 };
 pub use config::AgentConfig;
+pub use eval::{
+    EvalExpectations, EvalOp, EvalReport, EvalScenario, FinalStatus, run_all, run_scenario,
+};
 pub use steering_queue::{SteeringMessage, SteeringPriority, SteeringQueue};
 pub use subagent_registry::SubagentRuntimeRegistry;
 pub use submission_loop::NodeContext;
