@@ -143,6 +143,22 @@ pub enum Op {
     /// v1.3 SDK:客户端对 `EventMsg::ToolExecutionRequest` 的回执,
     /// `call_id` 与请求配对,`output` 为本地执行结果。
     ToolExecutionResponse { call_id: String, output: ToolOutput },
+
+    /// v1.4 A2:回合中途转向 —— 对正在跑的回合投喂补充指示或参考资料,
+    /// 引擎把它 push 进会话转向队列,由下一次 `pre_loop`(通常是
+    /// ToolExec → PreLoop 回环入口)收割注入为用户消息。
+    ///
+    /// 与 `UserInput` 的区别:`UserInput` 开新 turn;`Steer` 不打断当前
+    /// turn,消息在「下一个安全点」进入模型上下文 —— 实现「边跑边改
+    /// 需求」。`Now` 优先级是用户中途说话(纯文本直入);`Attachment`
+    /// 是参考资料(以 `<system-reminder>` 包裹注入,不冒充直接指令)。
+    /// 无在飞 turn 时消息留在队列,下一个 `UserInput` turn 边界合并
+    /// (既有行为)。
+    Steer {
+        #[serde(default)]
+        priority: crate::item::SteeringPriorityMirror,
+        items: Vec<UserInputItem>,
+    },
 }
 
 /// v1.3 SDK:客户端注册的自定义工具声明(spec 由客户端提供,
@@ -188,6 +204,7 @@ impl Op {
             Op::ExitGoalMode => "exit_goal_mode",
             Op::RegisterTools { .. } => "register_tools",
             Op::ToolExecutionResponse { .. } => "tool_execution_response",
+            Op::Steer { .. } => "steer",
         }
     }
 }

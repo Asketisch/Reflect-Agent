@@ -44,8 +44,8 @@ pub use event_msg::{
 pub use item::{
     ApprovalPolicy, ContentBlock, PermissionMode, PlanApprovalChoice, PlanId,
     ReasoningEffortMirror, ReviewDecision, RiskLevel, SandboxPolicy, SessionConfiguredEvent,
-    ThreadId, ThreadSettingsOverrides, ToolError, ToolOutput, TurnId, UserInputItem,
-    is_edit_tool_name,
+    SteeringPriorityMirror, ThreadId, ThreadSettingsOverrides, ToolError, ToolOutput, TurnId,
+    UserInputItem, is_edit_tool_name,
 };
 pub use op::{Op, RemoteToolSpec};
 pub use question::{

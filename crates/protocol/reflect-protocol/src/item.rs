@@ -319,6 +319,20 @@ pub enum ReasoningEffortMirror {
     High,
 }
 
+/// v1.4 A2:转向消息优先级的协议层镜像(与实现层
+/// `reflect_core::steering_queue::SteeringPriority` 字段一一对应,由
+/// `submission_loop` 在收到 `Op::Steer` 后桥接)。`Attachment` 为默认值:
+/// 未显式声明优先级的转向按「参考资料」处理,保守不冒充直接指令。
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SteeringPriorityMirror {
+    /// 参考资料:以 `<system-reminder>` 包裹注入,下一安全点生效。
+    #[default]
+    Attachment,
+    /// 立即指示:作为用户中途说话直入上下文,打断当前规划方向。
+    Now,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionConfiguredEvent {
     pub session_id: ThreadId,

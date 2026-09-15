@@ -32,7 +32,7 @@ use crate::background_tasks::BackgroundTaskQueue;
 use crate::config::{AgentConfig, M4Deps};
 use crate::graph::StateGraph;
 use crate::graph::state::AgentState;
-use crate::steering_queue::SteeringQueue;
+use crate::steering_queue::{SteeringPriority, SteeringQueue};
 
 /// 传递给每个图节点的轻量 clone 的回合级上下文。
 #[derive(Clone)]
@@ -106,6 +106,12 @@ pub struct NodeContext {
     /// 会话级订阅者(TUI 多 tab / 持久化层 / 外接 dashboard)。
     /// `None` 表示无订阅者,跳过 fan_out。
     pub plan_session_subs: Option<Arc<Mutex<Vec<mpsc::Sender<Event>>>>>,
+    /// v1.4 A2:会话级转向队列句柄。`pre_loop` 在每次(含 ToolExec 回环)
+    /// 入口收割其中的 Now / Attachment 消息并注入 `state.messages` 尾部,
+    /// 实现「回合中途边跑边改需求」—— 此前转向只在下一个 turn 边界
+    /// 合并,正在跑的回合无法收到补充指示。`None`(测试 / 旧构造方)=
+    /// 跳过收割,行为不变。
+    pub steering_queue: Option<Arc<Mutex<SteeringQueue>>>,
     /// v1.x Plan mode:共享 `AgentConfig`(整个 `cfg.clone()` —— 大部分字段是
     /// `Arc<RwLock<…>>`,clone 廉价)。`tool_exec` 在 dispatch plan
     /// 模式事件时通过它转发给 `spawn_plan_approval_waiter`,让审批
@@ -437,6 +443,8 @@ pub async fn submission_loop(
                     // 通道把工具结果转发回主循环)。
                     plan_approval_gate: Some(plan_approval_gate.clone()),
                     plan_session_subs: Some(session_subs.clone()),
+                    // v1.4 A2:共享会话级转向队列,pre_loop 每次入口收割。
+                    steering_queue: Some(steering_queue.clone()),
                     // 同上:把 `cfg.clone()` 传下去,让
                     // `spawn_plan_approval_waiter` 能在 user approve
                     // 后翻转会话级 `permission_mode` 槽。
@@ -818,6 +826,24 @@ pub async fn submission_loop(
                 let _ = turn_tx.send(ev.clone()).await;
                 fan_out_session(&session_subs, &ev);
                 break;
+            }
+            // v1.4 A2:回合中途转向入口。客户端(界面 / SDK)对正在跑的
+            // 回合投喂补充指示:push 进会话转向队列,正在跑的 turn 会在
+            // 下一次 pre_loop(ToolExec 回环入口)收割注入;若无在飞
+            // turn,消息留队,下一个 UserInput turn 边界合并(既有行为)。
+            reflect_protocol::Op::Steer { priority, items } => {
+                let p = match priority {
+                    reflect_protocol::SteeringPriorityMirror::Now => SteeringPriority::Now,
+                    reflect_protocol::SteeringPriorityMirror::Attachment => {
+                        SteeringPriority::Attachment
+                    }
+                };
+                tracing::info!(
+                    priority = ?p,
+                    items = items.len(),
+                    "steer: mid-turn steering queued"
+                );
+                steering_queue.lock().push(p, items);
             }
             reflect_protocol::Op::ToolApproval { id, decision }
             | reflect_protocol::Op::HookApproval { id, decision } => {
