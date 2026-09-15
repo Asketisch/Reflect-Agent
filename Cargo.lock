@@ -2484,6 +2484,7 @@ dependencies = [
  "reflect-protocol",
  "reflect-recovery",
  "reflect-skills",
+ "reflect-subagent",
  "reflect-telemetry",
  "reflect-tools",
  "serde",

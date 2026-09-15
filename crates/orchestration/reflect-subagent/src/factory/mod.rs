@@ -808,8 +808,10 @@ impl SpawnedChild {
         // 会跳过末尾的手动释放,造成槽位泄漏(正常完成路径的子代理已
         // 终态,再 cancel 是无害幂等)。
         // v1.4 C1:终态标记用的槽位克隆先建(drain 循环内只读;
-        // status_slot 本体 move 进 CleanupGuard)。
+        // status_slot 本体 move 进 CleanupGuard);text_buf 累积子代理
+        // 文本增量,供 MessageStop 时合成完整 AgentMessage 回调。
         let cleanup_slot = status_slot.clone();
+        let mut text_buf = String::new();
         let _cleanup = CleanupGuard {
             in_flight: in_flight_arc,
             status_slot,
@@ -821,15 +823,39 @@ impl SpawnedChild {
         let mut usage_from_token_count: Option<TokenUsage> = None;
         while let Some(ev) = handle.next().await {
             // v1.4 C1:进度回调(终态事件不转发,终态由返回值承载)。
+            // v1.4 C1:进度回调。子代理文本走 AgentMessageDelta(core 的
+            // 流式路径不发 AgentMessage,协议层也没有消息边界事件),这里
+            // 累积增量,在「阶段边界」(子代理发起工具调用 / 回合终态)把
+            // 累积文本合成一条完整 AgentMessage 回调 —— 保持「不逐字刷屏」
+            // 的契约,同时保证父级能收到子代理的回答文本。
             if let Some(cb) = on_event {
-                let forwardable = matches!(
+                // 边界前冲刷:阶段切换(发起工具)或终态时,先交付已累积文本。
+                let flush_text = matches!(
                     ev.msg,
-                    reflect_protocol::EventMsg::AgentMessage(_)
-                        | reflect_protocol::EventMsg::ToolCallBegin(_)
+                    reflect_protocol::EventMsg::ToolCallBegin(_)
                         | reflect_protocol::EventMsg::ToolCallEnd(_)
+                        | reflect_protocol::EventMsg::TurnComplete(_)
+                        | reflect_protocol::EventMsg::TurnAborted(_)
+                        | reflect_protocol::EventMsg::ShutdownComplete
                 );
-                if forwardable {
-                    cb(&ev);
+                if flush_text && !text_buf.is_empty() {
+                    let synthetic = reflect_protocol::Event::new(
+                        reflect_protocol::EVENT_ID_NONE,
+                        reflect_protocol::EventMsg::AgentMessage(reflect_protocol::AgentMessage {
+                            text: std::mem::take(&mut text_buf),
+                        }),
+                    );
+                    cb(&synthetic);
+                }
+                match &ev.msg {
+                    reflect_protocol::EventMsg::AgentMessageDelta(d) => {
+                        text_buf.push_str(&d.delta);
+                    }
+                    reflect_protocol::EventMsg::ToolCallBegin(_)
+                    | reflect_protocol::EventMsg::ToolCallEnd(_) => {
+                        cb(&ev);
+                    }
+                    _ => {}
                 }
             }
             match &ev.msg {

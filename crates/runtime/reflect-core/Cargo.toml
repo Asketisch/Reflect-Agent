@@ -36,4 +36,13 @@ chrono             = { workspace = true }
 [dev-dependencies]
 async-stream = "0.3"
 tempfile = "3"
+# v1.4:全链路集成测试(full_link.rs)需要子代理工厂 —— Cargo 允许
+# dev-dependency 与被测 crate 的正常依赖成环(subagent 依赖 core)。
+reflect-subagent = { workspace = true }
+reflect-memory = { workspace = true }
+reflect-compact = { workspace = true }
+reflect-prompt = { workspace = true }
+reflect-agent-def = { workspace = true }
+reflect-notes = { workspace = true }
+reflect-recovery = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
