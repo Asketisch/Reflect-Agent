@@ -141,6 +141,12 @@ pub(crate) fn bootstrap_m4(
     // 利用做静态放行。
     let load_skill = Arc::new(reflect_skills::LoadSkillTool::new(skills_catalog.clone()));
     tools().register_runtime_tool(load_skill);
+    // v1.4 D3:附属资源读取(渐进披露第三级)—— 与 load_skill 同源
+    // catalog,按需读取 skill 目录下的 scripts / references。
+    let read_skill_resource = Arc::new(reflect_skills::ReadSkillResourceTool::new(
+        skills_catalog.clone(),
+    ));
+    tools().register_runtime_tool(read_skill_resource);
 
     // Memory:project + user 走文件,session 走内存。
     // v1.x:接线 `CompositeMemoryStore`(此前孤儿)—— Session scope 走内存
@@ -201,7 +207,34 @@ pub(crate) fn bootstrap_m4(
     // 环境变量;M8 把两者都接入 `CompactorConfig`。
     let compactor_cfg =
         reflect_core::config::compactor_config_from_env_and_toml(toml_trigger_tokens);
-    let compactor = Arc::new(Compactor::new(compactor_cfg, summarizer));
+    // v1.4 D2:记忆固化门控 —— `REFLECT_MEMORY_CONSOLIDATION`:
+    //   未设 / `0` / `false` = 关闭(默认,行为不变);
+    //   `1` / `session` = 写 Session scope(进程内,重启即丢,最安全);
+    //   `project` / `user` = 显式写对应文件 scope(入 VCS / 跨项目,
+    //   需用户显式授权)。
+    // LLM 摘要器在位时才接线(Noop 摘要器提取不出内容,徒劳)。
+    let consolidation_scope = match std::env::var("REFLECT_MEMORY_CONSOLIDATION")
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "1" | "true" | "session" => Some(reflect_memory::MemoryScope::Session),
+        "project" => Some(reflect_memory::MemoryScope::Project),
+        "user" => Some(reflect_memory::MemoryScope::User),
+        _ => None,
+    };
+    let compactor_base = Compactor::new(compactor_cfg, summarizer);
+    let compactor = match consolidation_scope {
+        Some(scope) if registry.next_for(&model, &[]).is_some() => {
+            tracing::info!(?scope, "memory consolidation enabled");
+            Arc::new(compactor_base.with_memory_consolidation(
+                memory.clone(),
+                scope,
+                agent_name.to_string(),
+            ))
+        }
+        _ => Arc::new(compactor_base),
+    };
 
     // Prompt 构建器。
     // v1.1.0 Phase 4:若 `CoordinatorConfig::enabled`,把 coordinator

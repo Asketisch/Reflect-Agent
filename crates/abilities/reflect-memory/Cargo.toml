@@ -7,6 +7,7 @@ description = "Reflect: agent persistent memory (project / local / user scopes)"
 
 [dependencies]
 reflect-protocol = { workspace = true }
+reflect-bm25    = { workspace = true }
 serde              = { workspace = true }
 serde_json         = { workspace = true }
 thiserror          = { workspace = true }

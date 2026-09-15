@@ -2380,6 +2380,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "reflect-bm25"
+version = "0.0.1"
+dependencies = [
+ "rankfns",
+]
+
+[[package]]
 name = "reflect-cli"
 version = "0.0.1"
 dependencies = [
@@ -2415,9 +2422,11 @@ name = "reflect-compact"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "chrono",
  "futures",
  "parking_lot",
  "reflect-llm",
+ "reflect-memory",
  "reflect-protocol",
  "reflect-telemetry",
  "serde",
@@ -2681,6 +2690,7 @@ name = "reflect-memory"
 version = "0.0.1"
 dependencies = [
  "parking_lot",
+ "reflect-bm25",
  "reflect-protocol",
  "serde",
  "serde_json",
@@ -2987,7 +2997,7 @@ dependencies = [
  "ignore",
  "once_cell",
  "parking_lot",
- "rankfns",
+ "reflect-bm25",
  "reflect-hooks",
  "reflect-permissions",
  "reflect-prompt",

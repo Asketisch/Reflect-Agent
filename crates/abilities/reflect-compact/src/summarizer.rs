@@ -96,6 +96,15 @@ pub trait Summarizer: Send + Sync {
         msgs: &[ChatMessage],
         previous_summary: Option<&str>,
     ) -> Result<String, SummarizerError>;
+
+    /// v1.4 D2:记忆固化 —— 从对话切片提取「值得跨会话长期记住」的
+    /// 事实条目(每条一句)。默认不支持(Noop / 测试 stub 免实现)。
+    async fn extract_memories(
+        &self,
+        _msgs: &[ChatMessage],
+    ) -> Result<Vec<String>, SummarizerError> {
+        Err(SummarizerError::Cancelled)
+    }
 }
 
 /// 由 LLM 驱动的 summarizer。流式读取模型响应,拼接
@@ -176,7 +185,36 @@ impl Summarizer for LlmSummarizer {
         };
         call_summarizer(self, &prompt, Some(previous_summary.unwrap_or(""))).await
     }
+
+    async fn extract_memories(&self, msgs: &[ChatMessage]) -> Result<Vec<String>, SummarizerError> {
+        let conversation = serialize_messages(msgs);
+        let prompt = MEMORY_EXTRACT_PROMPT.replace("{{ conversation }}", &conversation);
+        let text = call_summarizer(self, &prompt, None).await?;
+        Ok(text
+            .lines()
+            .map(|l| l.trim())
+            .filter_map(|l| l.strip_prefix("- ").or_else(|| l.strip_prefix("* ")))
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty() && l.len() <= 500)
+            .take(10)
+            .collect())
+    }
 }
+
+/// v1.4 D2:记忆固化 prompt —— 只提取稳定的、值得跨会话记住的事实
+/// (决策 / 偏好 / 约束),拒绝过程性内容;上限 10 条,每条一句。
+pub const MEMORY_EXTRACT_PROMPT: &str = r#"You are a memory curator. From the conversation below, extract durable facts worth remembering across sessions: decisions made, user preferences, project constraints, key domain knowledge.
+
+Rules:
+- Only stable, reusable facts. NEVER include transient task state, in-progress work, or file lists.
+- At most 10 items; skip if nothing qualifies.
+- One sentence per item, self-contained (no pronouns referring to the conversation).
+
+Output format: a plain markdown bullet list, one item per line (`- fact`). Output NOTHING else.
+
+<conversation>
+{{ conversation }}
+</conversation>"#;
 
 async fn call_summarizer(
     s: &LlmSummarizer,

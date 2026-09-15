@@ -143,10 +143,33 @@ pub async fn pre_loop(state: &mut AgentState, ctx: &NodeContext) -> Option<Graph
     inject_mid_turn_steering(state, ctx).await;
 
     // 3. 按 active_agent_def.memory 作用域加载内存。
-    let memory_text = match m4
-        .memory
-        .load_combined(&m4.active_agent_def.memory, &m4.active_agent_def.name)
-    {
+    // v1.4 D2:检索化注入 —— 用本轮用户输入作查询,BM25 选相关记忆
+    // 条目 + 最近条目(8000 字符预算不变);查询为空 / 记忆总量装得下
+    // 时等价历史全量注入。旧格式(无 `## 标题`)整文件为单条目,兼容。
+    let memory_query: String = ctx
+        .messages
+        .iter()
+        .rev()
+        .find_map(|m| match m {
+            ChatMessage::User(u) => Some(
+                u.blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        reflect_llm::ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let memory_text = match reflect_memory::retrieve_relevant_arc(
+        &m4.memory,
+        &m4.active_agent_def.memory,
+        &m4.active_agent_def.name,
+        memory_query.trim(),
+    ) {
         Ok(s) => reflect_memory::truncate_for_injection(&s),
         Err(e) => {
             tracing::warn!(?e, "failed to load memory; using empty");

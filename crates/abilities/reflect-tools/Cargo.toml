@@ -23,7 +23,7 @@ ignore             = { workspace = true }
 once_cell          = { workspace = true }
 parking_lot        = { workspace = true }
 regex              = { workspace = true }
-rankfns            = { workspace = true }
+reflect-bm25       = { workspace = true }
 reqwest            = { workspace = true }
 serde              = { workspace = true }
 serde_json         = { workspace = true }

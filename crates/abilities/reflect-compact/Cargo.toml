@@ -15,12 +15,14 @@ tokenizer = ["dep:tiktoken-rs"]
 tiktoken-rs = { workspace = true, optional = true }
 reflect-protocol = { workspace = true }
 reflect-llm      = { workspace = true }
+reflect-memory   = { workspace = true }
 reflect-telemetry = { workspace = true }
 serde              = { workspace = true }
 serde_json         = { workspace = true }
 thiserror          = { workspace = true }
 async-trait        = { workspace = true }
 tokio              = { workspace = true }
+chrono            = { workspace = true }
 tokio-util         = { workspace = true }
 futures            = { workspace = true }
 tracing            = { workspace = true }

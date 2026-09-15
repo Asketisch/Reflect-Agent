@@ -13,7 +13,10 @@
 //! 按并发安全性切分的 `ToolExecutionQueue`。
 
 pub mod approval;
-pub mod bm25;
+// v1.4 D2:BM25 抽为独立叶 crate(reflect-bm25),memory 检索共用;
+// 此处整体 re-export,`crate::bm25::*` 路径与外部 `reflect_tools::bm25`
+// 使用方保持源码兼容。
+pub use reflect_bm25 as bm25;
 pub mod builtins;
 pub mod checkpoint;
 pub mod plan_approval;
