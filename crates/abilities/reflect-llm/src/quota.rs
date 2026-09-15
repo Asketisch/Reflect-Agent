@@ -8,8 +8,10 @@
 //!
 //! ## 设计取舍
 //!
-//! - 纯内存(v1):进程重启窗口重置。计划补 `~/.reflect/quota-state.json`
-//!   持久化(标注 TODO),与 rollout 同级。
+//! - 持久化(v1.5 R4):`record_usage` 后 best-effort 把窗口状态写到
+//!   `~/.reflect/quota-state.json`(`save_state`),进程重启时
+//!   `load_state` 恢复未过期的窗口用量 —— 重启不再静默重置配额。
+//!   过期窗口在恢复时按过期语义丢弃。写入失败仅 warn(不影响热路径)。
 //! - 本地统计:不依赖厂商 quota API(厂商支持不一)。`QuotaSource` 枚举
 //!   留作厂商 API 路由,后续按 cc-switch 实现适配器。
 //! - 线程安全:`parking_lot::RwLock` 包裹,`record_usage` 在 LLM 热路径
@@ -93,6 +95,16 @@ pub enum QuotaSource {
 
 /// 共享句柄类型(供 `AgentConfig` / `NodeContext` 持有)。
 pub type SharedQuotaTracker = Arc<QuotaTracker>;
+
+/// v1.5 R4:持久化文件的单条窗口记录(`~/.reflect/quota-state.json`)。
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct PersistedWindow {
+    provider: String,
+    label: String,
+    /// 窗口起始时刻(Unix 毫秒)。
+    window_start_ms: u128,
+    used_tokens: u64,
+}
 
 impl QuotaTracker {
     pub fn new() -> Self {
@@ -196,6 +208,9 @@ impl QuotaTracker {
             win.used_tokens = 0;
         }
         win.used_tokens = win.used_tokens.saturating_add(tokens);
+        drop(windows);
+        // v1.5 R4:用量变化即落盘(best-effort;热路径上文件很小,可接受)。
+        self.save_state_if_configured();
     }
 
     /// 该 credential 配额是否已耗尽(`used_tokens >= max_tokens` 且窗口未过期)。
@@ -255,6 +270,104 @@ impl QuotaTracker {
             label: label.to_string(),
         };
         self.windows.read().get(&key).map(|w| w.used_tokens)
+    }
+
+    /// v1.5 R4:配置持久化文件路径(env `REFLECT_QUOTA_STATE` 覆盖,
+    /// 测试用;默认 `~/.reflect/quota-state.json`)。
+    fn state_path() -> Option<std::path::PathBuf> {
+        if let Ok(p) = std::env::var("REFLECT_QUOTA_STATE") {
+            if !p.is_empty() {
+                return Some(std::path::PathBuf::from(p));
+            }
+        }
+        std::env::var("HOME")
+            .ok()
+            .filter(|h| !h.is_empty())
+            .map(|h| std::path::PathBuf::from(h).join(".reflect/quota-state.json"))
+    }
+
+    /// v1.5 R4:把当前窗口状态写到持久化文件(原子写:临时文件 + rename)。
+    /// 未配置路径(HOME 缺失)或序列化失败为 no-op / warn。
+    pub fn save_state_if_configured(&self) {
+        let Some(path) = Self::state_path() else {
+            return;
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let windows = self.windows.read();
+        let records: Vec<PersistedWindow> = windows
+            .iter()
+            .map(|(k, w)| PersistedWindow {
+                provider: k.provider.clone(),
+                label: k.label.clone(),
+                window_start_ms: now - w.window_start.elapsed().as_millis(),
+                used_tokens: w.used_tokens,
+            })
+            .collect();
+        drop(windows);
+        let Ok(json) = serde_json::to_string(&records) else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, json).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        } else {
+            tracing::warn!(path = %path.display(), "quota state write failed");
+        }
+    }
+
+    /// v1.5 R4:从持久化文件恢复窗口用量。只恢复仍「未过期」的窗口
+    /// (需要对应 credential 的 window_secs —— 以 configs 中注册的为准,
+    /// 未注册 / 已过期的记录丢弃)。文件缺失或损坏为 no-op。
+    pub fn load_state(&self) {
+        let Some(path) = Self::state_path() else {
+            return;
+        };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return; // 首次运行无文件,正常。
+        };
+        let Ok(records) = serde_json::from_str::<Vec<PersistedWindow>>(&text) else {
+            tracing::warn!(path = %path.display(), "quota state parse failed; ignoring");
+            return;
+        };
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let mut windows = self.windows.write();
+        for r in records {
+            let key = CredentialKey {
+                provider: r.provider.clone(),
+                label: r.label.clone(),
+            };
+            // 只恢复已注册且未过期的窗口。
+            let Some(cfg) = self.configs.read().get(&key).cloned() else {
+                continue;
+            };
+            let elapsed_ms = now_ms.saturating_sub(r.window_start_ms);
+            if elapsed_ms >= u128::from(cfg.window_secs) * 1000 {
+                continue; // 窗口已过期,按语义丢弃。
+            }
+            windows.insert(
+                key,
+                QuotaWindow {
+                    // 用毫秒重建 Instant 精确起点不可行 —— 以「剩余时长」
+                    // 反推:window_start = now - elapsed。
+                    window_start: Instant::now() - Duration::from_millis(elapsed_ms as u64),
+                    used_tokens: r.used_tokens,
+                },
+            );
+        }
+        tracing::debug!(
+            path = %path.display(),
+            restored = windows.len(),
+            "quota state loaded"
+        );
     }
 }
 
@@ -452,5 +565,78 @@ mod tests {
         );
         let snap = t.check_via_api("openai", "kimi").await;
         assert!(snap.is_none(), "网络失败应回退本地统计(返回 None)");
+    }
+
+    /// v1.5 R4:env 是进程级共享,set_var/remove_var 在并行测试下互踩,
+    /// 用锁把两个持久化测试串行化。
+    static QUOTA_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    // ── v1.5 R4:持久化 save/load 往返 ─────────────────────────────
+
+    /// save → 新 tracker load → 用量与耗尽判定保持(重启语义)。
+    /// env 指向唯一临时文件(pid),末尾清理。
+    #[test]
+    fn save_then_load_restores_window() {
+        let _env = QUOTA_ENV_LOCK.lock().unwrap();
+        let path = std::env::temp_dir().join(format!("quota-state-{}.json", std::process::id()));
+        unsafe {
+            std::env::set_var("REFLECT_QUOTA_STATE", &path);
+        }
+        let t1 = QuotaTracker::new();
+        t1.register("anthropic", "plan-a", cfg(18000, 1000));
+        t1.record_usage("anthropic", "plan-a", 700);
+        assert!(!t1.is_exhausted("anthropic", "plan-a"), "700/1000 未耗尽");
+        t1.save_state_if_configured();
+
+        // 新进程等价:全新 tracker,load 后窗口恢复;继续累加至耗尽。
+        let t2 = QuotaTracker::new();
+        t2.register("anthropic", "plan-a", cfg(18000, 1000));
+        t2.load_state();
+        assert_eq!(
+            t2.used_tokens("anthropic", "plan-a"),
+            Some(700),
+            "load 后用量应恢复"
+        );
+        t2.record_usage("anthropic", "plan-a", 300);
+        assert!(
+            t2.is_exhausted("anthropic", "plan-a"),
+            "恢复的 700 + 新增 300 应触达上限"
+        );
+        assert!(t2.is_exhausted("anthropic", "plan-a"), "耗尽判定跨重启保持");
+
+        let _ = std::fs::remove_file(&path);
+        unsafe {
+            std::env::remove_var("REFLECT_QUOTA_STATE");
+        }
+    }
+
+    /// 已过期的窗口在 load 时按语义丢弃(不恢复陈旧用量)。
+    #[test]
+    fn load_state_drops_expired_windows() {
+        let _env = QUOTA_ENV_LOCK.lock().unwrap();
+        let path = std::env::temp_dir().join(format!("quota-exp-{}.json", std::process::id()));
+        unsafe {
+            std::env::set_var("REFLECT_QUOTA_STATE", &path);
+        }
+        let t1 = QuotaTracker::new();
+        t1.register("anthropic", "short", cfg(1, 100));
+        t1.record_usage("anthropic", "short", 90);
+        t1.save_state_if_configured();
+        // 等 1 秒窗口过期。
+        std::thread::sleep(Duration::from_millis(1100));
+
+        let t2 = QuotaTracker::new();
+        t2.register("anthropic", "short", cfg(1, 100));
+        t2.load_state();
+        assert_eq!(
+            t2.used_tokens("anthropic", "short"),
+            None,
+            "过期窗口不应恢复"
+        );
+
+        let _ = std::fs::remove_file(&path);
+        unsafe {
+            std::env::remove_var("REFLECT_QUOTA_STATE");
+        }
     }
 }

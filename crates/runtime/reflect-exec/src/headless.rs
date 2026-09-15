@@ -379,6 +379,10 @@ pub async fn bootstrap_normal(
     let max_iterations =
         reflect_core::config::max_iterations_from_env(initial_cfg.active.max_iterations);
     let quota_tracker = build_quota_tracker(&initial_cfg);
+    // v1.5 R4:恢复上次的配额窗口(重启不静默重置;文件缺失 no-op)。
+    if let Some(t) = &quota_tracker {
+        t.load_state();
+    }
     // web_search 工具级 env:`[web_search].api_key` → BRAVE_API_KEY。
     let mut tool_env = std::collections::HashMap::new();
     if let Some(ws) = &initial_cfg.web_search {

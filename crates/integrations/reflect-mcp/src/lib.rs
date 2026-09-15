@@ -11,9 +11,11 @@
 //! - 原语: Tools
 //! - 协议版本: `2025-06-18`
 //!
-//! ## 不在 v0.3 (留 v0.4)
+//! ## 能力清单(v1.5 更正)
 //!
-//! Resources / Prompts / Sampling / Elicitation / OAuth。
+//! - 已实现:Tools、Resources(`ListMcpResources` / `ReadMcpResource`,
+//!   v1.2 起真接线 —— 此前注释误标为未实现)。
+//! - 未实现(留后续):Prompts / Sampling / Elicitation / OAuth。
 //!
 //! ## 关键约束
 //!

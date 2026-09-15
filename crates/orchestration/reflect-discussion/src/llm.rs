@@ -16,21 +16,18 @@
 //!   `SubAgentFactory::spawn` 的 `parent_tail: Vec<ChatMessage>` 后,可改
 //!   为结构化消息列表。
 //!
-//! ## 已知限制:`SubAgentFactory::MAX_DEPTH = 3`
+//! ## 并发深度(历史限制已解除)
 //!
-//! `SubAgentFactory` 当前**只在 spawn 时自增**,**不在 terminal 时自减**
-//! (见 [`reflect_subagent::factory`] 的 `fetch_add` / `fetch_sub` 注释),
-//! 等价于「总 spawn 数上限」,**不是**「并发 in-flight 上限」。对 discussion
-//! 的实际影响:
+//! `SubAgentFactory` 的 `MAX_DEPTH`(= 16)是**并发 in-flight 上限**:
+//! spawn 时 `fetch_add`,`SpawnedChild` Drop / collect 完成时释放,
+//! 嵌套 spawn 共享同一计数器。对 discussion 的实际影响:
 //!
-//! - [`DiscussionMode::Sequential`]:每轮只有 1 个 spawn,depth 永远是 1,
-//!   任意 round 数 OK。
-//! - [`DiscussionMode::Concurrent`]:每轮 N 个 participant 同时 spawn,
-//!   第 1 轮 depth 直接到 N;N ≤ 3 时 ~1 轮 OK,N > 3 时立即 `MaxDepthExceeded`。
+//! - [`DiscussionMode::Sequential`]:每轮只有 1 个 spawn,任意 round 数 OK。
+//! - [`DiscussionMode::Concurrent`]:每轮 N 个 participant 并发, participant
+//!   数(含嵌套)≤ 16 即可;超出返回 `MaxDepthExceeded`。
 //!
-//! `crates/reflect-discussion/examples/discussion.toml` 默认 3 participants,
-//! Sequential 模式无限轮 OK;Concurrent 模式建议作为 v0.3.x 的优化项
-//! (在 `SpawnedChild::collect_result` 末尾 `fetch_sub(1)` 自减)。
+//! (v1.5 注:本注释曾长期描述「MAX_DEPTH=3 且不在 terminal 自减」的旧行为,
+//! 该行为自 in-flight 语义重构后已不存在,此处更正以免误导。)
 //!
 //! ## 用法
 //!
