@@ -125,6 +125,7 @@ fn mk_config(mode: DiscussionMode, max_rounds: u32) -> (DiscussionConfig, Vec<Ag
         consensus_window: 1,
         max_rounds,
         mailbox_capacity: 8,
+        judge: false,
     };
     (config, agents)
 }

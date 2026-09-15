@@ -320,6 +320,74 @@ fn render_user_prompt(
     )
 }
 
+// ── v1.4 C3:LLM 裁判 ───────────────────────────────────────────
+
+/// 裁判子代理的 system prompt —— 强调证据导向 + 严格 JSON 输出。
+const JUDGE_SYSTEM_PROMPT: &str = "\
+You are a strict discussion judge. You read the full transcript of a \
+multi-agent discussion and decide whether the participants have reached a \
+genuine consensus.\n\n\
+RULES:\n\
+1. Consensus requires substantive agreement on the core question — mere \
+politeness, repeated self-declarations without engagement, or residual \
+disagreement on key points means NOT agreed.\n\
+2. If agreed, `summary` must faithfully state what was agreed upon.\n\
+3. If not agreed, `summary` states the current focus of disagreement and \
+`blockers` lists the concrete unresolved points (each a short sentence).\n\
+4. Respond with STRICT JSON only, no prose outside the object.";
+
+/// 构造 LLM 裁判闭包:每轮 spawn 一个独立 judge 子代理(禁用全部工具,
+/// `max_turns = 1`),让它通读全量 transcript 后输出结构化 JSON 裁决,
+/// 解析为 [`JudgeVerdict`]。裁判沿用工厂的默认模型路由;spawn / 解析
+/// 失败都以 Err(String) 返回(调用方 runtime 回退自报共识路径)。
+pub fn make_judge_closure(factory: Arc<SubAgentFactory>) -> Arc<crate::models::JudgeCallback> {
+    use crate::models::{JudgeVerdict, MessageKind as MK};
+    Arc::new(move |round, transcript| {
+        let factory = factory.clone();
+        Box::pin(async move {
+            // 渲染 transcript(全部消息,含轮次与发送者)。
+            let mut body = String::new();
+            for m in &transcript {
+                let kind = match m.kind {
+                    MK::Utterance => "utterance",
+                    MK::Consensus => "self-reported-consensus",
+                    MK::Finish => "finish",
+                };
+                body.push_str(&format!(
+                    "[round {}] {} ({}): {}\n",
+                    m.round, m.from.0, kind, m.content
+                ));
+            }
+            let prompt = format!(
+                "<transcript round={round}>\n{body}</transcript>\n\n\
+                 Has the discussion reached a genuine consensus? Respond as a \
+                 single JSON object: {{\"agreed\": bool, \"summary\": \"...\", \
+                 \"blockers\": [\"...\"]}}. JSON only."
+            );
+            let spec = SubAgentSpec {
+                name: "Judge".into(),
+                role: "judge".into(),
+                model: None, // 继承工厂默认模型(通常配为便宜模型)
+                system_prompt: JUDGE_SYSTEM_PROMPT.into(),
+                allowed_tools: vec![], // 裁判不需要工具,纯文本裁决
+                data_transfer: DataTransferConfig::default(),
+                max_turns: Some(1),
+                allowed_skills: vec![],
+            };
+            let spawned = factory
+                .spawn(spec, vec![], prompt)
+                .await
+                .map_err(|e| format!("judge spawn failed: {e}"))?;
+            let text = spawned
+                .collect_result()
+                .await
+                .map_err(|e| format!("judge collect failed: {e}"))?;
+            JudgeVerdict::parse(&text)
+                .inspect_err(|_| warn!(round, raw = %text, "judge verdict parse failed"))
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -32,6 +32,7 @@ async fn lib_facade_exposes_message_bus_and_orchestrator() {
         consensus_window: 1,
         max_rounds: 1,
         mailbox_capacity: 4,
+        judge: false,
     };
     assert_eq!(config.topic, "facade smoke");
 
