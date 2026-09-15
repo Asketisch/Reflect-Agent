@@ -125,11 +125,14 @@ pub async fn tool_exec(state: &mut AgentState, ctx: &NodeContext) -> Option<Grap
         .rev()
         .filter_map(|m| serde_json::to_value(m).ok())
         .collect();
-    let forwarder = Arc::new(reflect_tools::ToolEventForwarder::new(
+    let mut forwarder = reflect_tools::ToolEventForwarder::new(
         ctx.sub_id.clone(),
         ctx.event_tx.clone(),
         parent_tail,
-    ));
+    );
+    // v1.5 R1:每回合沙箱覆盖透传给队列(→ ToolContext.os_sandbox)。
+    forwarder.os_sandbox = ctx.sandbox_override;
+    let forwarder = Arc::new(forwarder);
     let results = ctx
         .tools_queue
         .execute_all_with_progress(calls, ctx.approval_gate.clone(), Some(forwarder))

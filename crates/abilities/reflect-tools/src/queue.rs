@@ -78,6 +78,9 @@ pub struct ToolExecutionQueue {
     /// 并应用单次调用的覆盖字段(`call_id`、`timeout`)。
     base_ctx: ToolContext,
     semaphore: Arc<Semaphore>,
+    /// v1.5 R1:当前并发上限(随 `set_max_concurrency` 热调;`ThreadSettingsOverrides
+    /// .max_tool_concurrency` 每 turn 可变)。
+    max_concurrency: std::sync::Mutex<usize>,
     /// v1.0.0-rc2:工具输出密钥脱敏器,在 `execute_single` 的 `Ok(Ok(_))`
     /// 分支、`tool.execute(...)` 返回之后、`PostToolUse` 派发之前应用。
     /// `Arc` 包装使克隆廉价 —— bootstrap 阶段在 `reflect-exec` 一次性构造,
@@ -116,6 +119,7 @@ impl ToolExecutionQueue {
             hook_engine,
             base_ctx,
             semaphore: Arc::new(Semaphore::new(max)),
+            max_concurrency: std::sync::Mutex::new(max),
             sanitizer: Arc::new(Sanitizer::with_defaults()),
             session_permission_mode: None,
         }
@@ -151,6 +155,31 @@ impl ToolExecutionQueue {
     /// 在 queue 共享的引擎上注册一个 hook。M6 示例 API。
     pub fn register_hook<H: reflect_hooks::Hook + 'static>(&self, hook: H) {
         self.hook_engine.register(hook);
+    }
+
+    /// v1.5 R1:热调并发上限(每 turn 可变)。扩容 `add_permits` 精确;
+    /// 缩容 best-effort —— 只回收当前可用的许可(在途许可归还时自然
+    /// 超出上限,由后续 acquire 的信号量语义兜底)。
+    pub fn set_max_concurrency(&self, n: usize) {
+        let n = n.max(1);
+        let mut cur = self.max_concurrency.lock().unwrap();
+        if *cur == n {
+            return;
+        }
+        if n > *cur {
+            self.semaphore.add_permits(n - *cur);
+        } else {
+            let excess = (*cur - n).min(self.semaphore.available_permits());
+            if excess > 0 {
+                self.semaphore.forget_permits(excess);
+            }
+        }
+        *cur = n;
+    }
+
+    /// v1.5 R1:当前并发上限(测试 / 诊断)。
+    pub fn max_concurrency(&self) -> usize {
+        *self.max_concurrency.lock().unwrap()
     }
 
     /// 注入会话级 `permission_mode` 共享句柄,让 `execute_single` 每次 clone
@@ -282,6 +311,7 @@ impl ToolExecutionQueue {
         // 快照快照(CallSubAgentTool 按需截取)。
         if let Some(fwd) = forwarder.as_ref() {
             ctx.event_forwarder = Some(fwd.clone());
+            ctx.os_sandbox = fwd.os_sandbox;
             let tail = fwd.parent_tail_json.read().clone();
             *ctx.parent_tail_json.write() = tail;
         }

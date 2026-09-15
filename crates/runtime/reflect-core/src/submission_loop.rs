@@ -112,6 +112,10 @@ pub struct NodeContext {
     /// 合并,正在跑的回合无法收到补充指示。`None`(测试 / 旧构造方)=
     /// 跳过收割,行为不变。
     pub steering_queue: Option<Arc<Mutex<SteeringQueue>>>,
+    /// v1.5 R1:OS 沙箱覆盖(`ThreadSettingsOverrides.sandbox_policy` 每
+    /// turn 下发)。`tool_exec` 经 ToolEventForwarder 透传给队列 →
+    /// `ToolContext.os_sandbox` → BashTool。`None` = 跟随 env。
+    pub sandbox_override: Option<bool>,
     /// v1.x Plan mode:共享 `AgentConfig`(整个 `cfg.clone()` —— 大部分字段是
     /// `Arc<RwLock<…>>`,clone 廉价)。`tool_exec` 在 dispatch plan
     /// 模式事件时通过它转发给 `spawn_plan_approval_waiter`,让审批
@@ -403,6 +407,35 @@ pub async fn submission_loop(
                     .and_then(|m| m.active_agent_def.max_turns)
                     .map_or(global_max, |n| n.min(global_max));
 
+                // v1.5 R1:ThreadSettingsOverrides 诚实化 —— 三个死字段
+                // 全部消费:
+                // - max_tool_concurrency:热调工具执行队列并发上限(每 turn 可变);
+                // - approval_policy:Prompt/Deny 强制本回合启用审批门
+                //   (Deny 额外置 deny-all,需审批工具一律拒);Auto 跟随会话;
+                // - sandbox_policy:OS 沙箱覆盖(OsSandbox=强制开,
+                //   WorkspaceOnly/FullAccess=关 OS 层,文件工具路径检查不受影响)。
+                if let Some(mc) = thread_settings.max_tool_concurrency {
+                    tools_queue.set_max_concurrency(mc);
+                    tracing::info!(
+                        max_concurrency = mc,
+                        "thread_settings: tool concurrency adjusted"
+                    );
+                }
+                let turn_approval_enabled = match thread_settings.approval_policy {
+                    Some(reflect_protocol::ApprovalPolicy::Prompt) => {
+                        tracing::info!("thread_settings: approval forced on (prompt)");
+                        true
+                    }
+                    Some(reflect_protocol::ApprovalPolicy::Deny) => {
+                        tracing::info!("thread_settings: approval deny-all for this turn");
+                        true
+                    }
+                    Some(reflect_protocol::ApprovalPolicy::Auto) | None => approval_enabled,
+                };
+                let sandbox_override = thread_settings
+                    .sandbox_policy
+                    .map(|p| matches!(p, reflect_protocol::SandboxPolicy::OsSandbox));
+
                 let ctx = NodeContext {
                     turn_id,
                     session_id,
@@ -445,11 +478,13 @@ pub async fn submission_loop(
                     plan_session_subs: Some(session_subs.clone()),
                     // v1.4 A2:共享会话级转向队列,pre_loop 每次入口收割。
                     steering_queue: Some(steering_queue.clone()),
+                    // v1.5 R1:每回合沙箱覆盖。
+                    sandbox_override,
                     // 同上:把 `cfg.clone()` 传下去,让
                     // `spawn_plan_approval_waiter` 能在 user approve
                     // 后翻转会话级 `permission_mode` 槽。
                     cfg: cfg.clone(),
-                    approval_gate: approval_enabled.then(|| {
+                    approval_gate: turn_approval_enabled.then(|| {
                         let g = ApprovalGate::with_state(
                             turn_tx.clone(),
                             sub_id.clone(),
@@ -466,6 +501,13 @@ pub async fn submission_loop(
                                 cfg.yolo_classifier.clone(),
                                 Some(cfg.yolo_threshold),
                             );
+                        }
+                        // v1.5 R1:approval_policy = deny → 回合级 deny-all。
+                        if matches!(
+                            thread_settings.approval_policy,
+                            Some(reflect_protocol::ApprovalPolicy::Deny)
+                        ) {
+                            g.set_deny_all(true);
                         }
                         Arc::new(g)
                     }),

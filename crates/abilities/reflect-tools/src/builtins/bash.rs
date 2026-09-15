@@ -133,7 +133,12 @@ impl Tool for BashTool {
         //   `ToolError::SandboxUnavailable`,**绝不**回退到裸 `sh -c`。
         // - 非 strict + 后端不可用 → 保留 v1.2 降级透传语义(供
         //   REFLECT_SANDBOX_STRICT=0 显式开启)。
-        let sandbox = reflect_sandbox::OsSandbox::from_env();
+        // v1.5 R1:OS 沙箱来源优先级 —— ToolContext 覆盖(`sandbox_policy`
+        // 每 turn 下发)> env(`OsSandbox::from_env`)。
+        let sandbox = match ctx.os_sandbox {
+            Some(on) => reflect_sandbox::OsSandbox::with_enabled(on),
+            None => reflect_sandbox::OsSandbox::from_env(),
+        };
         let workspace = ctx.workspace_path();
         // 严格模式 fail-closed:后端 / 初始化失败 → 直接报错,不裸执行。
         if let Err(reason) = sandbox.enforce_or_fail() {

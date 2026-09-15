@@ -121,6 +121,11 @@ pub struct ToolContext {
     /// 转发(零开销);`Some` 时由 `tool_exec` 注入,`CallSubAgentTool`
     /// 把子代理中间事件包装为 `SubagentProgress` 事件经它发出。
     pub event_forwarder: Option<Arc<ToolEventForwarder>>,
+    /// v1.5 R1:OS 沙箱覆盖(`ThreadSettingsOverrides.sandbox_policy` 每
+    /// turn 下发)。`None` = 跟随 env(`OsSandbox::from_env`,默认);
+    /// `Some(true)` = 强制启用 OS 沙箱;`Some(false)` = 本 turn 关闭 OS
+    /// 层(路径沙箱仍由各文件工具自身的 workspace 校验承担)。
+    pub os_sandbox: Option<bool>,
     /// v1.4 C1:父会话历史尾部快照(最近若干条,由 `tool_exec` 注入)。
     /// 仅子代理编排工具(`CallSubAgentTool`)读取:按
     /// `DataTransferConfig.pass_context_messages` / 调用参数截取后传给
@@ -141,6 +146,8 @@ pub struct ToolEventForwarder {
     /// 父会话历史尾部快照(`state.messages` 最近若干条的 JSON 形态)。
     /// `CallSubAgentTool` 经 `ctx.parent_tail_json` 读取。
     pub parent_tail_json: Arc<RwLock<Vec<serde_json::Value>>>,
+    /// v1.5 R1:本批执行生效的 OS 沙箱覆盖(每 turn 可变)。
+    pub os_sandbox: Option<bool>,
 }
 
 impl std::fmt::Debug for ToolEventForwarder {
@@ -161,6 +168,7 @@ impl ToolEventForwarder {
             sub_id: sub_id.into(),
             tx,
             parent_tail_json: Arc::new(RwLock::new(parent_tail_json)),
+            os_sandbox: None,
         }
     }
 
@@ -267,6 +275,7 @@ impl Default for ToolContext {
             context_window_size: Arc::new(RwLock::new(None)),
             progress: None,
             event_forwarder: None,
+            os_sandbox: None,
             parent_tail_json: Arc::new(RwLock::new(Vec::new())),
         }
     }
