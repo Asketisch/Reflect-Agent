@@ -315,8 +315,10 @@ pub(crate) fn bootstrap_m5(
     // always-on 可见集,模型请求里就没有子代理工具的 schema,LLM 永远无法
     // 委派(离线 mock provider 无视实际工具列表回放脚本,只能靠运行时
     // 真实 LLM 测试暴露)。
-    let call_tool_names: Vec<String> =
-        configs.iter().map(|sc| format!("call_{}", sc.role)).collect();
+    let call_tool_names: Vec<String> = configs
+        .iter()
+        .map(|sc| format!("call_{}", sc.role))
+        .collect();
 
     // 把合并后的 `SubagentSpecConfig` 映射为 `SubAgentSpec` 并注册为
     // `call_<role>` 工具。`data_transfer` 走默认配置。

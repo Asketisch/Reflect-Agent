@@ -126,12 +126,12 @@ impl Tool for BashTool {
         };
         // Seatbelt 模式下 argv[1] 是临时 .sb profile 路径;文件名按调用唯一
         // (见 seatbelt_argv),命令结束后由本工具负责删除,避免临时目录泄漏。
-        let seatbelt_profile_path: Option<std::path::PathBuf> = if program == "/usr/bin/sandbox-exec"
-        {
-            argv.get(1).map(std::path::PathBuf::from)
-        } else {
-            None
-        };
+        let seatbelt_profile_path: Option<std::path::PathBuf> =
+            if program == "/usr/bin/sandbox-exec" {
+                argv.get(1).map(std::path::PathBuf::from)
+            } else {
+                None
+            };
         let mut command = Command::new(&program);
         command.args(&argv);
         // Linux Landlock:在 fork 后、exec 前应用规则(workspace 内放行,

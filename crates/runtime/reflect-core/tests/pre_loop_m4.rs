@@ -1598,7 +1598,6 @@ async fn recorder_refill_respects_rewind_truncation() {
     );
 }
 
-
 /// v1.4 子代理可见性防回归:`call_<role>` 是运行时动态注册的工具(不在静态
 /// `ALWAYS_ON_TOOLS` 中),bootstrap 注册后必须同步调用
 /// `skills.add_always_on_tools` 把它补进可见集 —— 否则 `pre_loop` 的

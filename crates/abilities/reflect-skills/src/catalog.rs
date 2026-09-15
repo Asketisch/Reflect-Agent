@@ -79,12 +79,7 @@ impl SkillsCatalog {
         Self {
             skills: RwLock::new(Vec::new()),
             activated: RwLock::new(HashSet::new()),
-            always_on: RwLock::new(
-                ALWAYS_ON_TOOLS
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect(),
-            ),
+            always_on: RwLock::new(ALWAYS_ON_TOOLS.iter().map(|s| s.to_string()).collect()),
             allowed_skills: RwLock::new(None),
         }
     }
@@ -361,10 +356,7 @@ mod tests {
     fn add_always_on_tools_visible_in_active_tool_names() {
         let cat = SkillsCatalog::new();
         assert!(!cat.active_tool_names().contains("call_explorer"));
-        cat.add_always_on_tools(vec![
-            "call_explorer".to_string(),
-            "call_writer".to_string(),
-        ]);
+        cat.add_always_on_tools(vec!["call_explorer".to_string(), "call_writer".to_string()]);
         let active = cat.active_tool_names();
         assert!(active.contains("call_explorer"));
         assert!(active.contains("call_writer"));

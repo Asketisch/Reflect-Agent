@@ -823,7 +823,12 @@ mod tests {
             pool(vec![entry("minimax", 1), entry("backup", 1)]),
         );
         r.set_preferred("anthropic", "minimax");
-        r.mark_cooldown("anthropic", "minimax", Duration::from_secs(60), CooldownReason::Auth);
+        r.mark_cooldown(
+            "anthropic",
+            "minimax",
+            Duration::from_secs(60),
+            CooldownReason::Auth,
+        );
 
         assert_eq!(r.next_for("anthropic/x", &[]).unwrap().label, "backup");
         assert_eq!(r.next_for("anthropic/x", &[]).unwrap().label, "backup");

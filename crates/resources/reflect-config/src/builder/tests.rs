@@ -340,7 +340,10 @@ fn active_provider_unknown_string_returns_none() {
 #[test]
 fn resolve_model_returns_section_override() {
     let cfg = cfg_with_anthropic("sk-a");
-    assert_eq!(cfg.resolve_model("anthropic"), Some("claude-test".to_string()));
+    assert_eq!(
+        cfg.resolve_model("anthropic"),
+        Some("claude-test".to_string())
+    );
 }
 
 /// v1.5 诚实化:段级 / env / 钉住条目都没有 → `None`,不再回落内置默认。
@@ -477,10 +480,16 @@ fn resolve_model_prefers_pinned_credential_model() {
     let cfg: ReflectConfig = toml::from_str(toml).unwrap();
     assert_eq!(cfg.active_credential().as_deref(), Some("minimax"));
     // 命中条目无 model → 回落段级;不因别的条目有 model 而误取。
-    assert_eq!(cfg.resolve_model("anthropic"), Some("section-model".to_string()));
+    assert_eq!(
+        cfg.resolve_model("anthropic"),
+        Some("section-model".to_string())
+    );
 
     // 被钉住的条目自带 model → 压过段级。
-    let toml = toml.replace("api_key = \"sk-m\"", "api_key = \"sk-m\"\n        model = \"minimax-model\"");
+    let toml = toml.replace(
+        "api_key = \"sk-m\"",
+        "api_key = \"sk-m\"\n        model = \"minimax-model\"",
+    );
     let cfg: ReflectConfig = toml::from_str(&toml).unwrap();
     assert_eq!(
         cfg.resolve_model("anthropic"),
