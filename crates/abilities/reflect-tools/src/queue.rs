@@ -200,7 +200,7 @@ impl ToolExecutionQueue {
         &self,
         calls: Vec<ToolCallRequest>,
         gate: Option<Arc<ApprovalGate>>,
-        progress_tx: Option<tokio::sync::mpsc::Sender<reflect_protocol::Event>>,
+        forwarder: Option<Arc<crate::tool::ToolEventForwarder>>,
     ) -> Vec<ToolResult> {
         // 按并发安全性切分。需保留原始下标,保证最终结果顺序与输入一致。
         let mut indexed_safe: Vec<(usize, ToolCallRequest)> = Vec::new();
@@ -216,7 +216,7 @@ impl ToolExecutionQueue {
         let mut unsafe_results: Vec<(usize, ToolResult)> = Vec::new();
         for (idx, call) in indexed_unsafe {
             let r = self
-                .execute_single(call, gate.as_ref(), progress_tx.clone())
+                .execute_single(call, gate.as_ref(), forwarder.clone())
                 .await;
             unsafe_results.push((idx, r));
         }
@@ -224,9 +224,9 @@ impl ToolExecutionQueue {
         // safe:通过 join_all 并发执行。
         let safe_futures = indexed_safe.into_iter().map(|(idx, call)| {
             let gate_ref = gate.as_ref();
-            let progress_tx = progress_tx.clone();
+            let forwarder = forwarder.clone();
             async move {
-                let r = self.execute_single(call, gate_ref, progress_tx).await;
+                let r = self.execute_single(call, gate_ref, forwarder).await;
                 (idx, r)
             }
         });
@@ -245,7 +245,7 @@ impl ToolExecutionQueue {
         &self,
         call: ToolCallRequest,
         gate: Option<&Arc<ApprovalGate>>,
-        progress_tx: Option<tokio::sync::mpsc::Sender<reflect_protocol::Event>>,
+        forwarder: Option<Arc<crate::tool::ToolEventForwarder>>,
     ) -> ToolResult {
         // 限制并发数。
         let _permit = match self.semaphore.acquire().await {
@@ -278,28 +278,34 @@ impl ToolExecutionQueue {
         // 构造本次调用的上下文。
         let mut ctx = self.base_ctx.clone();
         ctx.call_id = call.id.clone();
+        // v1.4 C1:注入事件转发器(子代理进度等自定义事件)+ 父历史尾部
+        // 快照快照(CallSubAgentTool 按需截取)。
+        if let Some(fwd) = forwarder.as_ref() {
+            ctx.event_forwarder = Some(fwd.clone());
+            let tail = fwd.parent_tail_json.read().clone();
+            *ctx.parent_tail_json.write() = tail;
+        }
         // v1.4 A3:注入进度转发闭包(见 `execute_all_with_progress` 文档):
         // 工具逐段上报的输出 → `ToolCallOutputDelta` 事件。try_send 满则
         // 丢帧(增量是预览,End 事件才是权威完整输出)。`Event.id` 用
         // `EVENT_ID_NONE` —— 增量发生在调用中途,不与某个 Submission
         // 绑定,客户端按 `call_id` 与 Begin/End 关联。
-        if let Some(tx) = progress_tx {
+        if let Some(fwd) = forwarder.as_ref() {
+            let tx = fwd.raw_sender();
             let call_id = call.id.clone();
-            ctx.progress = Some(crate::tool::ProgressSink(std::sync::Arc::new(
-                move |is_stderr, delta| {
-                    let ev = reflect_protocol::Event::new(
-                        reflect_protocol::EVENT_ID_NONE,
-                        reflect_protocol::EventMsg::ToolCallOutputDelta(
-                            reflect_protocol::ToolCallOutputDeltaEvent {
-                                call_id: call_id.clone(),
-                                delta: delta.to_string(),
-                                is_stderr,
-                            },
-                        ),
-                    );
-                    let _ = tx.try_send(ev);
-                },
-            )));
+            ctx.progress = Some(crate::tool::ProgressSink::new(move |is_stderr, delta| {
+                let ev = reflect_protocol::Event::new(
+                    reflect_protocol::EVENT_ID_NONE,
+                    reflect_protocol::EventMsg::ToolCallOutputDelta(
+                        reflect_protocol::ToolCallOutputDeltaEvent {
+                            call_id: call_id.clone(),
+                            delta: delta.to_string(),
+                            is_stderr,
+                        },
+                    ),
+                );
+                let _ = tx.try_send(ev);
+            }));
         }
         // 用会话级共享句柄刷新 `ctx.permission_mode`。`base_ctx.permission_mode`
         // 是构造时的死值(默认 Auto),否则运行时 `/mode plan` 切换后 PreToolUse

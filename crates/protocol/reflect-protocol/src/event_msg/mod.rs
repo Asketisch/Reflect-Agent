@@ -23,6 +23,7 @@ mod mcp;
 mod plan;
 mod plugin;
 mod routing;
+mod subagent;
 mod tool;
 mod turn;
 
@@ -43,6 +44,10 @@ pub use plan::{
 };
 pub use plugin::{PluginLoadedEvent, QuotaExhaustedEvent};
 pub use routing::{RoutingEvent, RoutingEventKind};
+pub use subagent::{
+    SubagentProgressEvent, SubagentProgressKind, SubagentRunStateMirror, SubagentStatusEvent,
+    SubagentStatusSnapshot,
+};
 pub use tool::{
     ToolCallBeginEvent, ToolCallEndEvent, ToolCallOutputDeltaEvent, ToolExecutionRequestEvent,
 };
@@ -93,6 +98,12 @@ pub enum EventMsg {
     /// v1.3 SDK:请求客户端执行其注册的远程自定义工具(实现留在客户端
     /// 进程,core 只做转发与等待)。回执走 `Op::ToolExecutionResponse`。
     ToolExecutionRequest(ToolExecutionRequestEvent),
+
+    // 子代理可观测(2;v1.4 C1)—— 进度推送 + 状态查询应答
+    /// 子代理中间进度(父级 CallSubAgentTool 转发:助手文本 / 工具开始 / 结束)。
+    SubagentProgress(SubagentProgressEvent),
+    /// `Op::QuerySubagents` 的状态快照应答。
+    SubagentStatus(SubagentStatusEvent),
 
     // 审批(1;M6)
     /// 工具或 hook 正等待用户审批。客户端应当用与 `request_id` 匹配的
@@ -229,6 +240,8 @@ impl EventMsg {
             EventMsg::ToolCallBegin(_) => "tool_call_begin",
             EventMsg::ToolCallEnd(_) => "tool_call_end",
             EventMsg::ToolCallOutputDelta(_) => "tool_call_output_delta",
+            EventMsg::SubagentProgress(_) => "subagent_progress",
+            EventMsg::SubagentStatus(_) => "subagent_status",
             EventMsg::ToolExecutionRequest(_) => "tool_execution_request",
             EventMsg::ApprovalRequest(_) => "approval_request",
             EventMsg::AskUserQuestion(_) => "ask_user_question",

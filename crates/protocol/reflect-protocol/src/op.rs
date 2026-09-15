@@ -159,6 +159,15 @@ pub enum Op {
         priority: crate::item::SteeringPriorityMirror,
         items: Vec<UserInputItem>,
     },
+
+    /// v1.4 C1:查询子代理状态(状态中心快照)。`child_id = None` 列出
+    /// 全部在飞 + 近期终态子代理;`Some(id)` 只查指定子代理(未知 id 返回
+    /// 空列表)。应答为 `EventMsg::SubagentStatus`(per-turn 通道 + 会话
+    /// 扇出双路送达)。
+    QuerySubagents {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        child_id: Option<String>,
+    },
 }
 
 /// v1.3 SDK:客户端注册的自定义工具声明(spec 由客户端提供,
@@ -205,6 +214,7 @@ impl Op {
             Op::RegisterTools { .. } => "register_tools",
             Op::ToolExecutionResponse { .. } => "tool_execution_response",
             Op::Steer { .. } => "steer",
+            Op::QuerySubagents { .. } => "query_subagents",
         }
     }
 }
@@ -504,6 +514,26 @@ mod tests {
                 assert_eq!(verify_command, None);
                 assert_eq!(token_budget, None);
             }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    /// v1.4 C1:QuerySubagents serde —— child_id 缺省 → None。
+    #[test]
+    fn serde_roundtrip_query_subagents() {
+        let op = Op::QuerySubagents { child_id: None };
+        let json = serde_json::to_string(&op).unwrap();
+        assert!(json.contains(r#""type":"query_subagents""#), "got: {json}");
+        let back: Op = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.discriminant(), "query_subagents");
+
+        let op2 = Op::QuerySubagents {
+            child_id: Some("c-9".into()),
+        };
+        let json2 = serde_json::to_string(&op2).unwrap();
+        let back2: Op = serde_json::from_str(&json2).unwrap();
+        match back2 {
+            Op::QuerySubagents { child_id } => assert_eq!(child_id.as_deref(), Some("c-9")),
             other => panic!("wrong variant: {other:?}"),
         }
     }

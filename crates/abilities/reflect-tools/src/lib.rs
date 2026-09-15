@@ -38,7 +38,7 @@ pub use registry::{ToolRegistry, ToolSource};
 pub use remote::{RemoteBridge, RemoteTool};
 pub use sanitize::{SanitizeConfig, SanitizeError, Sanitizer, sanitize_text};
 pub use spec::ToolSpec;
-pub use tool::{Tool, ToolContext};
+pub use tool::{Tool, ToolContext, ToolEventForwarder};
 pub use worktree::{
     SessionWorktreeState, WorktreeCoordinator, create_worktree, default_worktree_path,
     detach_worktree, git_head_ref, git_root, remove_worktree, run_git, sanitize_branch_name,

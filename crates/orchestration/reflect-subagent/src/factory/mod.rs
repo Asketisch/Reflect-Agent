@@ -610,12 +610,16 @@ impl SubAgentFactory {
         // 则只 cancel 本令牌,粒度细化到单个子代理。
         let child_cancel = self.cancel.lock().child_token();
         cfg.cancel = child_cancel.clone();
-        // 登记运行注册表(若注入):child_id = 子会话号字符串,与
-        // `SpawnedChild.session_id` 一致。终态(collect 完成 / Drop)注销。
-        let runtime_handle = self.runtime_registry().map(|reg| {
-            reg.register(child_thread_id.to_string(), child_cancel);
-            (reg, child_thread_id.to_string())
-        });
+        // v1.4 C1:登记状态中心(若注入)—— 槽位带角色名,子 cfg 持有
+        // 自己的槽(submission_loop / tool_exec 自报告迭代 / 工具 /
+        // token),父会话 QuerySubagents 读快照。collect 完成 / Drop 放弃
+        // 时槽位转终态并保留一段保留期供事后查询。
+        let status_slot = self
+            .runtime_registry()
+            .map(|reg| reg.register(child_thread_id.to_string(), spec.role.clone(), child_cancel));
+        if let Some(slot) = &status_slot {
+            cfg.subagent_status = Some(slot.clone());
+        }
         let child_thread = AgentThread::new(cfg, target_registry, child_tools, None, None);
 
         // 子 agent 以单条 User 消息的形式接收 system prompt + role 标签 + user prompt。
@@ -635,7 +639,7 @@ impl SubAgentFactory {
             handle,
             data_transfer: spec.data_transfer,
             in_flight: Some(Arc::clone(&self.in_flight)),
-            runtime: runtime_handle,
+            status_slot,
         })
     }
 }
@@ -682,13 +686,11 @@ pub struct SpawnedChild {
     /// `ManuallyDrop + ptr::read` 的内存泄漏风险;`Drop` 检查 `Some`
     /// 才 fetch_sub,已被 `take` 的句柄不会重复减。
     in_flight: Option<Arc<AtomicU8>>,
-    /// v1.4 A1:运行注册表句柄(注册表 + 子会话号字符串)。
-    /// `None` = 未注入注册表(spawn 侧没 wire);`Drop` 提前放弃时
-    /// cancel 子令牌并注销(collect 正常完成路径由
-    /// `collect_result_with_usage` 显式 `take` 后只注销不 cancel ——
-    /// 子代理已终态,无需再取消)。cancel-on-drop 同时防止父级放弃后
-    /// detached 子任务继续空转。
-    runtime: Option<(Arc<reflect_core::SubagentRuntimeRegistry>, String)>,
+    /// v1.4 C1:子代理状态槽。`None` = 未注入状态中心(spawn 侧没
+    /// wire);collect 完成路径按终态事件标记 Completed/Cancelled/Failed,
+    /// `Drop` 提前放弃路径标记 Cancelled 并 cancel 子令牌(防 detached
+    /// 子任务空转)。终态槽位保留在状态中心直至保留期过期被清扫。
+    status_slot: Option<Arc<reflect_core::subagent_registry::SubagentStatusSlot>>,
 }
 
 impl std::fmt::Debug for SpawnedChild {
@@ -708,7 +710,7 @@ impl std::fmt::Debug for SpawnedChild {
 /// 此前的手动释放只在函数末尾,提前 `?` 会造成槽位泄漏与注册表残留。
 struct CleanupGuard {
     in_flight: Option<Arc<AtomicU8>>,
-    runtime: Option<(Arc<reflect_core::SubagentRuntimeRegistry>, String)>,
+    status_slot: Option<Arc<reflect_core::subagent_registry::SubagentStatusSlot>>,
 }
 
 impl Drop for CleanupGuard {
@@ -716,9 +718,14 @@ impl Drop for CleanupGuard {
         if let Some(arc) = self.in_flight.take() {
             arc.fetch_sub(1, Ordering::SeqCst);
         }
-        if let Some((reg, child_id)) = self.runtime.take() {
-            if let Some(tok) = reg.unregister(&child_id) {
-                tok.cancel();
+        // v1.4 C1:collect 结束仍处 Running = 异常路径(channel 提前
+        // 关闭 / panic)—— 标 Cancelled + cancel 子令牌兜底。正常路径
+        // 已在 drain 循环内按终态事件标记,finish 的「首个终态为准」
+        // 语义让这里的调用成为幂等 no-op。
+        if let Some(slot) = self.status_slot.take() {
+            if slot.is_running() {
+                slot.finish(reflect_protocol::SubagentRunStateMirror::Cancelled);
+                slot.cancel_token().cancel();
             }
         }
     }
@@ -736,13 +743,13 @@ impl Drop for SpawnedChild {
                 debug_assert!(prev > 0, "in_flight underflow: counter already 0");
             }
         }
-        // v1.4 A1:Drop = 父级提前放弃(未 collect 或 collect 中途丢弃)。
-        // cancel 子令牌让 detached 子线程尽快收尾,再注销运行注册表
-        // 条目。已被 collect 路径 `take` 走的句柄为 `None`,跳过。
-        if let Some((reg, child_id)) = self.runtime.take() {
-            if let Some(tok) = reg.unregister(&child_id) {
-                tok.cancel();
-            }
+        // v1.4 Drop/C1:父级提前放弃(未 collect 或 collect 中途丢弃)
+        // → 槽位标 Cancelled(仍在状态中心保留至过期)+ cancel 子令牌让
+        // detached 子线程尽快收尾。已被 collect 路径 `take` 走的句柄为
+        // `None`,跳过(终态已由 collect 标记)。
+        if let Some(slot) = self.status_slot.take() {
+            slot.finish(reflect_protocol::SubagentRunStateMirror::Cancelled);
+            slot.cancel_token().cancel();
         }
     }
 }
@@ -766,6 +773,17 @@ impl SpawnedChild {
     ///
     /// 都不存在时 `token_usage = None`,调用方应当 fallback 到 `Default`。
     pub async fn collect_result_with_usage(self) -> Result<SpawnedResult, SubAgentError> {
+        self.collect_result_with_progress(None).await
+    }
+
+    /// v1.4 C1:同 [`Self::collect_result_with_usage`],但把 drain 过程中
+    /// 的中间事件(助手文本 / 工具开始 / 工具结束)回调给调用方 ——
+    /// `CallSubAgentTool` 借此把它们包装为 `SubagentProgress` 事件转发。
+    /// 逐字增量(AgentMessageDelta / ThinkingDelta)不回调,避免刷屏。
+    pub async fn collect_result_with_progress(
+        self,
+        on_event: Option<&(dyn Fn(&reflect_protocol::Event) + Send + Sync)>,
+    ) -> Result<SpawnedResult, SubAgentError> {
         // `SpawnedChild` 实现了 `Drop`,Rust 不允许部分 move。我们用
         // `Option::take` 安全地移走 `in_flight` Arc,然后用 `ManuallyDrop`
         // + `ptr::read` 拆出剩余字段(handle / data_transfer / session_id)。
@@ -774,25 +792,27 @@ impl SpawnedChild {
         // 2. ManuallyDrop 包裹下,`SpawnedChild::drop` 不会被自动调,避免
         //    双重 fetch_sub —— 因为 in_flight 已被 Option::take 走了,
         //    即使 Drop 真跑了,`Some` 检查会跳过。
-        // v1.4 A1:runtime 句柄同样 take 走;正常完成只注销不 cancel
-        // (子代理已终态,再 cancel 无意义),与 Drop 的 cancel-on-abandon
-        // 语义互补。
+        // v1.4 C1:状态槽 take 走,由下方 CleanupGuard 在任何返回路径
+        // 统一处理终态标记。
         use std::mem::ManuallyDrop;
         let mut me = ManuallyDrop::new(self);
         // 安全:Option::take 把 Some 替换为 None,后续字段单独 read。
         let in_flight_arc = me.in_flight.take(); // Option<Arc<AtomicU8>> → None
-        let runtime_arc = me.runtime.take();
+        let status_slot = me.status_slot.take();
         let mut handle = unsafe { std::ptr::read(&me.handle) };
         let data_transfer = unsafe { std::ptr::read(&me.data_transfer) };
         let _session_id = unsafe { std::ptr::read(&me.session_id) };
         // v1.4 A1:终态清理 guard —— 无论 collect 走哪条返回路径
         // (extract 失败提前 `?` / 正常完成 / drain 中途 Err),都保证
-        // in-flight 槽位释放 + 运行注册表注销 + 子令牌取消。此前 extract
-        // 失败的 `?` 会跳过末尾的手动释放,造成槽位泄漏与注册表残留
-        // (正常完成路径的子代理已终态,再 cancel 是无害幂等)。
+        // in-flight 槽位释放 + 状态槽终态标记。此前 extract 失败的 `?`
+        // 会跳过末尾的手动释放,造成槽位泄漏(正常完成路径的子代理已
+        // 终态,再 cancel 是无害幂等)。
+        // v1.4 C1:终态标记用的槽位克隆先建(drain 循环内只读;
+        // status_slot 本体 move 进 CleanupGuard)。
+        let cleanup_slot = status_slot.clone();
         let _cleanup = CleanupGuard {
             in_flight: in_flight_arc,
-            runtime: runtime_arc,
+            status_slot,
         };
         let started_at = Instant::now();
         let mut events = Vec::new();
@@ -800,6 +820,18 @@ impl SpawnedChild {
         let mut usage_from_turn_complete: Option<TokenUsage> = None;
         let mut usage_from_token_count: Option<TokenUsage> = None;
         while let Some(ev) = handle.next().await {
+            // v1.4 C1:进度回调(终态事件不转发,终态由返回值承载)。
+            if let Some(cb) = on_event {
+                let forwardable = matches!(
+                    ev.msg,
+                    reflect_protocol::EventMsg::AgentMessage(_)
+                        | reflect_protocol::EventMsg::ToolCallBegin(_)
+                        | reflect_protocol::EventMsg::ToolCallEnd(_)
+                );
+                if forwardable {
+                    cb(&ev);
+                }
+            }
             match &ev.msg {
                 reflect_protocol::EventMsg::TurnComplete(tc) => {
                     usage_from_turn_complete = Some(tc.usage.clone());
@@ -821,6 +853,20 @@ impl SpawnedChild {
                     | reflect_protocol::EventMsg::TurnAborted(_)
                     | reflect_protocol::EventMsg::ShutdownComplete
             );
+            // v1.4 C1:按终态事件标记状态槽(TurnComplete = Completed;
+            // TurnAborted / ShutdownComplete = Cancelled)。
+            if let Some(slot) = cleanup_slot.as_ref() {
+                match &ev.msg {
+                    reflect_protocol::EventMsg::TurnComplete(_) => {
+                        slot.finish(reflect_protocol::SubagentRunStateMirror::Completed);
+                    }
+                    reflect_protocol::EventMsg::TurnAborted(_)
+                    | reflect_protocol::EventMsg::ShutdownComplete => {
+                        slot.finish(reflect_protocol::SubagentRunStateMirror::Cancelled);
+                    }
+                    _ => {}
+                }
+            }
             events.push(ev);
             if is_terminal {
                 break;

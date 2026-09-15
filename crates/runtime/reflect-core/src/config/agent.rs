@@ -168,6 +168,12 @@ pub struct AgentConfig {
     /// (两者共享同一 `Arc`),`spawn` 登记、`SpawnedChild` 终态注销。
     /// `Clone` 走 `Arc`,所有副本共享同一张表。
     pub subagent_runtime: Option<Arc<crate::subagent_registry::SubagentRuntimeRegistry>>,
+    /// v1.4 C1:本线程自己的子代理状态槽(仅当本线程是某个父会话 spawn
+    /// 的子代理时为 `Some`,由工厂在 spawn 时注入)。子代理的
+    /// submission_loop / tool_exec 在关键节点(回合结束、工具开始/结束)
+    /// 向槽写快照,父会话经状态中心查询 —— 读取方永不阻塞子代理。
+    /// `None` = 主会话 / 测试(不自报告)。
+    pub subagent_status: Option<Arc<crate::subagent_registry::SubagentStatusSlot>>,
 }
 
 impl Default for AgentConfig {
@@ -205,6 +211,7 @@ impl AgentConfig {
             preload_messages: Arc::new(RwLock::new(Vec::new())),
             last_abort_reason: Arc::new(RwLock::new(None)),
             subagent_runtime: None,
+            subagent_status: None,
         }
     }
 

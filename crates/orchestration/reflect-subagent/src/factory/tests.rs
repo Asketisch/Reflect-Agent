@@ -735,12 +735,18 @@ async fn spawn_registers_child_and_parent_cancel_cascades() {
     assert_eq!(runtime.child_ids(), vec![child_id.clone()]);
 
     // 父令牌取消 → 子令牌级联取消(Shutdown / Ctrl-C 语义)。
-    // 取消后 drain 收尾,SpawnedChild 终态注销条目。
+    // 取消后 drain 收尾:槽位转 Cancelled 终态并**保留**在状态中心
+    // (v1.4 C1 语义:终态不立即删,供 QuerySubagents 事后查询,
+    // 过期由下次 register 清扫)。
     session_token.cancel();
     let _ = child.collect_result().await;
-    assert!(
-        runtime.is_empty(),
-        "collect 终态后注册表条目应注销,当前残留:{:?}",
-        runtime.child_ids()
+    let snaps = runtime.snapshot(Some(&child_id));
+    assert_eq!(snaps.len(), 1, "终态槽位应保留供事后查询");
+    assert_eq!(
+        snaps[0].state,
+        reflect_protocol::SubagentRunStateMirror::Cancelled,
+        "父令牌级联取消 → 子代理终态应为 Cancelled,实际:{:?}",
+        snaps[0].state
     );
+    assert!(snaps[0].finished_at.is_some());
 }

@@ -117,6 +117,64 @@ pub struct ToolContext {
     /// (bash 等)在执行期间逐段上报输出,由 `ToolExecutionQueue` 转发为
     /// `EventMsg::ToolCallOutputDelta`。回调参数:`(is_stderr, delta)`。
     pub progress: Option<ProgressSink>,
+    /// v1.4 C1:工具事件转发器(subagent 编排用)。`None`(默认)= 无
+    /// 转发(零开销);`Some` 时由 `tool_exec` 注入,`CallSubAgentTool`
+    /// 把子代理中间事件包装为 `SubagentProgress` 事件经它发出。
+    pub event_forwarder: Option<Arc<ToolEventForwarder>>,
+    /// v1.4 C1:父会话历史尾部快照(最近若干条,由 `tool_exec` 注入)。
+    /// 仅子代理编排工具(`CallSubAgentTool`)读取:按
+    /// `DataTransferConfig.pass_context_messages` / 调用参数截取后传给
+    /// `factory.spawn` 的 `parent_tail`。其余工具忽略。元素是协议层
+    /// `ChatMessage` 的 JSON 形态,避免 reflect-tools 反向依赖 llm 层。
+    pub parent_tail_json: Arc<RwLock<Vec<serde_json::Value>>>,
+}
+
+/// v1.4 C1:工具 → 引擎事件通道的转发器。`tool_exec` 在每批执行前构造
+/// (持有 sub_id、event_tx 与父历史尾部快照),`execute_single` 注入每个
+/// 调用的 `ToolContext`;工具用它发出自定义协议事件(子代理进度等)。
+/// `try_send` 满则丢帧 —— 事件是观测性增益,不阻塞工具执行。
+#[derive(Clone)]
+pub struct ToolEventForwarder {
+    /// 事件归属的 submission id(`Event.id`)。
+    pub sub_id: String,
+    tx: tokio::sync::mpsc::Sender<reflect_protocol::Event>,
+    /// 父会话历史尾部快照(`state.messages` 最近若干条的 JSON 形态)。
+    /// `CallSubAgentTool` 经 `ctx.parent_tail_json` 读取。
+    pub parent_tail_json: Arc<RwLock<Vec<serde_json::Value>>>,
+}
+
+impl std::fmt::Debug for ToolEventForwarder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolEventForwarder")
+            .field("sub_id", &self.sub_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ToolEventForwarder {
+    pub fn new(
+        sub_id: impl Into<String>,
+        tx: tokio::sync::mpsc::Sender<reflect_protocol::Event>,
+        parent_tail_json: Vec<serde_json::Value>,
+    ) -> Self {
+        Self {
+            sub_id: sub_id.into(),
+            tx,
+            parent_tail_json: Arc::new(RwLock::new(parent_tail_json)),
+        }
+    }
+
+    /// 发出一条协议事件(非阻塞;通道满则丢弃)。
+    pub fn forward(&self, msg: reflect_protocol::EventMsg) {
+        let _ = self
+            .tx
+            .try_send(reflect_protocol::Event::new(self.sub_id.clone(), msg));
+    }
+
+    /// 底层通道句柄(输出增量等 `EVENT_ID_NONE` 事件直发用)。
+    pub fn raw_sender(&self) -> tokio::sync::mpsc::Sender<reflect_protocol::Event> {
+        self.tx.clone()
+    }
 }
 
 /// v1.4 A3:进度回调句柄。newtype 包裹 `Arc<dyn Fn>` —— 让
@@ -208,6 +266,8 @@ impl Default for ToolContext {
             token_budget: Arc::new(RwLock::new(None)),
             context_window_size: Arc::new(RwLock::new(None)),
             progress: None,
+            event_forwarder: None,
+            parent_tail_json: Arc::new(RwLock::new(Vec::new())),
         }
     }
 }

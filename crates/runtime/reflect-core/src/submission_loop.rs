@@ -491,6 +491,9 @@ pub async fn submission_loop(
                 // 会话令牌(被 Shutdown cancel,级联回合令牌)、在飞回合表
                 // (终态注销)。区分两者才能只对「用户中断」发 TurnAborted,
                 // Shutdown 已有自己的 ShutdownComplete 事件。
+                // v1.4 C1:本线程自己的子代理状态槽(若本线程是子代理)。
+                // 回合结束后写迭代数与 token 用量,父会话查询即时可见。
+                let status_slot = cfg.subagent_status.clone();
                 let turn_cancel_clone = turn_cancel.clone();
                 let session_cancel_clone = cfg.cancel.clone();
                 let active_turns_clone = active_turns.clone();
@@ -571,6 +574,12 @@ pub async fn submission_loop(
                         // v1.2 P1:goal 自校验需本轮 token 数 —— 在
                         // `final_state.total_usage` 被 move 进 TurnComplete 前捕获。
                         let goal_turn_tokens = final_state.total_usage.total_tokens as u64;
+                        // v1.4 C1:子代理自报告 —— 迭代数 + token 用量
+                        // (在 total_usage 被 move 进 TurnComplete 之前)。
+                        if let Some(slot) = &status_slot {
+                            slot.set_iteration(final_state.iteration);
+                            slot.add_tokens(goal_turn_tokens);
+                        }
                         let _ = turn_tx_clone
                             .send(Event::new(
                                 sub_id_clone,
@@ -844,6 +853,25 @@ pub async fn submission_loop(
                     "steer: mid-turn steering queued"
                 );
                 steering_queue.lock().push(p, items);
+            }
+            // v1.4 C1:子代理状态查询 —— 从状态中心取快照(全 clone,不
+            // 阻塞任何子代理),SubagentStatus 事件经 per-turn 通道 + 会话
+            // 扇出双路送达。`child_id = None` 列出全部,`Some` 定向。
+            reflect_protocol::Op::QuerySubagents { child_id } => {
+                let children = cfg
+                    .subagent_runtime
+                    .as_ref()
+                    .map(|reg| reg.snapshot(child_id.as_deref()))
+                    .unwrap_or_default();
+                if child_id.is_some() && children.is_empty() {
+                    tracing::debug!(?child_id, "query_subagents: no matching child");
+                }
+                let ev = Event::new(
+                    sub.id.clone(),
+                    EventMsg::SubagentStatus(reflect_protocol::SubagentStatusEvent { children }),
+                );
+                let _ = turn_tx.send(ev.clone()).await;
+                fan_out_session(&session_subs, &ev);
             }
             reflect_protocol::Op::ToolApproval { id, decision }
             | reflect_protocol::Op::HookApproval { id, decision } => {

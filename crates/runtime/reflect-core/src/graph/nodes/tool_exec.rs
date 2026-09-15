@@ -103,10 +103,43 @@ pub async fn tool_exec(state: &mut AgentState, ctx: &NodeContext) -> Option<Grap
         .iter()
         .map(|c| (c.id.clone(), (c.name.clone(), c.args.clone())))
         .collect();
+    // v1.4 C1:子代理自报告 —— 本线程若是父会话 spawn 的子代理
+    // (cfg.subagent_status 为 Some),把本批工具开始写入自己的状态槽,
+    // 父会话经 QuerySubagents 即时可见。
+    if let Some(slot) = ctx.cfg.subagent_status.as_ref() {
+        for c in &calls {
+            slot.begin_tool(&c.name);
+        }
+    }
+    // v1.4 C1:构造事件转发器 —— 携带 sub_id / event_tx / 父历史尾部
+    // 快照,供 CallSubAgentTool 转发子代理进度(SubagentProgress)与
+    // 按 pass_context_messages 截取上下文。普通工具不读这些字段,零开销。
+    // 快照:最近 10 条消息(含本轮 assistant 工具调用),JSON 形态规避
+    // reflect-tools → llm 反向依赖。
+    let parent_tail: Vec<serde_json::Value> = state
+        .messages
+        .messages
+        .iter()
+        .rev()
+        .take(10)
+        .rev()
+        .filter_map(|m| serde_json::to_value(m).ok())
+        .collect();
+    let forwarder = Arc::new(reflect_tools::ToolEventForwarder::new(
+        ctx.sub_id.clone(),
+        ctx.event_tx.clone(),
+        parent_tail,
+    ));
     let results = ctx
         .tools_queue
-        .execute_all_with_progress(calls, ctx.approval_gate.clone(), Some(ctx.event_tx.clone()))
+        .execute_all_with_progress(calls, ctx.approval_gate.clone(), Some(forwarder))
         .await;
+    // v1.4 C1:本批工具全部结束 → 清空子代理状态槽的 current_tool。
+    if let Some(slot) = ctx.cfg.subagent_status.as_ref() {
+        for (name, _) in call_meta.values() {
+            slot.end_tool(name);
+        }
+    }
     // 移除 ToolUse 块,用它们的结果替换。
     state
         .latest_content
