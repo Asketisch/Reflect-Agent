@@ -343,6 +343,12 @@ pub async fn submission_loop(
                     let resolved = decision.resolve();
                     if let Some(reason) = resolved.deny_reason {
                         tracing::info!(reason = %reason, "UserPromptSubmit denied; rejecting turn");
+                        // 本回合被 hook 拒绝、不会 spawn 回合任务 → 在飞回合
+                        // 表里的登记条目无人注销,必须在此移除。否则陈旧条目
+                        // 会让后续空闲期 `Op::Interrupt` 误判「有在飞回合」,
+                        // 既 cancel 不到任何东西、也不发空闲分支的 TurnAborted
+                        // 回执,客户端看不到任何响应。
+                        active_turns.lock().remove(&turn_id);
                         let _ = turn_tx
                             .send(Event::new(
                                 sub.id.clone(),

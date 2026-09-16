@@ -26,7 +26,8 @@ pub struct SubagentProgressEvent {
     pub role: String,
     pub kind: SubagentProgressKind,
     /// 文本载荷:Message = 助手文本;ToolBegin = 工具名;ToolEnd =
-    /// `工具名`(由调用方从参数侧回填;End 事件本身只带 call_id)。
+    /// `工具名`(由调用方从 Begin 事件积累的 call_id → 工具名映射回填;
+    /// End 事件本身只带 call_id。执行失败时附 ` (failed)` 后缀)。
     pub text: String,
     /// 子代理内部工具调用的 call_id(ToolBegin / ToolEnd 时携带,供客户端
     /// 配对;Message 时省略)。

@@ -114,9 +114,16 @@ impl Tool for CallSubAgentTool {
         // v1.4 C1:进度推送 —— 把子代理的中间事件(助手文本 / 工具开始 /
         // 结束)包装为 SubagentProgress 事件经转发器发往父事件通道;
         // 转发器缺席(测试 / 直接构造)时 no-op。
+        // review 修复:ToolEnd 的 text 按协议契约回填工具名 —— End 事件
+        // 本身只带 call_id,这里用 Begin 事件积累的 call_id → 工具名映射
+        // 反查(此前发的是 "tool done"/"tool failed",与协议 doc 相悖)。
         let progress_cb = ctx.event_forwarder.clone().map(|fwd| {
             let child_id = child_session_id.clone();
             let role = self.spec.role.clone();
+            // 回调以 `&(dyn Fn(..))` 形式被 collect 消费 —— 需要保持 Fn,
+            // 可变映射用 Mutex 包裹(Interior mutability)。
+            let tool_names: std::sync::Mutex<std::collections::HashMap<String, String>> =
+                std::sync::Mutex::new(std::collections::HashMap::new());
             move |ev: &reflect_protocol::Event| {
                 let payload = match &ev.msg {
                     reflect_protocol::EventMsg::AgentMessage(m) => Some((
@@ -124,20 +131,35 @@ impl Tool for CallSubAgentTool {
                         m.text.clone(),
                         None,
                     )),
-                    reflect_protocol::EventMsg::ToolCallBegin(b) => Some((
-                        reflect_protocol::SubagentProgressKind::ToolBegin,
-                        b.tool_name.clone(),
-                        Some(b.call_id.clone()),
-                    )),
-                    reflect_protocol::EventMsg::ToolCallEnd(e) => Some((
-                        reflect_protocol::SubagentProgressKind::ToolEnd,
-                        if e.is_error {
-                            "tool failed".to_string()
+                    reflect_protocol::EventMsg::ToolCallBegin(b) => {
+                        tool_names
+                            .lock()
+                            .unwrap()
+                            .insert(b.call_id.clone(), b.tool_name.clone());
+                        Some((
+                            reflect_protocol::SubagentProgressKind::ToolBegin,
+                            b.tool_name.clone(),
+                            Some(b.call_id.clone()),
+                        ))
+                    }
+                    reflect_protocol::EventMsg::ToolCallEnd(e) => {
+                        // 反查工具名;未见 Begin(极端时序)时退化为占位名。
+                        let name = tool_names
+                            .lock()
+                            .unwrap()
+                            .remove(&e.call_id)
+                            .unwrap_or_else(|| "tool".to_string());
+                        let text = if e.is_error {
+                            format!("{name} (failed)")
                         } else {
-                            "tool done".to_string()
-                        },
-                        Some(e.call_id.clone()),
-                    )),
+                            name
+                        };
+                        Some((
+                            reflect_protocol::SubagentProgressKind::ToolEnd,
+                            text,
+                            Some(e.call_id.clone()),
+                        ))
+                    }
                     _ => None,
                 };
                 if let Some((kind, text, call_id)) = payload {

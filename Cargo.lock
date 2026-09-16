@@ -2483,6 +2483,7 @@ dependencies = [
  "reflect-prompt",
  "reflect-protocol",
  "reflect-recovery",
+ "reflect-sandbox",
  "reflect-skills",
  "reflect-subagent",
  "reflect-telemetry",

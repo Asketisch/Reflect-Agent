@@ -666,3 +666,60 @@ async fn anthropic_tool_result_text_emits_text_block() {
     assert_eq!(content[0]["type"], "text");
     assert_eq!(content[0]["text"], "hello world");
 }
+
+// ── v1.5 review:HTTP 层超时 → 可重试错误分类 ────────────────────
+
+/// review 回归:provider 请求超时(reqwest 总超时)必须以 `LlmError::Http`
+/// 浮出 —— model_call 的 `classify_action` 把 `Http` 归为
+/// `RetrySame { delay_ms }`(可重试),超时因此进入退避重试 / failover
+/// 链路,而不是当作不可恢复错误直接终止回合。
+///
+/// 此前该行为零覆盖:没有测试验证「慢响应」真的会在配置的 timeout 内
+/// 浮出错误(而非无限等待)。
+#[tokio::test]
+async fn request_timeout_maps_to_retryable_http_error() {
+    let server = MockServer::start().await;
+    // 服务端 2s 后才响应;客户端 timeout 300ms → 必须在 300ms 附近超时,
+    // 而不是等到服务端响应。
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string("event: message_stop\ndata: {}\n\n")
+                .set_delay(Duration::from_secs(2)),
+        )
+        .mount(&server)
+        .await;
+
+    let client = AnthropicClient::new(AnthropicConfig {
+        api_key: "k".into(),
+        base_url: Some(server.uri()),
+        timeout: Duration::from_millis(300),
+    })
+    .unwrap();
+
+    let started = std::time::Instant::now();
+    let result = client
+        .stream(basic_request(), CancellationToken::new())
+        .await;
+    let elapsed = started.elapsed();
+
+    match result {
+        Err(LlmError::Http(msg)) => {
+            // reqwest 超时的 Display 含 "timed out"(容错不同平台措辞差异,
+            // 关键是走了 Http 分支而非 panic / 挂死)。
+            assert!(
+                msg.contains("timed out") || msg.contains("error sending request"),
+                "超时应以 Http 错误浮出,实际: {msg}"
+            );
+        }
+        Err(other) => panic!("期望 Err(LlmError::Http),实际: {other}"),
+        Ok(_) => panic!("期望 Err(LlmError::Http),实际: Ok(stream)"),
+    }
+    // 300ms 超时生效(而非等满服务端 2s 延迟);留裕量防 CI 抖动。
+    assert!(
+        elapsed < Duration::from_millis(1800),
+        "超时应早于服务端响应触发,实际耗时 {elapsed:?}"
+    );
+}

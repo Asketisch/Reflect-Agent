@@ -154,13 +154,18 @@ impl Tool for RequestHumanInputTool {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
         };
-        let text = tokio::select! {
-            r = wait_tui => r?,
-            r = wait_file => r?,
+        // review 修复:先取结果、清理挂起文件、再传播错误 —— 此前
+        // `?` 提前返回会跳过 clear,用户取消 / 拒绝路径遗留
+        // `<context_id>.json`,违背「完成(或取消)后文件一并清除」
+        // 的契约(TUI 重启回放会看到已失效的挂起请求)。
+        let result = tokio::select! {
+            r = wait_tui => r,
+            r = wait_file => r,
         };
         if let Some(st) = &store {
             st.clear(&context_id);
         }
+        let text = result?;
         let elapsed_ms = start.elapsed().as_millis() as u64;
         span.record("response_len", text.chars().count());
         span.record("elapsed_ms", elapsed_ms);

@@ -237,7 +237,17 @@ pub struct BackgroundTaskInfo {
 /// 跨越单个 turn,不跟随工具调用的取消令牌)。
 pub trait TaskSpawner: Send + Sync + std::fmt::Debug {
     /// 后台执行一条 shell 命令,立即返回任务 id。
-    fn spawn_bash(&self, cmd: &str, cwd: &std::path::Path) -> Result<String, ToolError>;
+    ///
+    /// `os_sandbox` 为每 turn 的 OS 沙箱覆盖(`ToolContext.os_sandbox`):
+    /// `None` = 跟随 env,`Some(on)` = 强制开/关。实现方必须与前台
+    /// BashTool 同等对待 —— 沙箱启用且严格时 fail-closed,否则后台路径
+    /// 会成为绕过 OS 沙箱的逃逸口(review 修复)。
+    fn spawn_bash(
+        &self,
+        cmd: &str,
+        cwd: &std::path::Path,
+        os_sandbox: Option<bool>,
+    ) -> Result<String, ToolError>;
 
     /// 全部任务快照。
     fn snapshot(&self) -> Vec<BackgroundTaskInfo>;

@@ -9,6 +9,9 @@ description = "Reflect: AgentThread, 4-node StateGraph and ThreadManager"
 reflect-protocol = { workspace = true }
 reflect-llm      = { workspace = true }
 reflect-tools    = { workspace = true }
+# v1.5 R2:后台 bash 与前台 BashTool 同等沙箱(Seatbelt / Landlock +
+# 严格 fail-closed),杜绝「run_in_background 绕过 OS 沙箱」的逃逸口。
+reflect-sandbox  = { workspace = true }
 reflect-hooks    = { workspace = true }
 reflect-compact  = { workspace = true }
 reflect-memory   = { workspace = true }

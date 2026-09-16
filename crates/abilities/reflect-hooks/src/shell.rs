@@ -105,19 +105,28 @@ impl ShellHook {
                 };
             }
         };
-        // stdin:事件 JSON(写完即关,让 `cat` 类命令能收到 EOF)。
-        if let Some(mut stdin) = child.stdin.take() {
-            use tokio::io::AsyncWriteExt;
-            if let Err(e) = stdin.write_all(event_json.as_bytes()).await {
-                tracing::debug!(hook = %self.name, error = %e, "shell hook stdin write failed");
-            }
-            let _ = stdin.shutdown().await;
-        }
-
-        let mut child = child;
+        let stdin_handle = child.stdin.take();
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
+        // stdin:事件 JSON(写完即关,让 `cat` 类命令能收到 EOF)。
+        // review 修复:写入必须并入 timeout 作用域 —— hook 命令不读
+        // stdin 且事件 JSON 超过 pipe 缓冲(约 64KB,PreToolUse 的 args
+        // 可含整份文件内容)时,无保护的 `write_all` 会永久阻塞,hook
+        // 脱离超时保护卡死整个引擎事件派发。
         let collect = async {
+            let in_fut = async {
+                if let Some(mut stdin) = stdin_handle {
+                    use tokio::io::AsyncWriteExt;
+                    if let Err(e) = stdin.write_all(event_json.as_bytes()).await {
+                        tracing::debug!(
+                            hook = %self.name,
+                            error = %e,
+                            "shell hook stdin write failed"
+                        );
+                    }
+                    let _ = stdin.shutdown().await;
+                }
+            };
             let out_fut = async {
                 let mut buf = String::new();
                 if let Some(mut s) = stdout {
@@ -134,7 +143,7 @@ impl ShellHook {
                 }
                 buf
             };
-            let (out, err) = tokio::join!(out_fut, err_fut);
+            let ((), out, err) = tokio::join!(in_fut, out_fut, err_fut);
             let status = child.wait().await;
             (out, err, status)
         };

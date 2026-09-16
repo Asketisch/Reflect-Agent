@@ -300,10 +300,17 @@ impl ReflectConfig {
             }
         }
 
+        // v1.5 review:单轮重试上限可配 —— 缺省沿用 `RoutingPolicy::default()`
+        // 的 16,`[routing] max_attempts` 覆盖。经 `with_policy` 流入
+        // `model_call` 的重试环。
+        let max_attempts = section
+            .max_attempts
+            .unwrap_or(RoutingPolicy::default().max_attempts);
         RoutingPolicy {
             main: build_slot(&section.main, "REFLECT_MAIN_MODEL", &active_spec),
             compact: build_slot(&section.compact, "REFLECT_COMPACT_MODEL", &active_spec),
             subagent: build_slot(&section.subagent, "REFLECT_SUBAGENT_MODEL", &active_spec),
+            max_attempts,
             ..RoutingPolicy::default()
         }
         // 抑制 Role 导入的 unused 警告(供 Phase 3 caller 用)

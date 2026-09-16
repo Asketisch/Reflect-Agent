@@ -732,3 +732,30 @@ fn mock_not_active_for_real_provider_config() {
     );
     assert_eq!(cfg.active_provider_inner(None, None), Some("anthropic"));
 }
+
+// ── v1.5 review:`[routing] max_attempts` 配置透传 ────────────────
+
+/// `[routing] max_attempts` 覆盖 `RoutingPolicy.max_attempts`(缺省 16)。
+#[test]
+fn routing_max_attempts_from_toml() {
+    // 显式配置 → 生效(用户要把最坏情况重试从 16 压到 10 的入口)。
+    let toml = r#"
+        [routing]
+        max_attempts = 10
+    "#;
+    let cfg: ReflectConfig = toml::from_str(toml).unwrap();
+    assert_eq!(cfg.routing_policy().max_attempts, 10);
+
+    // `[routing]` 段存在但未写 max_attempts → 缺省 16。
+    let toml_default = r#"
+        [routing]
+        [routing.main]
+        primary = "anthropic/claude-test"
+    "#;
+    let cfg_default: ReflectConfig = toml::from_str(toml_default).unwrap();
+    assert_eq!(cfg_default.routing_policy().max_attempts, 16);
+
+    // 整个 `[routing]` 段缺省 → 缺省 16。
+    let cfg_none = cfg_with_anthropic("sk-a");
+    assert_eq!(cfg_none.routing_policy().max_attempts, 16);
+}

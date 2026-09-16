@@ -37,6 +37,11 @@ pub struct BashTool;
 ///   非 UTF-8 输出——`read_line` 遇无效 UTF-8 会报错中断,这里用字节
 ///   缓冲 + 送达回调时做 lossy 转换)。两条路径都受 `OUTPUT_LIMIT`
 ///   总量限制,最终 `ToolOutput` 的完整文本语义一致(增量只是预览)。
+///
+/// review 修复:捕获到 `OUTPUT_LIMIT` 上限后必须**继续排空管道(丢弃
+/// 剩余输出)直至 EOF** —— `Take` 到达限额后返回 EOF 语义,若就此停读,
+/// 子进程把 pipe 缓冲写满后会永久阻塞在 write 上,`wait()` 挂死直到外层
+/// timeout 把命令误杀(表现为「输出超限的命令必然超时」)。
 async fn drain_pipe<R: tokio::io::AsyncRead + Unpin>(
     pipe: Option<R>,
     progress: Option<&crate::tool::ProgressSink>,
@@ -51,6 +56,7 @@ async fn drain_pipe<R: tokio::io::AsyncRead + Unpin>(
     match progress {
         None => {
             let _ = limited.read_to_end(&mut buf).await;
+            drain_after_cap(&mut limited).await;
         }
         Some(sink) => {
             use tokio::io::AsyncBufReadExt;
@@ -66,9 +72,23 @@ async fn drain_pipe<R: tokio::io::AsyncRead + Unpin>(
                     }
                 }
             }
+            drain_after_cap(reader.get_mut()).await;
         }
     }
     buf
+}
+
+/// 捕获满后继续排空管道(丢弃剩余输出)直至 EOF,防子进程写满 pipe
+/// 缓冲后阻塞在 write 上(见 [`drain_pipe`] 的 review 修复说明)。
+async fn drain_after_cap<T: tokio::io::AsyncRead + Unpin>(limited: &mut tokio::io::Take<T>) {
+    use tokio::io::AsyncReadExt;
+    let mut discard = [0u8; 8192];
+    loop {
+        match limited.get_mut().read(&mut discard).await {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+    }
 }
 
 #[async_trait]
@@ -129,7 +149,8 @@ impl Tool for BashTool {
 
         // v1.5 R2:后台执行 —— 立即返回任务 id,输出经队列在下一回合
         // 边界注入(或 background_status 查询)。宿主未接后台生成器时
-        // 明确报错,不静默降级为前台执行。
+        // 明确报错,不静默降级为前台执行。OS 沙箱覆盖随调用透传,由
+        // 宿主侧与前台同等执行(严格模式 fail-closed)。
         if args.get("run_in_background").and_then(|v| v.as_bool()) == Some(true) {
             let spawner = ctx
                 .background
@@ -137,7 +158,7 @@ impl Tool for BashTool {
                 .ok_or_else(|| ToolError::InvalidArgs {
                     message: "run_in_background: 本线程未接入后台任务生成器".into(),
                 })?;
-            let task_id = spawner.spawn_bash(&cmd, &ctx.workspace_path())?;
+            let task_id = spawner.spawn_bash(&cmd, &ctx.workspace_path(), ctx.os_sandbox)?;
             return Ok(ToolOutput {
                 content: vec![reflect_protocol::ContentBlock::text(format!(
                     "[background task {task_id} started] 命令已在后台执行;完成结果将在下一个回合边界自动注入,也可用 background_status 查询。"
@@ -452,6 +473,45 @@ mod tests {
             _ => panic!("expected text"),
         };
         assert!(text.contains("plain-path"));
+    }
+
+    /// review 回归:输出超过 OUTPUT_LIMIT(100KB)的命令必须正常完成
+    /// 并带 0 退出码 —— 修复前捕获满后停止读管道,子进程写满 pipe 阻塞,
+    /// `wait()` 挂死直到外层 timeout 误杀(表现为「大输出必然超时」)。
+    /// 限时 8s:修复后毫秒级完成;若回归挂死,timeout(30s 默认)远超
+    /// 本断言,必然失败。
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn oversized_output_completes_without_timeout_kill() {
+        let _g = SANDBOX_ENV_LOCK.lock().unwrap();
+        let prior_on = std::env::var("REFLECT_SANDBOX_OS_LEVEL").ok();
+        let prior_strict = std::env::var("REFLECT_SANDBOX_STRICT").ok();
+        unsafe {
+            std::env::set_var("REFLECT_SANDBOX_OS_LEVEL", "0");
+            std::env::set_var("REFLECT_SANDBOX_STRICT", "0");
+        }
+        let started = std::time::Instant::now();
+        let out = BashTool
+            .execute(
+                ToolContext::for_workspace("/tmp"),
+                serde_json::json!({"cmd": "seq 1 30000", "timeout_ms": 30000}),
+            )
+            .await;
+        match prior_on {
+            Some(p) => unsafe { std::env::set_var("REFLECT_SANDBOX_OS_LEVEL", p) },
+            None => unsafe { std::env::remove_var("REFLECT_SANDBOX_OS_LEVEL") },
+        }
+        match prior_strict {
+            Some(p) => unsafe { std::env::set_var("REFLECT_SANDBOX_STRICT", p) },
+            None => unsafe { std::env::remove_var("REFLECT_SANDBOX_STRICT") },
+        }
+        let out = out.unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(8),
+            "大输出命令应在 8s 内完成,实际 {:?}(疑似管道排空回归)",
+            started.elapsed()
+        );
+        assert_eq!(out.metadata.get("exit_code"), Some(&serde_json::json!(0)));
     }
 
     #[tokio::test]

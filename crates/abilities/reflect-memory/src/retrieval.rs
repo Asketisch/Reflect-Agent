@@ -107,11 +107,16 @@ pub fn retrieve_relevant(
         sections.extend(split_sections(*s, body));
     }
     let query_terms = reflect_bm25::tokenize(query);
+    // review 修复:候选项的 key 必须用「拼接后向量中的位置」而不是
+    // `sec.index` —— 后者由 `split_sections` 按文件各自从 0 重排,多
+    // scope(Project + User 等)拼接后会出现重复 line_no,`score_of`
+    // 按 line_no 查分时跨 scope 错配(条目 A 拿到条目 B 的分数)。
     let candidates: Vec<(usize, String)> = sections
         .iter()
-        .map(|sec| {
+        .enumerate()
+        .map(|(pos, sec)| {
             (
-                sec.index,
+                pos,
                 if sec.title.is_empty() {
                     sec.body.clone()
                 } else {
@@ -267,5 +272,47 @@ mod tests {
         let (_d, store) = store_with(body);
         let out = retrieve_relevant(&store, &[MemoryScope::Project], "agent", "", 8000).unwrap();
         assert!(out.contains("alpha") && out.contains("beta"));
+    }
+
+    /// review 回归:多 scope 下候选 key 不得用按文件重排的 `sec.index`
+    /// —— 修复前两个 scope 的条目 line_no 都是 0,BM25 分数跨 scope
+    /// 错配(查询命中 Project 的 postgres,预算内却装进 User 的 Beta)。
+    #[test]
+    fn multi_scope_retrieval_scores_own_sections() {
+        // Project / User 各用独立根目录,避免两 scope 写同一文件互相覆盖。
+        let proj = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let store = FileMemoryStore::new(proj.path(), home.path());
+        store
+            .save(
+                MemoryScope::Project,
+                "agent",
+                "## Alpha\nalpha postgres database tuning",
+            )
+            .unwrap();
+        store
+            .save(
+                MemoryScope::User,
+                "agent",
+                "## Beta\nbeta actions deploy pipeline",
+            )
+            .unwrap();
+        // 预算只够装一条:命中的 Alpha(postgres)必须入选。
+        let out = retrieve_relevant(
+            &store,
+            &[MemoryScope::Project, MemoryScope::User],
+            "agent",
+            "postgres database tuning",
+            60,
+        )
+        .unwrap();
+        assert!(
+            out.contains("postgres"),
+            "命中的 Project 条目必须保留: {out}"
+        );
+        assert!(
+            !out.contains("deploy pipeline"),
+            "预算内不应装进零相关的 User 条目: {out}"
+        );
     }
 }
