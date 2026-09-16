@@ -63,6 +63,22 @@ pub fn list_sessions(base: &Path) -> std::io::Result<Vec<SessionInfo>> {
     Ok(out)
 }
 
+/// 列出归属于指定 workspace 的 session(`SessionMeta.workspace` 精确匹配)。
+///
+/// 旧 session(`workspace` 为 `None`)在 workspace 过滤下**不返回** ——
+/// 归属在创建时确定,未归属的会话只出现在全量(不过滤)列表里,
+/// 避免把历史会话误归到任何项目视图。
+pub fn list_sessions_in_workspace(
+    base: &Path,
+    workspace: &str,
+) -> std::io::Result<Vec<SessionInfo>> {
+    let all = list_sessions(base)?;
+    Ok(all
+        .into_iter()
+        .filter(|s| s.workspace.as_deref() == Some(workspace))
+        .collect())
+}
+
 /// v0.4: 把 `-c` / `-r N` 旗标解析成具体 `ThreadId`。
 ///
 /// - `continue_last == true`:返回 `list_sessions` 最新一条;若列表为空 → Err。
@@ -285,6 +301,7 @@ fn parse_first_session_meta(path: &Path) -> Option<SessionInfo> {
             session_id,
             model,
             started_at,
+            workspace,
         } = record
     {
         return Some(SessionInfo {
@@ -297,6 +314,7 @@ fn parse_first_session_meta(path: &Path) -> Option<SessionInfo> {
             output_tokens,
             total_tokens,
             cost_usd,
+            workspace,
         });
     }
 
@@ -323,6 +341,7 @@ fn parse_first_session_meta(path: &Path) -> Option<SessionInfo> {
             output_tokens,
             total_tokens,
             cost_usd,
+            workspace: meta.workspace,
         });
     }
 
@@ -436,12 +455,14 @@ fn session_meta_from_rotated_sibling(path: &Path) -> Option<SessionMetaFields> {
                 session_id,
                 model,
                 started_at,
+                workspace,
             } = record
         {
             return Some(SessionMetaFields {
                 session_id,
                 model,
                 started_at,
+                workspace,
             });
         }
     }
@@ -453,6 +474,7 @@ struct SessionMetaFields {
     session_id: ThreadId,
     model: String,
     started_at: chrono::DateTime<chrono::Utc>,
+    workspace: Option<String>,
 }
 
 fn session_contains_discussion(path: &Path, target: &uuid::Uuid) -> bool {
@@ -674,6 +696,7 @@ pub fn fork_with_history(
             session_id: child_id,
             model: parent_model,
             started_at: Utc::now(),
+            workspace: None,
         })?
     )?;
 

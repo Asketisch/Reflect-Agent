@@ -14,7 +14,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::Value;
-use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tracing::warn;
 
@@ -31,6 +30,67 @@ const ENV_WHITELIST: &[&str] = &["PATH", "HOME", "LANG", "LC_ALL", "USER", "SHEL
 
 pub struct BashTool;
 
+/// v1.4 A3:收割单个输出流(stdout / stderr)。
+///
+/// - `progress = None`:一次性 `read_to_end`(历史路径,零额外开销);
+/// - `progress = Some`:按行 `read_until(b'\n')` 逐行回调(字节级,容忍
+///   非 UTF-8 输出——`read_line` 遇无效 UTF-8 会报错中断,这里用字节
+///   缓冲 + 送达回调时做 lossy 转换)。两条路径都受 `OUTPUT_LIMIT`
+///   总量限制,最终 `ToolOutput` 的完整文本语义一致(增量只是预览)。
+///
+/// review 修复:捕获到 `OUTPUT_LIMIT` 上限后必须**继续排空管道(丢弃
+/// 剩余输出)直至 EOF** —— `Take` 到达限额后返回 EOF 语义,若就此停读,
+/// 子进程把 pipe 缓冲写满后会永久阻塞在 write 上,`wait()` 挂死直到外层
+/// timeout 把命令误杀(表现为「输出超限的命令必然超时」)。
+async fn drain_pipe<R: tokio::io::AsyncRead + Unpin>(
+    pipe: Option<R>,
+    progress: Option<&crate::tool::ProgressSink>,
+    is_stderr: bool,
+) -> Vec<u8> {
+    use tokio::io::AsyncReadExt;
+    let mut buf = Vec::with_capacity(8192);
+    let Some(pipe) = pipe else {
+        return buf;
+    };
+    let mut limited = pipe.take(OUTPUT_LIMIT as u64);
+    match progress {
+        None => {
+            let _ = limited.read_to_end(&mut buf).await;
+            drain_after_cap(&mut limited).await;
+        }
+        Some(sink) => {
+            use tokio::io::AsyncBufReadExt;
+            let mut reader = tokio::io::BufReader::new(limited);
+            let mut line: Vec<u8> = Vec::new();
+            loop {
+                line.clear();
+                match reader.read_until(b'\n', &mut line).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        sink.emit(is_stderr, &String::from_utf8_lossy(&line));
+                        buf.extend_from_slice(&line);
+                    }
+                }
+            }
+            drain_after_cap(reader.get_mut()).await;
+        }
+    }
+    buf
+}
+
+/// 捕获满后继续排空管道(丢弃剩余输出)直至 EOF,防子进程写满 pipe
+/// 缓冲后阻塞在 write 上(见 [`drain_pipe`] 的 review 修复说明)。
+async fn drain_after_cap<T: tokio::io::AsyncRead + Unpin>(limited: &mut tokio::io::Take<T>) {
+    use tokio::io::AsyncReadExt;
+    let mut discard = [0u8; 8192];
+    loop {
+        match limited.get_mut().read(&mut discard).await {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+    }
+}
+
 #[async_trait]
 impl Tool for BashTool {
     fn name(&self) -> &str {
@@ -46,7 +106,8 @@ impl Tool for BashTool {
             "type": "object",
             "properties": {
                 "cmd": {"type": "string", "description": "Shell command to execute"},
-                "timeout_ms": {"type": "integer", "minimum": 0, "description": "Timeout in milliseconds (default 120000)"}
+                "timeout_ms": {"type": "integer", "minimum": 0, "description": "Timeout in milliseconds (default 120000)"},
+                "run_in_background": {"type": "boolean", "description": "Run in background: return a task id immediately; output is injected at the next turn boundary (query via background_status)"}
             },
             "required": ["cmd"],
             "additionalProperties": false
@@ -86,6 +147,31 @@ impl Tool for BashTool {
             .unwrap_or(120_000);
         let timeout = Duration::from_millis(timeout_ms);
 
+        // v1.5 R2:后台执行 —— 立即返回任务 id,输出经队列在下一回合
+        // 边界注入(或 background_status 查询)。宿主未接后台生成器时
+        // 明确报错,不静默降级为前台执行。OS 沙箱覆盖随调用透传,由
+        // 宿主侧与前台同等执行(严格模式 fail-closed)。
+        if args.get("run_in_background").and_then(|v| v.as_bool()) == Some(true) {
+            let spawner = ctx
+                .background
+                .as_ref()
+                .ok_or_else(|| ToolError::InvalidArgs {
+                    message: "run_in_background: 本线程未接入后台任务生成器".into(),
+                })?;
+            let task_id = spawner.spawn_bash(&cmd, &ctx.workspace_path(), ctx.os_sandbox)?;
+            return Ok(ToolOutput {
+                content: vec![reflect_protocol::ContentBlock::text(format!(
+                    "[background task {task_id} started] 命令已在后台执行;完成结果将在下一个回合边界自动注入,也可用 background_status 查询。"
+                ))],
+                is_error: false,
+                metadata: serde_json::json!({
+                    "background": true,
+                    "task_id": task_id,
+                }),
+                elapsed_ms: 0,
+            });
+        }
+
         // v1.3:OS 沙箱。`OsSandbox::default()` v1.3 起 enabled + strict,
         // `enforce_or_fail()` 集中决定 fail-closed 行为:
         // - 后端可用 → 走 Seatbelt 包裹 / Landlock pre_exec。
@@ -93,7 +179,12 @@ impl Tool for BashTool {
         //   `ToolError::SandboxUnavailable`,**绝不**回退到裸 `sh -c`。
         // - 非 strict + 后端不可用 → 保留 v1.2 降级透传语义(供
         //   REFLECT_SANDBOX_STRICT=0 显式开启)。
-        let sandbox = reflect_sandbox::OsSandbox::from_env();
+        // v1.5 R1:OS 沙箱来源优先级 —— ToolContext 覆盖(`sandbox_policy`
+        // 每 turn 下发)> env(`OsSandbox::from_env`)。
+        let sandbox = match ctx.os_sandbox {
+            Some(on) => reflect_sandbox::OsSandbox::with_enabled(on),
+            None => reflect_sandbox::OsSandbox::from_env(),
+        };
         let workspace = ctx.workspace_path();
         // 严格模式 fail-closed:后端 / 初始化失败 → 直接报错,不裸执行。
         if let Err(reason) = sandbox.enforce_or_fail() {
@@ -126,12 +217,12 @@ impl Tool for BashTool {
         };
         // Seatbelt 模式下 argv[1] 是临时 .sb profile 路径;文件名按调用唯一
         // (见 seatbelt_argv),命令结束后由本工具负责删除,避免临时目录泄漏。
-        let seatbelt_profile_path: Option<std::path::PathBuf> = if program == "/usr/bin/sandbox-exec"
-        {
-            argv.get(1).map(std::path::PathBuf::from)
-        } else {
-            None
-        };
+        let seatbelt_profile_path: Option<std::path::PathBuf> =
+            if program == "/usr/bin/sandbox-exec" {
+                argv.get(1).map(std::path::PathBuf::from)
+            } else {
+                None
+            };
         let mut command = Command::new(&program);
         command.args(&argv);
         // Linux Landlock:在 fork 后、exec 前应用规则(workspace 内放行,
@@ -163,6 +254,9 @@ impl Tool for BashTool {
         let mut stdout = child.stdout.take();
         let mut stderr = child.stderr.take();
         let kill_on_cancel = ctx.cancel.clone();
+        // v1.4 A3:有进度回调时逐行流式上报(经 queue 转发为
+        // ToolCallOutputDelta),无回调时保持原 read_to_end 路径不变。
+        let progress = ctx.progress.clone();
         // M3:持有可变 child 句柄,drain 完 stdout/stderr 后 `wait()` 取 exit code。
         // 此前 M1 实现靠 `kill_on_drop` 让子进程自生自灭,从不 wait → 拿不到
         // exit code,`is_error` 恒为 false。现在用 `Option<Child>` 包住,在
@@ -170,37 +264,37 @@ impl Tool for BashTool {
         let mut child_handle = Some(child);
 
         let result = tokio::time::timeout(timeout, async {
-            // Concurrently drain both pipes while waiting.
-            let stdout_fut = async {
-                let mut buf = Vec::with_capacity(8192);
-                if let Some(s) = stdout.as_mut() {
-                    let _: tokio::io::Take<&mut tokio::process::ChildStdout> =
-                        s.take(OUTPUT_LIMIT as u64);
-                    let _ = s.read_to_end(&mut buf).await;
+            // v1.4 C2:取消令牌贯通 —— select! biased 监听 ctx.cancel,
+            // 触发时 start_kill 子进程并 reap(此前 kill_on_cancel 是死变量,
+            // 中断 / 关闭只取消 LLM 流,正在跑的 bash 进程会跑满超时)。
+            // 被 kill 的命令 exit_code 落到信号杀死路径(-1 / None)。
+            tokio::select! {
+                biased;
+                _ = kill_on_cancel.cancelled() => {
+                    if let Some(mut ch) = child_handle.take() {
+                        let _ = ch.start_kill();
+                        let _ = ch.wait().await;
+                    }
+                    (Vec::new(), Vec::new(), -1)
                 }
-                buf
-            };
-            let stderr_fut = async {
-                let mut buf = Vec::with_capacity(8192);
-                if let Some(s) = stderr.as_mut() {
-                    let _: tokio::io::Take<&mut tokio::process::ChildStderr> =
-                        s.take(OUTPUT_LIMIT as u64);
-                    let _ = s.read_to_end(&mut buf).await;
-                }
-                buf
-            };
-            let (out_bytes, err_bytes) = tokio::join!(stdout_fut, stderr_fut);
-            // Reap the child & capture exit code(M3:此前 M1 从不 wait)。
-            // drain 已把 stdout/stderr 读空,wait 通常立即返回。
-            let exit_code = if let Some(mut ch) = child_handle.take() {
-                match ch.wait().await {
-                    Ok(status) => status.code().unwrap_or(-1),
-                    Err(_) => -1,
-                }
-            } else {
-                -1
-            };
-            (out_bytes, err_bytes, exit_code)
+                triple = async {
+                    // Concurrently drain both pipes while waiting.
+                    let stdout_fut = drain_pipe(stdout.as_mut(), progress.as_ref(), false);
+                    let stderr_fut = drain_pipe(stderr.as_mut(), progress.as_ref(), true);
+                    let (out_bytes, err_bytes) = tokio::join!(stdout_fut, stderr_fut);
+                    // Reap the child & capture exit code(M3:此前 M1 从不 wait)。
+                    // drain 已把 stdout/stderr 读空,wait 通常立即返回。
+                    let exit_code = if let Some(mut ch) = child_handle.take() {
+                        match ch.wait().await {
+                            Ok(status) => status.code().unwrap_or(-1),
+                            Err(_) => -1,
+                        }
+                    } else {
+                        -1
+                    };
+                    (out_bytes, err_bytes, exit_code)
+                } => triple,
+            }
         });
 
         let (out_bytes, err_bytes, exit_code) = match result.await {
@@ -223,7 +317,6 @@ impl Tool for BashTool {
         // M3:child 已在 timeout 块内 `wait()` reap,exit_code 已捕获。
         // 若 timeout 触发,上面 `Err(_)` 分支已 return;若 child_handle 仍在
         // (理论上不会,drain+wait 在块内完成),靠 `kill_on_drop` 兜底。
-        let _ = kill_on_cancel;
 
         let stdout_str = String::from_utf8_lossy(&out_bytes).to_string();
         let stderr_str = String::from_utf8_lossy(&err_bytes).to_string();
@@ -279,6 +372,146 @@ mod tests {
             }
             _ => panic!("expected text"),
         }
+    }
+
+    // ── v1.4 A3:输出流式增量 ─────────────────────────────────────
+
+    /// 有进度回调时:bash 逐行上报增量(stdout + stderr 各自成段),
+    /// 且最终 ToolOutput 的完整文本语义与无回调路径一致。
+    /// 注意沙箱 env 串行化(见 SANDBOX_ENV_LOCK):显式关沙箱跑纯 echo,
+    /// 不与其它测试竞争 env。
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn bash_reports_line_deltas_via_progress_sink() {
+        let _g = SANDBOX_ENV_LOCK.lock().unwrap();
+        let prior_on = std::env::var("REFLECT_SANDBOX_OS_LEVEL").ok();
+        let prior_strict = std::env::var("REFLECT_SANDBOX_STRICT").ok();
+        unsafe {
+            std::env::set_var("REFLECT_SANDBOX_OS_LEVEL", "0");
+            std::env::set_var("REFLECT_SANDBOX_STRICT", "0");
+        }
+        let deltas: std::sync::Arc<std::sync::Mutex<Vec<(bool, String)>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink_deltas = deltas.clone();
+        let mut ctx = ToolContext::for_workspace("/tmp");
+        ctx.progress = Some(crate::tool::ProgressSink(std::sync::Arc::new(
+            move |is_stderr, delta| {
+                sink_deltas
+                    .lock()
+                    .unwrap()
+                    .push((is_stderr, delta.to_string()));
+            },
+        )));
+        let out = BashTool
+            .execute(
+                ctx,
+                serde_json::json!({"cmd": "echo line1; echo err1 1>&2; echo line2"}),
+            )
+            .await;
+        match prior_on {
+            Some(p) => unsafe { std::env::set_var("REFLECT_SANDBOX_OS_LEVEL", p) },
+            None => unsafe { std::env::remove_var("REFLECT_SANDBOX_OS_LEVEL") },
+        }
+        match prior_strict {
+            Some(p) => unsafe { std::env::set_var("REFLECT_SANDBOX_STRICT", p) },
+            None => unsafe { std::env::remove_var("REFLECT_SANDBOX_STRICT") },
+        }
+        let out = out.unwrap();
+        let got = deltas.lock().unwrap().clone();
+        let stdout_lines: Vec<&str> = got
+            .iter()
+            .filter(|(err, _)| !err)
+            .map(|(_, d)| d.as_str())
+            .collect();
+        let stderr_lines: Vec<&str> = got
+            .iter()
+            .filter(|(err, _)| *err)
+            .map(|(_, d)| d.as_str())
+            .collect();
+        assert_eq!(
+            stdout_lines,
+            vec!["line1\n", "line2\n"],
+            "stdout 应按行逐段上报"
+        );
+        assert_eq!(stderr_lines, vec!["err1\n"], "stderr 应单独成段且标记");
+        // 最终完整输出仍包含全部内容(增量只是预览)。
+        let text = match &out.content[0] {
+            reflect_protocol::ContentBlock::Text { text } => text.clone(),
+            _ => panic!("expected text"),
+        };
+        assert!(text.contains("line1") && text.contains("line2") && text.contains("err1"));
+    }
+
+    /// 无进度回调(默认):行为与历史路径一致,零增量上报。
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn bash_without_sink_no_deltas_but_full_output() {
+        let _g = SANDBOX_ENV_LOCK.lock().unwrap();
+        let prior_on = std::env::var("REFLECT_SANDBOX_OS_LEVEL").ok();
+        let prior_strict = std::env::var("REFLECT_SANDBOX_STRICT").ok();
+        unsafe {
+            std::env::set_var("REFLECT_SANDBOX_OS_LEVEL", "0");
+            std::env::set_var("REFLECT_SANDBOX_STRICT", "0");
+        }
+        let out = BashTool
+            .execute(
+                ToolContext::for_workspace("/tmp"),
+                serde_json::json!({"cmd": "echo plain-path"}),
+            )
+            .await;
+        match prior_on {
+            Some(p) => unsafe { std::env::set_var("REFLECT_SANDBOX_OS_LEVEL", p) },
+            None => unsafe { std::env::remove_var("REFLECT_SANDBOX_OS_LEVEL") },
+        }
+        match prior_strict {
+            Some(p) => unsafe { std::env::set_var("REFLECT_SANDBOX_STRICT", p) },
+            None => unsafe { std::env::remove_var("REFLECT_SANDBOX_STRICT") },
+        }
+        let out = out.unwrap();
+        let text = match &out.content[0] {
+            reflect_protocol::ContentBlock::Text { text } => text.clone(),
+            _ => panic!("expected text"),
+        };
+        assert!(text.contains("plain-path"));
+    }
+
+    /// review 回归:输出超过 OUTPUT_LIMIT(100KB)的命令必须正常完成
+    /// 并带 0 退出码 —— 修复前捕获满后停止读管道,子进程写满 pipe 阻塞,
+    /// `wait()` 挂死直到外层 timeout 误杀(表现为「大输出必然超时」)。
+    /// 限时 8s:修复后毫秒级完成;若回归挂死,timeout(30s 默认)远超
+    /// 本断言,必然失败。
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn oversized_output_completes_without_timeout_kill() {
+        let _g = SANDBOX_ENV_LOCK.lock().unwrap();
+        let prior_on = std::env::var("REFLECT_SANDBOX_OS_LEVEL").ok();
+        let prior_strict = std::env::var("REFLECT_SANDBOX_STRICT").ok();
+        unsafe {
+            std::env::set_var("REFLECT_SANDBOX_OS_LEVEL", "0");
+            std::env::set_var("REFLECT_SANDBOX_STRICT", "0");
+        }
+        let started = std::time::Instant::now();
+        let out = BashTool
+            .execute(
+                ToolContext::for_workspace("/tmp"),
+                serde_json::json!({"cmd": "seq 1 30000", "timeout_ms": 30000}),
+            )
+            .await;
+        match prior_on {
+            Some(p) => unsafe { std::env::set_var("REFLECT_SANDBOX_OS_LEVEL", p) },
+            None => unsafe { std::env::remove_var("REFLECT_SANDBOX_OS_LEVEL") },
+        }
+        match prior_strict {
+            Some(p) => unsafe { std::env::set_var("REFLECT_SANDBOX_STRICT", p) },
+            None => unsafe { std::env::remove_var("REFLECT_SANDBOX_STRICT") },
+        }
+        let out = out.unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(8),
+            "大输出命令应在 8s 内完成,实际 {:?}(疑似管道排空回归)",
+            started.elapsed()
+        );
+        assert_eq!(out.metadata.get("exit_code"), Some(&serde_json::json!(0)));
     }
 
     #[tokio::test]

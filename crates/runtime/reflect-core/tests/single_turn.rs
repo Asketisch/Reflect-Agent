@@ -42,7 +42,6 @@ impl StubClient {
         s
     }
 
-    #[allow(dead_code)]
     fn with_mid_stream_error(events: Vec<ChatEvent>, err: LlmError) -> Self {
         let s = Self::new(events);
         *s.mid_stream_error.lock() = Some(err);
@@ -141,6 +140,7 @@ fn make_sub(text: &str) -> Submission {
         },
         client_user_message_id: None,
         trace: None,
+        workspace: None,
     }
 }
 
@@ -947,5 +947,180 @@ async fn thinking_delta_is_forwarded_as_event() {
     assert_eq!(
         thinking_text, "let me think... step by step",
         "多段 thinking delta 应被原样顺序转发"
+    );
+}
+
+// ── v1.5 review:重试上限(failover cap)语义回归 ─────────────────
+
+use reflect_llm::RoutingPolicy;
+
+/// 自定义 `RoutingPolicy` 的线程构造(`build_thread` 用默认策略)。
+fn build_thread_with_policy(registry: Arc<ModelRegistry>, policy: RoutingPolicy) -> AgentThread {
+    let cfg = AgentConfig::new("stub/m1", Path::new(".")).with_policy(Arc::new(policy));
+    let tools = Arc::new(ToolRegistry::default());
+    tools.register(Arc::new(EchoTool));
+    AgentThread::new(cfg, registry, tools, None, None)
+}
+
+/// G2:总尝试上限触顶 → `MAX_ATTEMPTS` 错误事件收尾,不产生 TurnComplete,
+/// 且排在后面的凭证不再被尝试。
+///
+/// 场景:4 个凭证全部在 stream 初始化即失败(SseParse → RetrySame 500ms
+/// 退避),`max_attempts = 2`。第 3 次尝试前触顶 —— c1/c2 各被调 1 次,
+/// c3/c4 不应被调用。此前该终态路径零测试覆盖。
+#[tokio::test]
+async fn max_attempts_cap_ends_turn_with_error_event() {
+    let registry = Arc::new(ModelRegistry::new());
+    let c1 = Arc::new(StubClient::with_sync_error(LlmError::SseParse(
+        "bad-1".into(),
+    )));
+    let c2 = Arc::new(StubClient::with_sync_error(LlmError::SseParse(
+        "bad-2".into(),
+    )));
+    let c3 = Arc::new(StubClient::with_sync_error(LlmError::SseParse(
+        "bad-3".into(),
+    )));
+    let c4 = Arc::new(StubClient::with_sync_error(LlmError::SseParse(
+        "bad-4".into(),
+    )));
+    registry.register_pool(
+        "stub",
+        CredentialPool {
+            entries: vec![
+                PoolEntry {
+                    client: c1.clone(),
+                    label: "w1".into(),
+                    weight: 1,
+                },
+                PoolEntry {
+                    client: c2.clone(),
+                    label: "w2".into(),
+                    weight: 1,
+                },
+                PoolEntry {
+                    client: c3.clone(),
+                    label: "w3".into(),
+                    weight: 1,
+                },
+                PoolEntry {
+                    client: c4.clone(),
+                    label: "w4".into(),
+                    weight: 1,
+                },
+            ],
+        },
+    );
+    let policy = RoutingPolicy {
+        max_attempts: 2,
+        ..RoutingPolicy::default()
+    };
+    let thread = build_thread_with_policy(registry, policy);
+    let mut handle = thread.submit(make_sub("retry cap")).await;
+
+    let mut saw_max_attempts = false;
+    let mut saw_complete = false;
+    while let Some(ev) = handle.next().await {
+        match ev.msg {
+            EventMsg::Error(e) if e.code == "MAX_ATTEMPTS" => {
+                saw_max_attempts = true;
+            }
+            EventMsg::TurnComplete(_) => saw_complete = true,
+            _ => {}
+        }
+    }
+    assert!(saw_max_attempts, "触顶必须发 MAX_ATTEMPTS 错误事件");
+    assert!(!saw_complete, "触顶的回合不应发 TurnComplete");
+    // 注意:池按加权轮询派位,具体命中哪两个凭证不定 —— 只断言总量:
+    // 恰好 2 次尝试(分布在不重复的 2 个凭证上,各 1 次)。
+    let total: u32 = [c1.calls(), c2.calls(), c3.calls(), c4.calls()]
+        .into_iter()
+        .sum();
+    assert_eq!(total, 2, "max_attempts=2 应恰好尝试 2 次后触顶");
+    let per_cred = [c1.calls(), c2.calls(), c3.calls(), c4.calls()];
+    assert_eq!(
+        per_cred.iter().filter(|&&n| n == 1).count(),
+        2,
+        "应有 2 个凭证各被尝试 1 次: {per_cred:?}"
+    );
+    assert_eq!(
+        per_cred.iter().filter(|&&n| n == 0).count(),
+        2,
+        "其余 2 个凭证不应被尝试: {per_cred:?}"
+    );
+}
+
+/// G3:mid-stream RetrySame 的同凭证上限 —— 同一凭证最多尝试 2 次,
+/// 超限强制 failover(exclude),池耗尽后以 `ALL_CREDENTIALS_EXHAUSTED`
+/// 快速收场,而不是烧满 `max_attempts`。
+///
+/// 修复前:mid-stream 错误路径没有上限检查,两个凭证交替重试到
+/// `max_attempts`(16 次)才以 MAX_ATTEMPTS 结束,多空转 12 次。
+#[tokio::test]
+async fn mid_stream_retry_same_is_capped_then_fails_over() {
+    let registry = Arc::new(ModelRegistry::new());
+    // 两个凭证都在流出一段文本后 SSE 解析爆炸(持久性 mid-stream 错误)。
+    let c1 = Arc::new(StubClient::with_mid_stream_error(
+        vec![ChatEvent::ContentDelta("partial-a".into())],
+        LlmError::SseParse("garbled-a".into()),
+    ));
+    let c2 = Arc::new(StubClient::with_mid_stream_error(
+        vec![ChatEvent::ContentDelta("partial-b".into())],
+        LlmError::SseParse("garbled-b".into()),
+    ));
+    registry.register_pool(
+        "stub",
+        CredentialPool {
+            entries: vec![
+                PoolEntry {
+                    client: c1.clone(),
+                    label: "broken-a".into(),
+                    weight: 1,
+                },
+                PoolEntry {
+                    client: c2.clone(),
+                    label: "broken-b".into(),
+                    weight: 1,
+                },
+            ],
+        },
+    );
+    let thread = build_thread(registry.clone());
+    let mut handle = thread.submit(make_sub("cap me")).await;
+
+    let mut saw_all_exhausted = false;
+    let mut saw_max_attempts = false;
+    let mut saw_switched_exhausted = false;
+    while let Some(ev) = handle.next().await {
+        match ev.msg {
+            EventMsg::Error(e) if e.code == "ALL_CREDENTIALS_EXHAUSTED" => {
+                saw_all_exhausted = true;
+            }
+            EventMsg::Error(e) if e.code == "MAX_ATTEMPTS" => {
+                saw_max_attempts = true;
+            }
+            EventMsg::Routing(r)
+                if r.reason == "retry_same_exhausted"
+                    && matches!(r.kind, RoutingEventKind::Switched) =>
+            {
+                saw_switched_exhausted = true;
+            }
+            _ => {}
+        }
+    }
+    let total = c1.calls() + c2.calls();
+    assert_eq!(
+        total, 4,
+        "2 个凭证 × 同凭证上限 2 次 = 恰好 4 次尝试(修复前为 16 次)"
+    );
+    assert_eq!(c1.calls(), 2, "c1 应恰好尝试 2 次");
+    assert_eq!(c2.calls(), 2, "c2 应恰好尝试 2 次");
+    assert!(
+        saw_all_exhausted,
+        "双凭证全部超限后应以 ALL_CREDENTIALS_EXHAUSTED 收场"
+    );
+    assert!(!saw_max_attempts, "上限生效时不应烧满 max_attempts 才结束");
+    assert!(
+        saw_switched_exhausted,
+        "超限 failover 应发 Switched(retry_same_exhausted) 路由事件"
     );
 }

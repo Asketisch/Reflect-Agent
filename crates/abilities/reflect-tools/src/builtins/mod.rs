@@ -2,6 +2,7 @@
 
 pub mod ask_user;
 pub mod ask_user_question;
+pub mod background_status;
 pub mod bash;
 pub mod brief;
 pub mod context_remaining;
@@ -48,6 +49,8 @@ pub use tool_search::ToolSearchTool;
 pub use web_fetch::WebFetchTool;
 pub use web_search::WebSearchTool;
 pub use write::WriteTool;
+
+pub use background_status::BackgroundStatusTool;
 
 #[cfg(test)]
 mod tests {

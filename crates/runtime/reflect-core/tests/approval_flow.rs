@@ -121,6 +121,7 @@ fn user_sub(id: &str, text: &str) -> Submission {
         },
         client_user_message_id: None,
         trace: None,
+        workspace: None,
     }
 }
 
@@ -133,6 +134,7 @@ fn approval_sub(submission_id: &str, request_id: &str, decision: ReviewDecision)
         },
         client_user_message_id: None,
         trace: None,
+        workspace: None,
     }
 }
 

@@ -66,6 +66,7 @@ fn user_input_sub(id: &str, text: &str) -> Submission {
         },
         client_user_message_id: None,
         trace: None,
+        workspace: None,
     }
 }
 
@@ -75,6 +76,7 @@ fn shutdown_sub(id: &str) -> Submission {
         op: Op::Shutdown,
         client_user_message_id: None,
         trace: None,
+        workspace: None,
     }
 }
 
@@ -223,5 +225,49 @@ async fn session_configured_emitted_only_once_per_thread() {
             ev.msg
         ),
         Ok(None) => {} // channel closed — also acceptable
+    }
+}
+
+/// v1.x:`.with_session_id(sid)` 预分配 id 时,SessionConfigured 携带的
+/// session_id 必须与之一致(而非 `new()` 内部的随机 id)—— GUI 按路由 id
+/// 预分配 session,依赖事件 id == recorder 文件名 == SessionMeta 三者一致。
+#[tokio::test]
+async fn session_configured_reports_preallocated_session_id() {
+    let registry = Arc::new(ModelRegistry::new());
+    registry.register_pool(
+        "stub",
+        CredentialPool {
+            entries: vec![PoolEntry {
+                client: Arc::new(StubClient::new(vec![
+                    ChatEvent::MessageStart {
+                        id: "m1".into(),
+                        model: "stub-1".into(),
+                    },
+                    ChatEvent::ContentDelta("hi".into()),
+                    ChatEvent::MessageStop,
+                ])),
+                label: "default".into(),
+                weight: 1,
+            }],
+        },
+    );
+    let sid = reflect_protocol::ThreadId::new();
+    let cfg = AgentConfig::new("stub/m1", Path::new(".")).with_session_id(sid);
+    let tools = Arc::new(ToolRegistry::default());
+    let thread = AgentThread::new(cfg, registry, tools, None, None);
+
+    let mut session_rx = thread.subscribe_session();
+    let _handle = thread.submit(user_input_sub("s-pre", "hi")).await;
+
+    let ev = timeout(Duration::from_secs(2), session_rx.recv())
+        .await
+        .expect("session event arrived within 2s")
+        .expect("session channel still open");
+    match ev.msg {
+        EventMsg::SessionConfigured(sc) => assert_eq!(
+            sc.session_id, sid,
+            "SessionConfigured 必须回显预分配的 session_id"
+        ),
+        other => panic!("expected SessionConfigured, got {other:?}"),
     }
 }

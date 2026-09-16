@@ -186,6 +186,7 @@ fn write_two_sessions(dir: &Path) -> (reflect_protocol::ThreadId, reflect_protoc
                 session_id: id,
                 model: "openai/gpt-4o".into(),
                 started_at: started,
+                workspace: None,
             })
             .unwrap(),
         )

@@ -68,6 +68,18 @@ impl CompactorConfig {
 pub struct Compactor {
     cfg: CompactorConfig,
     summarizer: Arc<dyn Summarizer>,
+    /// v1.4 D2:记忆固化目标。`Some` 时 LLM 摘要成功后追加一步记忆
+    /// 提取(extract_memories),把长期事实条目 append 进目标 scope。
+    /// `None`(默认)= 关闭,零开销。
+    consolidation: Option<ConsolidationTarget>,
+}
+
+/// v1.4 D2:记忆固化目标(store + scope + agent 名)。
+#[derive(Clone)]
+pub struct ConsolidationTarget {
+    pub store: Arc<dyn reflect_memory::MemoryStore>,
+    pub scope: reflect_memory::MemoryScope,
+    pub agent: String,
 }
 
 impl std::fmt::Debug for Compactor {
@@ -82,7 +94,26 @@ impl std::fmt::Debug for Compactor {
 impl Compactor {
     /// 使用给定配置和摘要器创建新压缩器。
     pub fn new(cfg: CompactorConfig, summarizer: Arc<dyn Summarizer>) -> Self {
-        Self { cfg, summarizer }
+        Self {
+            cfg,
+            summarizer,
+            consolidation: None,
+        }
+    }
+
+    /// v1.4 D2:挂载记忆固化目标(bootstrap 在配置开启时调用)。
+    pub fn with_memory_consolidation(
+        mut self,
+        store: Arc<dyn reflect_memory::MemoryStore>,
+        scope: reflect_memory::MemoryScope,
+        agent: impl Into<String>,
+    ) -> Self {
+        self.consolidation = Some(ConsolidationTarget {
+            store,
+            scope,
+            agent: agent.into(),
+        });
+        self
     }
 
     /// 执行压缩。返回压缩后的消息列表与记录所选策略的
@@ -197,6 +228,20 @@ impl Compactor {
             };
             match result {
                 Ok(summary) => {
+                    // v1.4 D2:记忆固化 —— LLM 摘要成功后追加提取长期事实
+                    // 并 append 进目标 scope。失败仅 warn(固化是增益,
+                    // 绝不阻断压缩主路径)。
+                    if let Some(cons) = &self.consolidation {
+                        match self.summarizer.extract_memories(&after_sp).await {
+                            Ok(facts) if !facts.is_empty() => {
+                                append_memories(cons, &facts);
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::warn!(?e, "memory consolidation skipped");
+                            }
+                        }
+                    }
                     // summary 作为 System 消息存档历史;但**必须保留最近的
                     // 用户消息(及紧随其后的 assistant/tool 对)**,否则下一次
                     // `model_call` 的 `request.messages` 只剩一条 System 消息
@@ -237,6 +282,34 @@ impl Compactor {
                 after_tokens: after_sp_tokens,
             },
         )
+    }
+}
+
+/// v1.4 D2:把固化的记忆条目 append 进目标 scope —— 读取现有内容,
+/// 追加带时间戳的 `##` 条目后整体保存(FileMemoryStore 的 save 是
+/// 覆盖语义,append 在此层组装)。写入失败仅 warn。
+fn append_memories(target: &ConsolidationTarget, facts: &[String]) {
+    let existing = target
+        .store
+        .load(target.scope, &target.agent)
+        .unwrap_or_default();
+    let mut body = existing;
+    if !body.is_empty() && !body.ends_with('\n') {
+        body.push('\n');
+    }
+    let ts = chrono::Utc::now().format("%Y-%m-%d %H:%M UTC");
+    body.push_str(&format!("\n## Consolidated {ts}\n"));
+    for f in facts {
+        body.push_str(&format!("- {f}\n"));
+    }
+    if let Err(e) = target.store.save(target.scope, &target.agent, &body) {
+        tracing::warn!(?e, "memory consolidation write failed");
+    } else {
+        tracing::info!(
+            count = facts.len(),
+            scope = ?target.scope,
+            "memory consolidation written"
+        );
     }
 }
 
@@ -380,6 +453,70 @@ mod tests {
             evt.strategy,
             ContextCompactedStrategy::LlMSummarize
         ));
+    }
+
+    /// v1.4 D2:固化 —— MockSummarizer 提供 extract_memories,压缩触发
+    /// LLM 摘要后,事实条目被 append 进目标 store。
+    #[tokio::test]
+    async fn consolidation_writes_extracted_facts() {
+        use reflect_memory::{InMemoryStore, MemoryScope};
+
+        // MockSummarizer 增配记忆提取(直接包装默认 Mock + 自定义行为:
+        // 这里内联一个带提取的 stub)。
+        struct WithMemories(Arc<MockSummarizer>);
+        use crate::summarizer::SummarizerError;
+        #[async_trait::async_trait]
+        impl crate::summarizer::Summarizer for WithMemories {
+            async fn summarize_full(&self, m: &[ChatMessage]) -> Result<String, SummarizerError> {
+                self.0.summarize_full(m).await
+            }
+            async fn summarize_recent(
+                &self,
+                m: &[ChatMessage],
+                p: Option<&str>,
+            ) -> Result<String, SummarizerError> {
+                self.0.summarize_recent(m, p).await
+            }
+            async fn extract_memories(
+                &self,
+                _m: &[ChatMessage],
+            ) -> Result<Vec<String>, SummarizerError> {
+                Ok(vec![
+                    "User prefers Rust edition 2024".into(),
+                    "Deploy target is aarch64 linux".into(),
+                ])
+            }
+        }
+
+        let store: std::sync::Arc<dyn reflect_memory::MemoryStore> =
+            Arc::new(InMemoryStore::default());
+        let store_for_read = store.clone();
+        let c = Compactor::new(
+            CompactorConfig {
+                trigger_tokens: 100,
+                keep_recent_microcompact: 5,
+                keep_recent_smart_prune: 5,
+                target_ratio: 0.01,
+                summarize_after: true,
+                ..Default::default()
+            },
+            Arc::new(WithMemories(Arc::new(MockSummarizer {
+                canned: "fake summary".into(),
+                fail: false,
+            }))),
+        )
+        .with_memory_consolidation(store, MemoryScope::Session, "tester");
+        let msgs = huge_message_list();
+        let (_, evt) = c.compact(msgs).await;
+        assert!(matches!(
+            evt.strategy,
+            ContextCompactedStrategy::LlMSummarize
+        ));
+        // 固化条目应写入 Session scope(store 走 InMemory)。
+        let saved = store_for_read.load(MemoryScope::Session, "tester").unwrap();
+        assert!(saved.contains("Consolidated"));
+        assert!(saved.contains("Rust edition 2024"));
+        assert!(saved.contains("aarch64 linux"));
     }
 
     #[tokio::test]

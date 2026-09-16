@@ -141,6 +141,12 @@ pub(crate) fn bootstrap_m4(
     // 利用做静态放行。
     let load_skill = Arc::new(reflect_skills::LoadSkillTool::new(skills_catalog.clone()));
     tools().register_runtime_tool(load_skill);
+    // v1.4 D3:附属资源读取(渐进披露第三级)—— 与 load_skill 同源
+    // catalog,按需读取 skill 目录下的 scripts / references。
+    let read_skill_resource = Arc::new(reflect_skills::ReadSkillResourceTool::new(
+        skills_catalog.clone(),
+    ));
+    tools().register_runtime_tool(read_skill_resource);
 
     // Memory:project + user 走文件,session 走内存。
     // v1.x:接线 `CompositeMemoryStore`(此前孤儿)—— Session scope 走内存
@@ -201,7 +207,34 @@ pub(crate) fn bootstrap_m4(
     // 环境变量;M8 把两者都接入 `CompactorConfig`。
     let compactor_cfg =
         reflect_core::config::compactor_config_from_env_and_toml(toml_trigger_tokens);
-    let compactor = Arc::new(Compactor::new(compactor_cfg, summarizer));
+    // v1.4 D2:记忆固化门控 —— `REFLECT_MEMORY_CONSOLIDATION`:
+    //   未设 / `0` / `false` = 关闭(默认,行为不变);
+    //   `1` / `session` = 写 Session scope(进程内,重启即丢,最安全);
+    //   `project` / `user` = 显式写对应文件 scope(入 VCS / 跨项目,
+    //   需用户显式授权)。
+    // LLM 摘要器在位时才接线(Noop 摘要器提取不出内容,徒劳)。
+    let consolidation_scope = match std::env::var("REFLECT_MEMORY_CONSOLIDATION")
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "1" | "true" | "session" => Some(reflect_memory::MemoryScope::Session),
+        "project" => Some(reflect_memory::MemoryScope::Project),
+        "user" => Some(reflect_memory::MemoryScope::User),
+        _ => None,
+    };
+    let compactor_base = Compactor::new(compactor_cfg, summarizer);
+    let compactor = match consolidation_scope {
+        Some(scope) if registry.next_for(&model, &[]).is_some() => {
+            tracing::info!(?scope, "memory consolidation enabled");
+            Arc::new(compactor_base.with_memory_consolidation(
+                memory.clone(),
+                scope,
+                agent_name.to_string(),
+            ))
+        }
+        _ => Arc::new(compactor_base),
+    };
 
     // Prompt 构建器。
     // v1.1.0 Phase 4:若 `CoordinatorConfig::enabled`,把 coordinator
@@ -315,8 +348,10 @@ pub(crate) fn bootstrap_m5(
     // always-on 可见集,模型请求里就没有子代理工具的 schema,LLM 永远无法
     // 委派(离线 mock provider 无视实际工具列表回放脚本,只能靠运行时
     // 真实 LLM 测试暴露)。
-    let call_tool_names: Vec<String> =
-        configs.iter().map(|sc| format!("call_{}", sc.role)).collect();
+    let call_tool_names: Vec<String> = configs
+        .iter()
+        .map(|sc| format!("call_{}", sc.role))
+        .collect();
 
     // 把合并后的 `SubagentSpecConfig` 映射为 `SubAgentSpec` 并注册为
     // `call_<role>` 工具。`data_transfer` 走默认配置。
@@ -585,8 +620,8 @@ pub(crate) async fn bootstrap_lsp(
 }
 
 /// 读取先前 session 的 JSONL,重建适用于 `AgentThread` 继续运行的初始
-/// 消息列表。丢弃飞行中的工具调用对,返回(可能为空的)消息列表与匹配的
-/// `ThreadId`。
+/// 消息列表(工具调用对忠实重建,语义见 `reflect_core::resume`)。
+/// 返回(可能为空的)消息列表与匹配的 `ThreadId`。
 pub(crate) async fn bootstrap_resume(thread_id_str: &str) -> anyhow::Result<ResumeBundle> {
     let parsed = uuid::Uuid::parse_str(thread_id_str)
         .map_err(|e| anyhow::anyhow!("invalid thread id '{thread_id_str}': {e}"))?;
@@ -594,173 +629,9 @@ pub(crate) async fn bootstrap_resume(thread_id_str: &str) -> anyhow::Result<Resu
     let base = reflect_rollout::path::default_base();
     let records = reflect_rollout::reader::replay(&base, tid).await?;
 
-    let mut messages: Vec<reflect_llm::ChatMessage> = Vec::new();
-    let mut last_summary: Option<String> = None;
-
-    for r in records {
-        match r {
-            reflect_protocol::RolloutRecord::Message {
-                turn_id: _,
-                role,
-                content,
-            } => {
-                match role {
-                    // ── User 消息 ───────────────────────────────────────────
-                    // v1.2 P2:支持两种 content 形态。
-                    //   Value::String —— 旧格式(裸文本,向后兼容)。
-                    //   Value::Array  —— 新格式(protocol ContentBlock 数组,
-                    //                    含 Text/Image,由 submission_loop 落盘)。
-                    reflect_protocol::MessageRole::User => match content {
-                        serde_json::Value::String(s) => {
-                            messages.push(reflect_llm::ChatMessage::User(reflect_llm::UserContent {
-                                blocks: vec![reflect_llm::ContentBlock::Text { text: s }],
-                            }));
-                        }
-                        arr @ serde_json::Value::Array(_) => {
-                            if let Ok(blocks) =
-                                serde_json::from_value::<Vec<reflect_protocol::ContentBlock>>(arr)
-                            {
-                                // protocol → llm 层映射(仅 Text/Image 两变体,
-                                // 与 user_input_items_to_messages 的输入域一致)。
-                                let llm_blocks: Vec<_> = blocks
-                                    .into_iter()
-                                    .filter_map(|b| match b {
-                                        reflect_protocol::ContentBlock::Text { text } => {
-                                            Some(reflect_llm::ContentBlock::Text { text })
-                                        }
-                                        reflect_protocol::ContentBlock::Image { data, mime_type } => {
-                                            Some(reflect_llm::ContentBlock::Image { data, mime_type })
-                                        }
-                                        // user 消息不含 ToolUse/ToolResult/Diff,
-                                        // 出现则忽略(resume 不应注入结构化工具块)。
-                                        _ => None,
-                                    })
-                                    .collect();
-                                if !llm_blocks.is_empty() {
-                                    messages.push(reflect_llm::ChatMessage::User(
-                                        reflect_llm::UserContent { blocks: llm_blocks },
-                                    ));
-                                }
-                            }
-                        }
-                        _ => {}
-                    },
-                    // ── Assistant 消息 ──────────────────────────────────────
-                    // v1.2 P2:支持两种 content 形态。
-                    //   Value::String —— 旧格式(最后一条纯文本,向后兼容)。
-                    //   Value::Array  —— 新格式(protocol ContentBlock 数组,
-                    //                    Text + ToolUse + ToolResult,完整无损)。
-                    //
-                    // 新格式拆分逻辑:Text → AssistantContent.text;ToolUse →
-                    // AssistantContent.tool_calls;ToolResult → 独立 ChatMessage::Tool
-                    // (provider 要求 assistant/tool 角色交替,ToolResult 不能内嵌)。
-                    // 顺序保证:写入侧 latest_content 为 Text→ToolUse→ToolResult,
-                    // resume 时 Assistant(含 ToolUse)先 push、Tool 后 push。
-                    reflect_protocol::MessageRole::Assistant => match content {
-                        serde_json::Value::String(s) => {
-                            messages.push(reflect_llm::ChatMessage::Assistant(
-                                reflect_llm::AssistantContent {
-                                    text: Some(s),
-                                    ..Default::default()
-                                },
-                            ));
-                        }
-                        arr @ serde_json::Value::Array(_) => {
-                            if let Ok(blocks) =
-                                serde_json::from_value::<Vec<reflect_protocol::ContentBlock>>(arr)
-                            {
-                                let mut text_parts: Vec<String> = Vec::new();
-                                let mut tool_calls: Vec<reflect_llm::ToolCallRequest> = Vec::new();
-                                // ToolResult 先收集,循环结束后再 push —— 保证
-                                // Assistant(含 ToolUse)在前、Tool(ToolResult)
-                                // 在后的顺序(provider 要求 assistant→tool 交替)。
-                                let mut tool_results: Vec<(String, reflect_protocol::ToolOutput)> =
-                                    Vec::new();
-                                for b in blocks {
-                                    match b {
-                                        reflect_protocol::ContentBlock::Text { text }
-                                            if !text.is_empty() =>
-                                        {
-                                            text_parts.push(text);
-                                        }
-                                        reflect_protocol::ContentBlock::ToolUse { id, name, args } => {
-                                            tool_calls.push(reflect_llm::ToolCallRequest {
-                                                id,
-                                                name,
-                                                arguments: args,
-                                            });
-                                        }
-                                        reflect_protocol::ContentBlock::ToolResult {
-                                            call_id,
-                                            output,
-                                        } => {
-                                            tool_results.push((call_id, output));
-                                        }
-                                        // Image / Diff 在 assistant 消息里不常见,
-                                        // 出现则忽略(resume 不注入非文本 assistant 块)。
-                                        _ => {}
-                                    }
-                                }
-                                if !text_parts.is_empty() || !tool_calls.is_empty() {
-                                    messages.push(reflect_llm::ChatMessage::Assistant(
-                                        reflect_llm::AssistantContent {
-                                            text: if text_parts.is_empty() {
-                                                None
-                                            } else {
-                                                Some(text_parts.join("\n"))
-                                            },
-                                            tool_calls,
-                                            thinking: None,
-                                        },
-                                    ));
-                                }
-                                // ToolResults 在 Assistant 之后 push(provider
-                                // 要求 assistant→tool 交替)。复用 from_output
-                                // 完成 protocol→llm 层映射(保留 Image 等多模态)。
-                                for (call_id, output) in tool_results {
-                                    messages.push(reflect_llm::ChatMessage::Tool(
-                                        reflect_llm::ToolResult::from_output(call_id, &output),
-                                    ));
-                                }
-                            }
-                        }
-                        _ => {}
-                    },
-                    _ => {}
-                }
-            }
-            reflect_protocol::RolloutRecord::Compaction { summary, .. } => {
-                if !summary.is_empty() {
-                    last_summary = Some(summary);
-                }
-            }
-            reflect_protocol::RolloutRecord::SessionMeta { .. }
-            | reflect_protocol::RolloutRecord::Fork { .. }
-            | reflect_protocol::RolloutRecord::DiscussionTranscript { .. }
-            // v1.2 P0-3:checkpoint / rewind 是工作区 marker,resume 历史
-            // 时丢弃(只回放对话消息)。
-            | reflect_protocol::RolloutRecord::Checkpoint { .. }
-            | reflect_protocol::RolloutRecord::Rewind { .. }
-            // v1.x:TokenCount 是 per-turn 统计快照(累计展示交给 CLI ls/show),
-            // resume 历史时丢弃 —— 对话语义不受 token 计数影响。
-            | reflect_protocol::RolloutRecord::TokenCount { .. }
-            // v1.x Plan mode:PlanRequest / PlanReady / PlanRejected /
-            // PermissionModeChanged 是 plan 生命周期与权限状态轨迹的审计
-            // 记录。resume 回放时只重建 LLM 对话消息,plan 上下文不注入
-            // (避免把已废弃的 plan_id / 旧权限态污染新会话)。
-            | reflect_protocol::RolloutRecord::PlanRequest { .. }
-            | reflect_protocol::RolloutRecord::PlanReady { .. }
-            | reflect_protocol::RolloutRecord::PlanRejected { .. }
-            | reflect_protocol::RolloutRecord::PermissionModeChanged { .. } => {}
-        }
-    }
-
-    // 加一条合成的 System 消息,内容为最近一次 compaction 的摘要,
-    // 让恢复后的 thread 拥有最新上下文。
-    if let Some(s) = last_summary {
-        messages.insert(0, reflect_llm::ChatMessage::System(s));
-    }
-    let _ = last_summary; // used above
+    // v1.x:记录 → ChatMessage 的映射抽到 `reflect_core::resume`
+    // (GUI 等非 exec 宿主复用同一语义;exec 只保留 uuid 解析 + replay 外壳)。
+    let messages = reflect_core::resume::records_to_preload(&records);
     Ok(ResumeBundle {
         thread_id: tid,
         initial_messages: messages,
@@ -829,6 +700,7 @@ mod tests {
                 session_id: tid,
                 model: "m".into(),
                 started_at: chrono::Utc::now(),
+                workspace: None,
             },
             RolloutRecord::message(
                 TurnId::new(),
@@ -880,6 +752,7 @@ mod tests {
                 session_id: tid,
                 model: "m".into(),
                 started_at: chrono::Utc::now(),
+                workspace: None,
             },
             RolloutRecord::message(
                 TurnId::new(),
@@ -939,6 +812,7 @@ mod tests {
                 session_id: tid,
                 model: "m".into(),
                 started_at: chrono::Utc::now(),
+                workspace: None,
             },
             RolloutRecord::message(
                 TurnId::new(),

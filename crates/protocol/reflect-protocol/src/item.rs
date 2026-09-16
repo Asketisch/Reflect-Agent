@@ -66,11 +66,15 @@ impl std::fmt::Display for TurnId {
     }
 }
 
-/// 一段用户输入(文本 / 图片 / 技能激活 / 问题回答)。
+/// 一段用户输入(文本 / 图片 / 技能激活 / 问题回答 / 文件 mention)。
 ///
 /// v1.1.0 P1 #14 新增 `QuestionAnswer` —— 允许用户通过标准 `Op::UserInput`
 /// 流回答 `EventMsg::AskUserQuestion`(与 `Op::AskUserQuestionResponse` 平行,
 /// 适合 TUI 在 question modal 之外用 input bar 自由输入答案的场景)。
+///
+/// v1.x 新增 `File` —— Composer `@` 弹层选中的文件。`path` 为相对当前
+/// workspace 的 POSIX 路径(不携带绝对路径到日志/recorder);真实读取由
+/// LLM `/read` 工具按需触发(避免无谓 IO 与抽象泄露)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum UserInputItem {
@@ -96,6 +100,24 @@ pub enum UserInputItem {
         request_id: String,
         answers: AskUserAnswer,
     },
+    /// v1.x:在工作区中 @ 一个文件路径。投递到 LLM 时由
+    /// `submission_loop::user_input_items_to_messages` 展开为带路径标注的
+    /// 文本块(如 `@src/main.rs` 或 `@src/main.rs:L10-L20`),真实读取由
+    /// `/read` 工具按需触发。
+    File {
+        /// 相对工作区的 POSIX 路径。
+        path: String,
+        /// 可选:被引用行区间(1-indexed,含端点);`None` = 整文件引用。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        range: Option<FileRange>,
+    },
+}
+
+/// `UserInputItem::File` 的可选行区间。1-indexed,含端点。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileRange {
+    pub start_line: u32,
+    pub end_line: u32,
 }
 
 /// 工具运行所需的用户信任级别。
@@ -295,6 +317,20 @@ pub enum ReasoningEffortMirror {
     Low,
     Medium,
     High,
+}
+
+/// v1.4 A2:转向消息优先级的协议层镜像(与实现层
+/// `reflect_core::steering_queue::SteeringPriority` 字段一一对应,由
+/// `submission_loop` 在收到 `Op::Steer` 后桥接)。`Attachment` 为默认值:
+/// 未显式声明优先级的转向按「参考资料」处理,保守不冒充直接指令。
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SteeringPriorityMirror {
+    /// 参考资料:以 `<system-reminder>` 包裹注入,下一安全点生效。
+    #[default]
+    Attachment,
+    /// 立即指示:作为用户中途说话直入上下文,打断当前规划方向。
+    Now,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

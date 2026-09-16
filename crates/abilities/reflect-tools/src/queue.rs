@@ -78,6 +78,9 @@ pub struct ToolExecutionQueue {
     /// 并应用单次调用的覆盖字段(`call_id`、`timeout`)。
     base_ctx: ToolContext,
     semaphore: Arc<Semaphore>,
+    /// v1.5 R1:当前并发上限(随 `set_max_concurrency` 热调;`ThreadSettingsOverrides
+    /// .max_tool_concurrency` 每 turn 可变)。
+    max_concurrency: std::sync::Mutex<usize>,
     /// v1.0.0-rc2:工具输出密钥脱敏器,在 `execute_single` 的 `Ok(Ok(_))`
     /// 分支、`tool.execute(...)` 返回之后、`PostToolUse` 派发之前应用。
     /// `Arc` 包装使克隆廉价 —— bootstrap 阶段在 `reflect-exec` 一次性构造,
@@ -116,6 +119,7 @@ impl ToolExecutionQueue {
             hook_engine,
             base_ctx,
             semaphore: Arc::new(Semaphore::new(max)),
+            max_concurrency: std::sync::Mutex::new(max),
             sanitizer: Arc::new(Sanitizer::with_defaults()),
             session_permission_mode: None,
         }
@@ -153,6 +157,31 @@ impl ToolExecutionQueue {
         self.hook_engine.register(hook);
     }
 
+    /// v1.5 R1:热调并发上限(每 turn 可变)。扩容 `add_permits` 精确;
+    /// 缩容 best-effort —— 只回收当前可用的许可(在途许可归还时自然
+    /// 超出上限,由后续 acquire 的信号量语义兜底)。
+    pub fn set_max_concurrency(&self, n: usize) {
+        let n = n.max(1);
+        let mut cur = self.max_concurrency.lock().unwrap();
+        if *cur == n {
+            return;
+        }
+        if n > *cur {
+            self.semaphore.add_permits(n - *cur);
+        } else {
+            let excess = (*cur - n).min(self.semaphore.available_permits());
+            if excess > 0 {
+                self.semaphore.forget_permits(excess);
+            }
+        }
+        *cur = n;
+    }
+
+    /// v1.5 R1:当前并发上限(测试 / 诊断)。
+    pub fn max_concurrency(&self) -> usize {
+        *self.max_concurrency.lock().unwrap()
+    }
+
     /// 注入会话级 `permission_mode` 共享句柄,让 `execute_single` 每次 clone
     /// ctx 后用句柄当前值覆盖 `ctx.permission_mode`。
     ///
@@ -183,6 +212,25 @@ impl ToolExecutionQueue {
         calls: Vec<ToolCallRequest>,
         gate: Option<Arc<ApprovalGate>>,
     ) -> Vec<ToolResult> {
+        self.execute_all_with_progress(calls, gate, None).await
+    }
+
+    /// v1.4 A3:`execute_all_with_gate` 的流式增量变体。`progress_tx` 为
+    /// `Some` 时,每个调用的 `ToolContext.progress` 被注入一个转发闭包,
+    /// 工具(bash 等)执行期间逐段上报的输出经它转成
+    /// `EventMsg::ToolCallOutputDelta` 事件发出 —— 客户端实时可见长命令
+    /// 进展,无需等 `ToolCallEnd`。`None` 与旧路径完全一致(零开销)。
+    ///
+    /// 转发闭包是同步的(工具在 async 上下文里调用),用 `try_send`
+    /// 非阻塞投递:通道满则丢弃该帧 —— 增量只是预览,最终完整输出以
+    /// `ToolCallEnd` 为准,丢帧不损失语义(与会话级 fan_out 的丢帧策略
+    /// 一致)。
+    pub async fn execute_all_with_progress(
+        &self,
+        calls: Vec<ToolCallRequest>,
+        gate: Option<Arc<ApprovalGate>>,
+        forwarder: Option<Arc<crate::tool::ToolEventForwarder>>,
+    ) -> Vec<ToolResult> {
         // 按并发安全性切分。需保留原始下标,保证最终结果顺序与输入一致。
         let mut indexed_safe: Vec<(usize, ToolCallRequest)> = Vec::new();
         let mut indexed_unsafe: Vec<(usize, ToolCallRequest)> = Vec::new();
@@ -196,15 +244,18 @@ impl ToolExecutionQueue {
         // unsafe:串行,按原始顺序。
         let mut unsafe_results: Vec<(usize, ToolResult)> = Vec::new();
         for (idx, call) in indexed_unsafe {
-            let r = self.execute_single(call, gate.as_ref()).await;
+            let r = self
+                .execute_single(call, gate.as_ref(), forwarder.clone())
+                .await;
             unsafe_results.push((idx, r));
         }
 
         // safe:通过 join_all 并发执行。
         let safe_futures = indexed_safe.into_iter().map(|(idx, call)| {
             let gate_ref = gate.as_ref();
+            let forwarder = forwarder.clone();
             async move {
-                let r = self.execute_single(call, gate_ref).await;
+                let r = self.execute_single(call, gate_ref, forwarder).await;
                 (idx, r)
             }
         });
@@ -223,6 +274,7 @@ impl ToolExecutionQueue {
         &self,
         call: ToolCallRequest,
         gate: Option<&Arc<ApprovalGate>>,
+        forwarder: Option<Arc<crate::tool::ToolEventForwarder>>,
     ) -> ToolResult {
         // 限制并发数。
         let _permit = match self.semaphore.acquire().await {
@@ -255,6 +307,36 @@ impl ToolExecutionQueue {
         // 构造本次调用的上下文。
         let mut ctx = self.base_ctx.clone();
         ctx.call_id = call.id.clone();
+        // v1.4 C1:注入事件转发器(子代理进度等自定义事件)+ 父历史尾部
+        // 快照快照(CallSubAgentTool 按需截取)。
+        if let Some(fwd) = forwarder.as_ref() {
+            ctx.event_forwarder = Some(fwd.clone());
+            ctx.os_sandbox = fwd.os_sandbox;
+            let tail = fwd.parent_tail_json.read().clone();
+            *ctx.parent_tail_json.write() = tail;
+        }
+        // v1.4 A3:注入进度转发闭包(见 `execute_all_with_progress` 文档):
+        // 工具逐段上报的输出 → `ToolCallOutputDelta` 事件。try_send 满则
+        // 丢帧(增量是预览,End 事件才是权威完整输出)。`Event.id` 用
+        // `EVENT_ID_NONE` —— 增量发生在调用中途,不与某个 Submission
+        // 绑定,客户端按 `call_id` 与 Begin/End 关联。
+        if let Some(fwd) = forwarder.as_ref() {
+            let tx = fwd.raw_sender();
+            let call_id = call.id.clone();
+            ctx.progress = Some(crate::tool::ProgressSink::new(move |is_stderr, delta| {
+                let ev = reflect_protocol::Event::new(
+                    reflect_protocol::EVENT_ID_NONE,
+                    reflect_protocol::EventMsg::ToolCallOutputDelta(
+                        reflect_protocol::ToolCallOutputDeltaEvent {
+                            call_id: call_id.clone(),
+                            delta: delta.to_string(),
+                            is_stderr,
+                        },
+                    ),
+                );
+                let _ = tx.try_send(ev);
+            }));
+        }
         // 用会话级共享句柄刷新 `ctx.permission_mode`。`base_ctx.permission_mode`
         // 是构造时的死值(默认 Auto),否则运行时 `/mode plan` 切换后 PreToolUse
         // hook(如 `PlanModeGate`)仍看到旧值,只读 gate 形同虚设。`None`(未

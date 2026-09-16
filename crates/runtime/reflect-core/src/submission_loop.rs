@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use reflect_hooks::{HookEngine, HookEvent};
+use reflect_hooks::{HookContext, HookEngine, HookEvent};
 use reflect_llm::{ChatMessage, SharedModelRegistry, SharedQuotaTracker};
 use reflect_protocol::{
     AbortReason, ContextCompactedEvent, ContextCompactedStrategy, Event, EventMsg, MessageRole,
@@ -32,7 +32,7 @@ use crate::background_tasks::BackgroundTaskQueue;
 use crate::config::{AgentConfig, M4Deps};
 use crate::graph::StateGraph;
 use crate::graph::state::AgentState;
-use crate::steering_queue::SteeringQueue;
+use crate::steering_queue::{SteeringPriority, SteeringQueue};
 
 /// 传递给每个图节点的轻量 clone 的回合级上下文。
 #[derive(Clone)]
@@ -106,6 +106,16 @@ pub struct NodeContext {
     /// 会话级订阅者(TUI 多 tab / 持久化层 / 外接 dashboard)。
     /// `None` 表示无订阅者,跳过 fan_out。
     pub plan_session_subs: Option<Arc<Mutex<Vec<mpsc::Sender<Event>>>>>,
+    /// v1.4 A2:会话级转向队列句柄。`pre_loop` 在每次(含 ToolExec 回环)
+    /// 入口收割其中的 Now / Attachment 消息并注入 `state.messages` 尾部,
+    /// 实现「回合中途边跑边改需求」—— 此前转向只在下一个 turn 边界
+    /// 合并,正在跑的回合无法收到补充指示。`None`(测试 / 旧构造方)=
+    /// 跳过收割,行为不变。
+    pub steering_queue: Option<Arc<Mutex<SteeringQueue>>>,
+    /// v1.5 R1:OS 沙箱覆盖(`ThreadSettingsOverrides.sandbox_policy` 每
+    /// turn 下发)。`tool_exec` 经 ToolEventForwarder 透传给队列 →
+    /// `ToolContext.os_sandbox` → BashTool。`None` = 跟随 env。
+    pub sandbox_override: Option<bool>,
     /// v1.x Plan mode:共享 `AgentConfig`(整个 `cfg.clone()` —— 大部分字段是
     /// `Arc<RwLock<…>>`,clone 廉价)。`tool_exec` 在 dispatch plan
     /// 模式事件时通过它转发给 `spawn_plan_approval_waiter`,让审批
@@ -114,6 +124,7 @@ pub struct NodeContext {
     pub cfg: AgentConfig,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn submission_loop(
     mut sub_rx: mpsc::Receiver<Submission>,
     turn_subs: Arc<Mutex<HashMap<String, mpsc::Sender<Event>>>>,
@@ -122,6 +133,7 @@ pub async fn submission_loop(
     registry: SharedModelRegistry,
     _tools: Arc<ToolRegistry>,
     tools_queue: Arc<ToolExecutionQueue>,
+    background_tasks: Arc<BackgroundTaskQueue>,
 ) {
     // Hook engine 由 `tools_queue` 持有(M6)。此处不构造它;
     // queue 提供 `register_hook` 供调用方扩展。
@@ -149,7 +161,15 @@ pub async fn submission_loop(
     let plan_approval_gate = Arc::new(PlanApprovalGate::new());
     // P2:session 级 steering 队列与后台任务注入队列。
     let steering_queue = Arc::new(Mutex::new(SteeringQueue::new()));
-    let background_tasks = Arc::new(BackgroundTaskQueue::new());
+    // v1.4 A1:在飞回合表 —— turn 级取消令牌的登记处。每个 UserInput
+    // turn spawn 前登记(turn_id → 从会话令牌派生的 child_token),
+    // turn 任务退出时注销。`Op::Interrupt`(不带 child_id)对表中所有
+    // 令牌执行 cancel,让正在 `graph.run()` 里跑的 turn 真正停下来
+    // (模型流 / bash 击杀 / 审批等待都监听该令牌)—— 此前 Interrupt
+    // 只发事件不取消,正在跑的 turn 打不断。会话级 `Op::Shutdown` 走
+    // `cfg.cancel.cancel()`(父令牌),级联所有 child_token,不经本表。
+    let active_turns: Arc<Mutex<HashMap<TurnId, CancellationToken>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     // 是否安装回合级 ApprovalGate。M6 v0:通过 `AgentConfig.approvals`
     // 标志(由 TUI / lib facade 设置)或 `REFLECT_APPROVALS=1` 环境变量
     // 显式开启。headless `reflect-exec` 保持关闭,让既有 JSONL 路径
@@ -173,11 +193,22 @@ pub async fn submission_loop(
         .await;
 
     let mut session_emitted = false;
+    // v1.x:从首条 Submission(通常是首条 UserInput)携带的 `workspace`
+    // 字段捕获。GUI 主动注入当前激活工作区;CLI / 测试场景不指定 →
+    // 后续 `cfg.current_workspace()` 作为回退。捕获后保持不变,即使
+    // `set_workspace` 后续切换工作区也不影响已归属 session。
+    let mut session_workspace: Option<String> = None;
     while let Some(sub) = sub_rx.recv().await {
         let turn_tx = turn_subs
             .lock()
             .remove(&sub.id)
             .unwrap_or_else(|| mpsc::channel(8).0);
+
+        // 首条 Submission(无论 op 类型)就锁定 workspace —— 之后即使
+        // 切 workspace 也不影响该 session 的归属。
+        if session_workspace.is_none() {
+            session_workspace = sub.workspace.clone();
+        }
 
         match sub.op {
             reflect_protocol::Op::UserInput {
@@ -217,6 +248,11 @@ pub async fn submission_loop(
                         cfg.current_model(),
                         provider_of(&cfg.current_model()),
                     );
+                    // v1.x:覆盖 `new()` 内部生成的随机 id,统一为 loop 的
+                    // session_id —— 保证 SessionConfigured.session_id 与
+                    // recorder 文件名 / SessionMeta.session_id 三者一致
+                    // (GUI 按路由 id 预分配 session,依赖此一致性)。
+                    sc.session_id = session_id;
                     // v1.x:填入模型上下文窗口(供 TUI 上下文用量条做分母)。
                     // 级联:config.toml `[context_windows]` per-model 覆盖表(优先)
                     // → 内置 `context_window_for` 静态回退表 → None。
@@ -235,12 +271,19 @@ pub async fn submission_loop(
                     let _ = turn_tx.send(ev.clone()).await;
                     fan_out_session(&session_subs, &ev);
                     // M5:把会话头部持久化到 rollout recorder。
+                    // v1.x:workspace 字段 —— 首条 Submission 携带的
+                    // `workspace` 优先,否则回退到 `cfg.current_workspace()`
+                    // 解析出的字符串(由 `set_workspace` 后台管理)。
                     if let Some(rec) = cfg.m4.as_ref().and_then(|m| m.recorder.clone()) {
+                        let ws = session_workspace
+                            .clone()
+                            .or_else(|| cfg.current_workspace().to_str().map(|s| s.to_string()));
                         let _ = rec
                             .record(RolloutRecord::SessionMeta {
                                 session_id,
                                 model: cfg.current_model(),
                                 started_at: chrono::Utc::now(),
+                                workspace: ws,
                             })
                             .await;
                     }
@@ -256,6 +299,12 @@ pub async fn submission_loop(
                 let cancel = cfg.cancel.clone();
                 let sub_id = sub.id.clone();
                 let turn_id = TurnId::new();
+                // v1.4 A1:派生本回合专属 child_token —— 会话级取消
+                // (`Op::Shutdown`)经父令牌自动级联,而 `Op::Interrupt`
+                // 只取消本回合令牌,粒度从「会话」细化到「回合」。
+                // 登记进在飞回合表供 Interrupt 路由;turn 任务退出时注销。
+                let turn_cancel = cancel.child_token();
+                active_turns.lock().insert(turn_id, turn_cancel.clone());
                 let _ = turn_tx
                     .send(Event::new(
                         sub_id.clone(),
@@ -266,11 +315,106 @@ pub async fn submission_loop(
                     ))
                     .await;
 
+                // v1.5 E1:UserPromptSubmit hook —— prompt 进模型前的最后
+                // 一道用户可编程关卡。Deny 拒绝整个回合(Error + Abort,
+                // prompt 不进模型也不落盘);InjectMessage 以
+                // `<system-reminder>` 附加引导后照常执行。
+                {
+                    let hook_ctx = HookContext {
+                        session_id,
+                        turn_id,
+                        workspace: cfg.current_workspace(),
+                        permission_mode: cfg.permission_mode(),
+                    };
+                    let prompt_text = merged_items
+                        .iter()
+                        .filter_map(|i| match i {
+                            UserInputItem::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let decision = hook_engine
+                        .dispatch(&HookEvent::UserPromptSubmit {
+                            text: prompt_text,
+                            ctx: hook_ctx,
+                        })
+                        .await;
+                    let resolved = decision.resolve();
+                    if let Some(reason) = resolved.deny_reason {
+                        tracing::info!(reason = %reason, "UserPromptSubmit denied; rejecting turn");
+                        // 本回合被 hook 拒绝、不会 spawn 回合任务 → 在飞回合
+                        // 表里的登记条目无人注销,必须在此移除。否则陈旧条目
+                        // 会让后续空闲期 `Op::Interrupt` 误判「有在飞回合」,
+                        // 既 cancel 不到任何东西、也不发空闲分支的 TurnAborted
+                        // 回执,客户端看不到任何响应。
+                        active_turns.lock().remove(&turn_id);
+                        let _ = turn_tx
+                            .send(Event::new(
+                                sub.id.clone(),
+                                EventMsg::Error(reflect_protocol::ErrorEvent {
+                                    message: format!("prompt rejected by hook: {reason}"),
+                                    code: "prompt_rejected".into(),
+                                    details: Some(serde_json::json!({ "reason": reason })),
+                                }),
+                            ))
+                            .await;
+                        let _ = turn_tx
+                            .send(Event::new(
+                                sub.id.clone(),
+                                EventMsg::TurnAborted(TurnAbortedEvent {
+                                    turn_id,
+                                    reason: AbortReason::Error {
+                                        code: "prompt_rejected".into(),
+                                        message: reason,
+                                    },
+                                }),
+                            ))
+                            .await;
+                        continue; // 跳过本回合:不落盘、不进模型。
+                    }
+                    if !resolved.injected.is_empty() {
+                        let guidance = resolved
+                            .injected
+                            .iter()
+                            .map(|m| m.content.clone())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        merged_items.push(UserInputItem::Text {
+                            text: format!("<system-reminder>{guidance}</system-reminder>"),
+                        });
+                    }
+                }
+
                 // 由用户输入构造初始 message 列表。
                 // v1.2 P0:Text + Image items 合并为同一个 UserContent blocks 数组,
                 // 让 provider 收到原子化的图文消息。Text-only 单 item 路径与旧行为
                 // 完全一致;LocalImage / Skill / QuestionAnswer 留待后续接通。
                 let messages = user_input_items_to_messages(merged_items);
+
+                // v1.x 每轮回填:有 recorder 时,每轮 UserInput 前从 rollout
+                // 重建会话历史。放在写本轮 user 记录**之前** replay,历史里
+                // 天然不含本轮输入,不会重复;也让 `Op::Rewind` 截断后下一轮
+                // 自然从更短的 rollout 回放(rewind 分支注释声称的设计落地)。
+                // 这修复了跨轮失忆:引擎除 preload-once 外此前无任何跨轮累积,
+                // 第 2 轮起模型只看到新输入。
+                // 无 recorder 的线程保留旧 preload-once 语义(resume 路径的
+                // recorder 绑定旧 id,replay 已含全部历史,preload 不再叠加,
+                // 避免重复 echo)。
+                let base: Vec<ChatMessage> =
+                    if let Some(rec) = cfg.m4.as_ref().and_then(|m| m.recorder.clone()) {
+                        match rec.replay(session_id).await {
+                            Ok(records) => crate::resume::records_to_preload(&records),
+                            Err(e) => {
+                                // 回填失败不致命:退化为无历史轮(与 recorder
+                                // 缺席同款),本轮对话照常进行。
+                                tracing::warn!("rollout replay 回填失败,退化为无历史轮: {e:#}");
+                                Vec::new()
+                            }
+                        }
+                    } else {
+                        std::mem::take(&mut *cfg.preload_messages.write())
+                    };
 
                 // v1.2 P2:持久化本轮 user 输入(此前从未落盘)。
                 // submission_loop 原先只在 turn 结束后写 assistant 的最后一条
@@ -314,20 +458,14 @@ pub async fn submission_loop(
                     }
                 }
 
-                // v1.x resume:`--resume` 续作时,把回放出的历史消息前置到
-                // 当前用户输入之前。`pre_loop` 会在本 turn 首次进入时把
-                // `ctx.messages` 整体 seed 进 `state.messages`,因此历史 +
-                // 新输入会一起进入会话上下文,恢复的 agent 仍记得之前的对话。
-                //
-                // 关键:**只消费一次**。take 出 preload 历史后立即清空槽位,
-                // 避免后续跨提交 turn 再次前置 → 历史重复 echo
-                // (`[old, resume, reply, old, new]`)。普通路径槽位为空,take
-                // 出空 Vec,此分支为 no-op,行为不变。
-                let preload = std::mem::take(&mut *cfg.preload_messages.write());
-                let messages = if preload.is_empty() {
+                // v1.x resume / 每轮回填:把上面算出的 base 历史(recorder
+                // replay 或 preload-once)前置到当前用户输入之前。`pre_loop`
+                // 会在本 turn 首次进入时把 `ctx.messages` 整体 seed 进
+                // `state.messages`,因此历史 + 新输入会一起进入会话上下文。
+                let messages = if base.is_empty() {
                     messages
                 } else {
-                    let mut v = preload;
+                    let mut v = base;
                     v.extend(messages);
                     v
                 };
@@ -341,6 +479,35 @@ pub async fn submission_loop(
                     .and_then(|m| m.active_agent_def.max_turns)
                     .map_or(global_max, |n| n.min(global_max));
 
+                // v1.5 R1:ThreadSettingsOverrides 诚实化 —— 三个死字段
+                // 全部消费:
+                // - max_tool_concurrency:热调工具执行队列并发上限(每 turn 可变);
+                // - approval_policy:Prompt/Deny 强制本回合启用审批门
+                //   (Deny 额外置 deny-all,需审批工具一律拒);Auto 跟随会话;
+                // - sandbox_policy:OS 沙箱覆盖(OsSandbox=强制开,
+                //   WorkspaceOnly/FullAccess=关 OS 层,文件工具路径检查不受影响)。
+                if let Some(mc) = thread_settings.max_tool_concurrency {
+                    tools_queue.set_max_concurrency(mc);
+                    tracing::info!(
+                        max_concurrency = mc,
+                        "thread_settings: tool concurrency adjusted"
+                    );
+                }
+                let turn_approval_enabled = match thread_settings.approval_policy {
+                    Some(reflect_protocol::ApprovalPolicy::Prompt) => {
+                        tracing::info!("thread_settings: approval forced on (prompt)");
+                        true
+                    }
+                    Some(reflect_protocol::ApprovalPolicy::Deny) => {
+                        tracing::info!("thread_settings: approval deny-all for this turn");
+                        true
+                    }
+                    Some(reflect_protocol::ApprovalPolicy::Auto) | None => approval_enabled,
+                };
+                let sandbox_override = thread_settings
+                    .sandbox_policy
+                    .map(|p| matches!(p, reflect_protocol::SandboxPolicy::OsSandbox));
+
                 let ctx = NodeContext {
                     turn_id,
                     session_id,
@@ -350,7 +517,11 @@ pub async fn submission_loop(
                     hook_engine: hook_engine.clone(),
                     tools_queue: tools_queue.clone(),
                     sub_id: sub_id.clone(),
-                    cancel: cancel.clone(),
+                    // v1.4 A1:回合级令牌(非会话级)—— `Op::Interrupt`
+                    // 经在飞回合表 cancel 它;`Op::Shutdown` 经父令牌级联。
+                    // 对 graph 各节点而言与旧会话令牌语义兼容(select! /
+                    // kill_on_cancel 不变)。
+                    cancel: turn_cancel.clone(),
                     event_tx: turn_tx.clone(),
                     messages,
                     max_iterations,
@@ -377,11 +548,15 @@ pub async fn submission_loop(
                     // 通道把工具结果转发回主循环)。
                     plan_approval_gate: Some(plan_approval_gate.clone()),
                     plan_session_subs: Some(session_subs.clone()),
+                    // v1.4 A2:共享会话级转向队列,pre_loop 每次入口收割。
+                    steering_queue: Some(steering_queue.clone()),
+                    // v1.5 R1:每回合沙箱覆盖。
+                    sandbox_override,
                     // 同上:把 `cfg.clone()` 传下去,让
                     // `spawn_plan_approval_waiter` 能在 user approve
                     // 后翻转会话级 `permission_mode` 槽。
                     cfg: cfg.clone(),
-                    approval_gate: approval_enabled.then(|| {
+                    approval_gate: turn_approval_enabled.then(|| {
                         let g = ApprovalGate::with_state(
                             turn_tx.clone(),
                             sub_id.clone(),
@@ -398,6 +573,13 @@ pub async fn submission_loop(
                                 cfg.yolo_classifier.clone(),
                                 Some(cfg.yolo_threshold),
                             );
+                        }
+                        // v1.5 R1:approval_policy = deny → 回合级 deny-all。
+                        if matches!(
+                            thread_settings.approval_policy,
+                            Some(reflect_protocol::ApprovalPolicy::Deny)
+                        ) {
+                            g.set_deny_all(true);
                         }
                         Arc::new(g)
                     }),
@@ -419,6 +601,16 @@ pub async fn submission_loop(
                 let cfg_goal_clone = cfg.goal.clone();
                 let steering_queue_clone = steering_queue.clone();
                 let cfg_telemetry_clone = cfg.telemetry.clone();
+                // v1.4 A1:取消判定三件套 —— 回合令牌(被 Interrupt cancel)、
+                // 会话令牌(被 Shutdown cancel,级联回合令牌)、在飞回合表
+                // (终态注销)。区分两者才能只对「用户中断」发 TurnAborted,
+                // Shutdown 已有自己的 ShutdownComplete 事件。
+                // v1.4 C1:本线程自己的子代理状态槽(若本线程是子代理)。
+                // 回合结束后写迭代数与 token 用量,父会话查询即时可见。
+                let status_slot = cfg.subagent_status.clone();
+                let turn_cancel_clone = turn_cancel.clone();
+                let session_cancel_clone = cfg.cancel.clone();
+                let active_turns_clone = active_turns.clone();
                 // v1.2 P1:turn 级 telemetry span(RAII guard,drop 时自动写
                 // `turn.completed` + duration)。guard 在 spawned task 内创建,
                 // 这样 drop 时机 = turn 真正完成(而非 spawn 时刻)。
@@ -496,6 +688,12 @@ pub async fn submission_loop(
                         // v1.2 P1:goal 自校验需本轮 token 数 —— 在
                         // `final_state.total_usage` 被 move 进 TurnComplete 前捕获。
                         let goal_turn_tokens = final_state.total_usage.total_tokens as u64;
+                        // v1.4 C1:子代理自报告 —— 迭代数 + token 用量
+                        // (在 total_usage 被 move 进 TurnComplete 之前)。
+                        if let Some(slot) = &status_slot {
+                            slot.set_iteration(final_state.iteration);
+                            slot.add_tokens(goal_turn_tokens);
+                        }
                         let _ = turn_tx_clone
                             .send(Event::new(
                                 sub_id_clone,
@@ -586,7 +784,43 @@ pub async fn submission_loop(
                                 }
                             }
                         }
+                    } else if turn_cancel_clone.is_cancelled()
+                        && !session_cancel_clone.is_cancelled()
+                    {
+                        // v1.4 A1:回合被 `Op::Interrupt` 取消(非 Shutdown
+                        // 级联)—— 用**真实** turn_id 发中止事件。旧实现由
+                        // Interrupt 分支现编一个 `TurnId::new()`,客户端无法
+                        // 把事件对应到实际在飞的回合。
+                        let _ = turn_tx_clone
+                            .send(Event::new(
+                                sub_id_clone,
+                                EventMsg::TurnAborted(TurnAbortedEvent {
+                                    turn_id,
+                                    reason: AbortReason::UserInterrupt,
+                                }),
+                            ))
+                            .await;
+                        // 中断可能留下半截助手消息:把已产出的内容完整落盘
+                        //(`latest_content` 可含孤儿 tool_use —— resume 端
+                        // `records_to_preload` 会过滤无 result 的在飞工具对,
+                        // 保证恢复不因半对消息报错),复用正常路径的格式。
+                        if let Some(rec) = recorder {
+                            if !final_state.latest_content.is_empty() {
+                                let _ = rec
+                                    .record(RolloutRecord::message(
+                                        turn_id,
+                                        MessageRole::Assistant,
+                                        serde_json::to_value(&final_state.latest_content)
+                                            .unwrap_or(serde_json::Value::Null),
+                                    ))
+                                    .await;
+                            }
+                        }
                     }
+                    // v1.4 A1:turn 已终态(完成 / 取消 / 异常),统一注销
+                    // 在飞回合表条目。陈旧条目(极端时序下 Interrupt 先到)
+                    // 的 remove 是幂等 no-op。
+                    active_turns_clone.lock().remove(&turn_id);
                 });
             }
             reflect_protocol::Op::Compact => {
@@ -613,7 +847,7 @@ pub async fn submission_loop(
                     ))
                     .await;
             }
-            reflect_protocol::Op::Interrupt { .. } => {
+            reflect_protocol::Op::Interrupt { child_id } => {
                 // v1.x Plan mode:把 abort reason 同步写到 `AgentConfig` 上,
                 // 让下一次 turn 的 `pre_loop` 一次性消费并注入 ephemeral
                 // system block("## Previous Turn"),提醒 LLM 上轮被中断、
@@ -621,15 +855,60 @@ pub async fn submission_loop(
                 // 是 Plan 时这条 hint 才有意义 —— 但写入总是无副作用,让
                 // `pre_loop` 自行决定是否消费(避免在这里再读一次锁)。
                 cfg.set_last_abort_reason(AbortReason::UserInterrupt);
-                let _ = turn_tx
-                    .send(Event::new(
-                        sub.id,
-                        EventMsg::TurnAborted(TurnAbortedEvent {
-                            turn_id: TurnId::new(),
-                            reason: AbortReason::UserInterrupt,
-                        }),
-                    ))
-                    .await;
+                if let Some(child) = child_id {
+                    // v1.4 A1(原 B3 预留):定向中断单个子代理。查子代理
+                    // 运行注册表并 cancel 对应令牌;被中断子代理的
+                    // `TurnAborted`(带其真实 turn_id)由它自己的 spawn 任务
+                    // 在取消路径 emit,这里不重复发。父会话不受影响。
+                    let hit = cfg
+                        .subagent_runtime
+                        .as_ref()
+                        .is_some_and(|reg| reg.cancel_child(&child));
+                    if hit {
+                        tracing::info!(child_id = %child, "subagent interrupt dispatched");
+                    } else {
+                        tracing::warn!(
+                            child_id = %child,
+                            "interrupt targeted unknown/finished subagent; no-op"
+                        );
+                    }
+                } else {
+                    // v1.4 A1:真中断 —— 对所有在飞回合的 turn 级令牌执行
+                    // cancel。graph 各节点(模型流 select! / bash
+                    // kill_on_cancel / 审批等待)收到取消信号后尽快收尾,
+                    // 回合任务在 `!completed_normally` 分支用**真实 turn_id**
+                    // emit `TurnAborted`。此前实现只发一条现编 turn_id 的
+                    // 事件、正在跑的 turn 照常跑完,中断名存实亡。
+                    let cancelled: Vec<TurnId> = {
+                        let mut turns = active_turns.lock();
+                        turns
+                            .drain()
+                            .map(|(id, tok)| {
+                                tok.cancel();
+                                id
+                            })
+                            .collect()
+                    };
+                    if cancelled.is_empty() {
+                        // 无在飞回合(空闲期按 Esc):保持旧回执行为 ——
+                        // 发一条事件让客户端知道请求被接受;此时没有真实
+                        // turn_id 可引用,沿用新生成 id 的历史约定。
+                        let _ = turn_tx
+                            .send(Event::new(
+                                sub.id,
+                                EventMsg::TurnAborted(TurnAbortedEvent {
+                                    turn_id: TurnId::new(),
+                                    reason: AbortReason::UserInterrupt,
+                                }),
+                            ))
+                            .await;
+                    } else {
+                        tracing::info!(
+                            turns = ?cancelled,
+                            "interrupt cancelled in-flight turn(s)"
+                        );
+                    }
+                }
             }
             // 批次十九 → 批次二十二:`Op::Rewind` —— 对话回退。
             // 现在真正做持久化截断:调 `RolloutRecorder::truncate_after` 删除
@@ -670,6 +949,43 @@ pub async fn submission_loop(
                 let _ = turn_tx.send(ev.clone()).await;
                 fan_out_session(&session_subs, &ev);
                 break;
+            }
+            // v1.4 A2:回合中途转向入口。客户端(界面 / SDK)对正在跑的
+            // 回合投喂补充指示:push 进会话转向队列,正在跑的 turn 会在
+            // 下一次 pre_loop(ToolExec 回环入口)收割注入;若无在飞
+            // turn,消息留队,下一个 UserInput turn 边界合并(既有行为)。
+            reflect_protocol::Op::Steer { priority, items } => {
+                let p = match priority {
+                    reflect_protocol::SteeringPriorityMirror::Now => SteeringPriority::Now,
+                    reflect_protocol::SteeringPriorityMirror::Attachment => {
+                        SteeringPriority::Attachment
+                    }
+                };
+                tracing::info!(
+                    priority = ?p,
+                    items = items.len(),
+                    "steer: mid-turn steering queued"
+                );
+                steering_queue.lock().push(p, items);
+            }
+            // v1.4 C1:子代理状态查询 —— 从状态中心取快照(全 clone,不
+            // 阻塞任何子代理),SubagentStatus 事件经 per-turn 通道 + 会话
+            // 扇出双路送达。`child_id = None` 列出全部,`Some` 定向。
+            reflect_protocol::Op::QuerySubagents { child_id } => {
+                let children = cfg
+                    .subagent_runtime
+                    .as_ref()
+                    .map(|reg| reg.snapshot(child_id.as_deref()))
+                    .unwrap_or_default();
+                if child_id.is_some() && children.is_empty() {
+                    tracing::debug!(?child_id, "query_subagents: no matching child");
+                }
+                let ev = Event::new(
+                    sub.id.clone(),
+                    EventMsg::SubagentStatus(reflect_protocol::SubagentStatusEvent { children }),
+                );
+                let _ = turn_tx.send(ev.clone()).await;
+                fan_out_session(&session_subs, &ev);
             }
             reflect_protocol::Op::ToolApproval { id, decision }
             | reflect_protocol::Op::HookApproval { id, decision } => {
@@ -1473,9 +1789,14 @@ fn persist_plan_markdown(
 
 /// v1.2 P0:把一批 `UserInputItem` 转成原子化的用户消息。
 ///
-/// 所有 Text / Image item 合并进同一个 `UserContent.blocks` 数组,保证 provider
-/// 收到图文混排而非多个割裂的连续 user role。Text-only 单 item 与旧实现完全
-/// 一致。尚未接通的 LocalImage / Skill / QuestionAnswer 暂时跳过。
+/// 所有 Text / Image / File item 合并进同一个 `UserContent.blocks` 数组,
+/// 保证 provider 收到图文混排而非多个割裂的连续 user role。Text-only 单
+/// item 与旧实现完全一致。尚未接通的 LocalImage / Skill / QuestionAnswer
+/// 暂时跳过。
+///
+/// v1.x 新增 `File` 分支 —— 把文件 mention 展开为带路径标注的文本块
+/// (`@<path>` 或 `@<path>:L<start>-L<end>`)。真实读取由 LLM `/read`
+/// 工具按需触发(避免无谓 IO 与抽象泄露)。
 fn user_input_items_to_messages(items: Vec<UserInputItem>) -> Vec<ChatMessage> {
     let blocks: Vec<reflect_llm::ContentBlock> = items
         .into_iter()
@@ -1483,6 +1804,13 @@ fn user_input_items_to_messages(items: Vec<UserInputItem>) -> Vec<ChatMessage> {
             UserInputItem::Text { text } => Some(reflect_llm::ContentBlock::Text { text }),
             UserInputItem::Image { data, mime_type } => {
                 Some(reflect_llm::ContentBlock::Image { data, mime_type })
+            }
+            UserInputItem::File { path, range } => {
+                let annotation = match range {
+                    Some(r) => format!("@{}:L{}-L{}", path, r.start_line, r.end_line),
+                    None => format!("@{}", path),
+                };
+                Some(reflect_llm::ContentBlock::Text { text: annotation })
             }
             UserInputItem::LocalImage { .. }
             | UserInputItem::Skill { .. }

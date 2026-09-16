@@ -8,6 +8,11 @@ use crate::op::Op;
 /// Submission 表示客户端向 core 发起的一条命令。
 ///
 /// `id` 用于把随之产生的事件(均携带同一 `id`)关联回原始 Submission。
+///
+/// v1.x 新增顶层 `workspace` 可选字段 —— Tauri GUI 在创建/恢复会话时把
+/// 当前激活工作区注入,后端 `submission_loop` 收到首条 UserInput 时取该
+/// 值(或回退 `cfg.current_workspace()`)写入 `RolloutRecord::SessionMeta.workspace`。
+/// 不在 `Op::UserInput` 加字段是为了避免破坏既有 `match` 派生。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Submission {
     pub id: String,
@@ -18,6 +23,9 @@ pub struct Submission {
     /// W3C trace 上下文,用于跨进程链路追踪。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace: Option<W3cTraceContext>,
+    /// v1.x:会话归属工作区(绝对路径字符串)。`None` = 不指定(CLI / 测试场景)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
 }
 
 impl Submission {
@@ -28,6 +36,7 @@ impl Submission {
             op: crate::op::Op::user_input_text(text),
             client_user_message_id: None,
             trace: None,
+            workspace: None,
         }
     }
 
@@ -38,6 +47,18 @@ impl Submission {
             op,
             client_user_message_id: None,
             trace: None,
+            workspace: None,
+        }
+    }
+
+    /// v1.x:便捷构造器 —— UserInput + workspace 注入。
+    pub fn user_input_in_workspace(text: impl Into<String>, workspace: impl Into<String>) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            op: crate::op::Op::user_input_text(text),
+            client_user_message_id: None,
+            trace: None,
+            workspace: Some(workspace.into()),
         }
     }
 }

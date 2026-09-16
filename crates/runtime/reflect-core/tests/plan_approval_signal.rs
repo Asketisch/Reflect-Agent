@@ -107,7 +107,9 @@ impl Tool for ExitPlanModeStub {
     }
     async fn execute(&self, _ctx: ToolContext, _args: Value) -> Result<ToolOutput, ToolError> {
         Ok(ToolOutput {
-            content: vec![reflect_protocol::ContentBlock::text("Plan ready (12 chars)")],
+            content: vec![reflect_protocol::ContentBlock::text(
+                "Plan ready (12 chars)",
+            )],
             is_error: false,
             metadata: Value::Null,
             elapsed_ms: 0,
@@ -124,6 +126,7 @@ fn user_sub(id: &str, text: &str) -> Submission {
             items: vec![UserInputItem::Text { text: text.into() }],
             thread_settings: Default::default(),
         },
+        workspace: None,
         client_user_message_id: None,
         trace: None,
     }
@@ -136,6 +139,7 @@ fn plan_approval_sub(submission_id: &str, plan_id: &str, choice: PlanApprovalCho
             id: plan_id.into(),
             choice,
         },
+        workspace: None,
         client_user_message_id: None,
         trace: None,
     }
@@ -301,7 +305,8 @@ async fn plan_approval_revise_rewrites_then_approval_continues() {
                 let t = thread.clone();
                 let pid = ready.plan_id.to_string();
                 tokio::spawn(async move {
-                    t.submit(plan_approval_sub("sub-approve", &pid, choice)).await;
+                    t.submit(plan_approval_sub("sub-approve", &pid, choice))
+                        .await;
                 });
             }
             EventMsg::TurnComplete(_) => break,

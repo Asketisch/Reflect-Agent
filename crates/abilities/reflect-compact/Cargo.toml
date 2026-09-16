@@ -5,15 +5,24 @@ edition.workspace = true
 license.workspace = true
 description = "Reflect: context compaction strategies (microcompact / smart_prune / summarize / hybrid)"
 
+[features]
+default = []
+# v1.4 D1:真实分词器(tiktoken-rs)。默认关闭 —— 词表内嵌数据会
+# 增加编译产物体积;需要精确 token 计数的构建显式开启。
+tokenizer = ["dep:tiktoken-rs"]
+
 [dependencies]
+tiktoken-rs = { workspace = true, optional = true }
 reflect-protocol = { workspace = true }
 reflect-llm      = { workspace = true }
+reflect-memory   = { workspace = true }
 reflect-telemetry = { workspace = true }
 serde              = { workspace = true }
 serde_json         = { workspace = true }
 thiserror          = { workspace = true }
 async-trait        = { workspace = true }
 tokio              = { workspace = true }
+chrono            = { workspace = true }
 tokio-util         = { workspace = true }
 futures            = { workspace = true }
 tracing            = { workspace = true }

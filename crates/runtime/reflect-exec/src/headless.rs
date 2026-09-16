@@ -127,16 +127,21 @@ pub async fn bootstrap_common(args: &HeadlessArgs) -> anyhow::Result<HeadlessCom
     initial_cfg
         .apply_to_registry(&registry)
         .map_err(|e| anyhow::anyhow!("failed to build provider from config: {e}"))?;
-    let provider = initial_cfg
-        .active_provider()
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no provider configured: set [active] in {} or OPENAI_API_KEY/ANTHROPIC_API_KEY env, or REFLECT_MODEL=mock",
-                config_path.display()
-            )
-        })?
-        .to_string();
-    let model = format!("{provider}/{}", initial_cfg.model_for(&provider));
+    // 无 provider / 无显式 model 都要 fail-fast 且报因可读 —— 不再回落
+    // 内置默认模型名(打向第三方兼容端点只会得到难诊断的远端错误)。
+    if initial_cfg.active_provider().is_none() {
+        anyhow::bail!(
+            "no provider configured: set [active] in {} or OPENAI_API_KEY/ANTHROPIC_API_KEY env, or REFLECT_MODEL=mock",
+            config_path.display()
+        );
+    }
+    let model = initial_cfg.resolved_model_spec().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no model configured for the active provider: set [<provider>].model \
+             or a [[<provider>.credentials]].model entry in {} (or REFLECT_MODEL env)",
+            config_path.display()
+        )
+    })?;
 
     let watcher = ConfigWatcher::spawn(config_path.clone(), initial_cfg.clone()).map_err(|e| {
         anyhow::anyhow!(
@@ -231,6 +236,20 @@ pub async fn bootstrap_common(args: &HeadlessArgs) -> anyhow::Result<HeadlessCom
     );
     reflect_task::register_task_tools(&tools, task_manager.clone());
     bootstrap::TOOLS.with(|t| *t.borrow_mut() = Some(tools.clone()));
+
+    // v1.4 D1:tokenizer feature 开启时注册 tiktoken 全局估算器
+    // (set-once;失败仅 warn,回退启发式,不阻塞启动)。
+    #[cfg(feature = "tokenizer")]
+    match reflect_compact::global_tiktoken_estimator() {
+        Ok(est) => {
+            if reflect_compact::set_global_estimator(est) {
+                tracing::info!("tiktoken estimator registered (tokenizer feature)");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "tiktoken estimator init failed; using heuristic");
+        }
+    }
 
     // 3. Ctrl-C 取消令牌 + workspace 解析。
     let cancel = CancellationToken::new();
@@ -327,6 +346,13 @@ pub async fn bootstrap_normal(
         &initial_cfg,
     );
     factory.set_telemetry(telemetry_sink.clone());
+    // v1.4 A1:子代理运行注册表 + 主会话令牌注入 —— 同一 `Arc` 双侧共享
+    // (主 cfg 的 `Op::Interrupt { child_id }` 路由侧 / 工厂的 spawn 登记
+    // 侧);同时把主会话 Ctrl-C 令牌覆盖进 factory,让子代理的 child_token
+    // 挂在会话令牌之下,Shutdown / Ctrl-C 能级联取消在飞子代理。
+    let subagent_runtime = Arc::new(reflect_core::SubagentRuntimeRegistry::new());
+    factory.set_runtime_registry(subagent_runtime.clone());
+    factory.set_cancel(cancel.clone());
 
     // Coordinator 模式整合:team spec 注入 factory + 统一开关。
     let coord_enabled = CoordinatorConfig::from_env_or_config(
@@ -353,6 +379,10 @@ pub async fn bootstrap_normal(
     let max_iterations =
         reflect_core::config::max_iterations_from_env(initial_cfg.active.max_iterations);
     let quota_tracker = build_quota_tracker(&initial_cfg);
+    // v1.5 R4:恢复上次的配额窗口(重启不静默重置;文件缺失 no-op)。
+    if let Some(t) = &quota_tracker {
+        t.load_state();
+    }
     // web_search 工具级 env:`[web_search].api_key` → BRAVE_API_KEY。
     let mut tool_env = std::collections::HashMap::new();
     if let Some(ws) = &initial_cfg.web_search {
@@ -371,6 +401,7 @@ pub async fn bootstrap_normal(
         .with_tool_env(tool_env)
         .with_telemetry(telemetry_sink.clone())
         .with_cancel(cancel.clone())
+        .with_subagent_runtime(subagent_runtime.clone())
         .with_context_window_overrides(
             initial_cfg
                 .context_windows

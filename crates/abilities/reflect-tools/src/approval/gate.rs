@@ -24,6 +24,10 @@ use super::{
 /// 单 turn 的审批门。由 `submission_loop` 持有,交给
 /// `ToolExecutionQueue::execute_all_with_gate` 使用。
 pub struct ApprovalGate {
+    /// v1.5 R1:`ThreadSettingsOverrides.approval_policy = deny` 时置位 ——
+    /// 本回合所有需要审批的工具一律直接拒绝(不弹 modal、不问 resolver)。
+    /// gate 为回合级实例,天然限定作用域。
+    pub(super) deny_all: std::sync::atomic::AtomicBool,
     pub(super) event_tx: mpsc::Sender<Event>,
     pub(super) sub_id: String,
     pub(super) waiters: ApprovalWaiters,
@@ -140,6 +144,7 @@ impl ApprovalGate {
         session_permission_mode: Option<Arc<parking_lot::RwLock<PermissionMode>>>,
     ) -> Self {
         Self {
+            deny_all: std::sync::atomic::AtomicBool::new(false),
             event_tx,
             sub_id: sub_id.into(),
             waiters,
@@ -153,6 +158,14 @@ impl ApprovalGate {
             yolo_classifier: Mutex::new(None),
             yolo_threshold: Mutex::new(0.8),
         }
+    }
+
+    /// v1.5 R1:置位/解除回合级 deny-all。置位后,本回合所有走 gate 的
+    /// 审批(`ask_tool` / `ask_hook`)一律直接 `Deny`,不弹 modal。
+    /// 由 `submission_loop` 在 `approval_policy = deny` 时调用 —— gate
+    /// 为回合级实例,作用域天然限定单回合。
+    pub fn set_deny_all(&self, on: bool) {
+        self.deny_all.store(on, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// P2 `yolo-classifier`:注入 Auto 模式启发式审批分类器 + 可选置信度阈值。
@@ -235,6 +248,12 @@ impl ApprovalGate {
         risk: RiskLevel,
         cancel: &CancellationToken,
     ) -> ReviewDecision {
+        // 0. v1.5 R1:回合级 deny-all(`approval_policy = deny`)最优先。
+        if self.deny_all.load(std::sync::atomic::Ordering::SeqCst) {
+            return ReviewDecision::Deny {
+                reason: "approval_policy = deny(本回合拒绝所有需审批的工具)".into(),
+            };
+        }
         // 1. S5a:resolver 短路。Ask / NoMatch / None → fall through。
         // 带 bash 命令上下文调 `resolve_with_context`,让 `shell_pattern`
         // 规则(如 `Bash: git *`)能命中 —— 否则该类规则静默失效。
@@ -358,6 +377,12 @@ impl ApprovalGate {
         risk: RiskLevel,
         cancel: &CancellationToken,
     ) -> ReviewDecision {
+        // v1.5 R1:deny-all 同样覆盖 hook 级审批。
+        if self.deny_all.load(std::sync::atomic::Ordering::SeqCst) {
+            return ReviewDecision::Deny {
+                reason: "approval_policy = deny(本回合拒绝所有需审批的工具)".into(),
+            };
+        }
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel::<ReviewDecision>();
         self.waiters.lock().insert(request_id.clone(), tx);

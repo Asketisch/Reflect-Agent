@@ -112,6 +112,145 @@ pub struct ToolContext {
     /// 写入(共享句柄,热重载切 model 后刷新)。`get_context_remaining`
     /// 用它做「已用 / 总量」的分母。`None` = 未知 model。
     pub context_window_size: Arc<RwLock<Option<u32>>>,
+    /// v1.4 A3:工具输出流式增量回调。`None`(默认)= 工具不上报增量
+    /// (零开销,所有既有工具行为不变);`Some` 时长时间运行的工具
+    /// (bash 等)在执行期间逐段上报输出,由 `ToolExecutionQueue` 转发为
+    /// `EventMsg::ToolCallOutputDelta`。回调参数:`(is_stderr, delta)`。
+    pub progress: Option<ProgressSink>,
+    /// v1.4 C1:工具事件转发器(subagent 编排用)。`None`(默认)= 无
+    /// 转发(零开销);`Some` 时由 `tool_exec` 注入,`CallSubAgentTool`
+    /// 把子代理中间事件包装为 `SubagentProgress` 事件经它发出。
+    pub event_forwarder: Option<Arc<ToolEventForwarder>>,
+    /// v1.5 R1:OS 沙箱覆盖(`ThreadSettingsOverrides.sandbox_policy` 每
+    /// turn 下发)。`None` = 跟随 env(`OsSandbox::from_env`,默认);
+    /// `Some(true)` = 强制启用 OS 沙箱;`Some(false)` = 本 turn 关闭 OS
+    /// 层(路径沙箱仍由各文件工具自身的 workspace 校验承担)。
+    pub os_sandbox: Option<bool>,
+    /// v1.5 R2:后台任务生成器(宿主实现)。`None`(默认)= 工具不支持
+    /// 后台执行;`Some` 时 bash 的 `run_in_background` 参数可用。
+    pub background: Option<Arc<dyn TaskSpawner>>,
+    /// v1.5 E2:人工输入持久化存储。`None`(默认)= `request_human_input`
+    /// 维持旧行为(仅 TUI gate 等待);`Some` 时支持挂起文件 + 外部进程
+    /// 应答文件(跨进程/跨重启闭环)。
+    pub human_input: Option<Arc<crate::human_input::HumanInputStore>>,
+    /// v1.4 C1:父会话历史尾部快照(最近若干条,由 `tool_exec` 注入)。
+    /// 仅子代理编排工具(`CallSubAgentTool`)读取:按
+    /// `DataTransferConfig.pass_context_messages` / 调用参数截取后传给
+    /// `factory.spawn` 的 `parent_tail`。其余工具忽略。元素是协议层
+    /// `ChatMessage` 的 JSON 形态,避免 reflect-tools 反向依赖 llm 层。
+    pub parent_tail_json: Arc<RwLock<Vec<serde_json::Value>>>,
+}
+
+/// v1.4 C1:工具 → 引擎事件通道的转发器。`tool_exec` 在每批执行前构造
+/// (持有 sub_id、event_tx 与父历史尾部快照),`execute_single` 注入每个
+/// 调用的 `ToolContext`;工具用它发出自定义协议事件(子代理进度等)。
+/// `try_send` 满则丢帧 —— 事件是观测性增益,不阻塞工具执行。
+#[derive(Clone)]
+pub struct ToolEventForwarder {
+    /// 事件归属的 submission id(`Event.id`)。
+    pub sub_id: String,
+    tx: tokio::sync::mpsc::Sender<reflect_protocol::Event>,
+    /// 父会话历史尾部快照(`state.messages` 最近若干条的 JSON 形态)。
+    /// `CallSubAgentTool` 经 `ctx.parent_tail_json` 读取。
+    pub parent_tail_json: Arc<RwLock<Vec<serde_json::Value>>>,
+    /// v1.5 R1:本批执行生效的 OS 沙箱覆盖(每 turn 可变)。
+    pub os_sandbox: Option<bool>,
+}
+
+impl std::fmt::Debug for ToolEventForwarder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolEventForwarder")
+            .field("sub_id", &self.sub_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ToolEventForwarder {
+    pub fn new(
+        sub_id: impl Into<String>,
+        tx: tokio::sync::mpsc::Sender<reflect_protocol::Event>,
+        parent_tail_json: Vec<serde_json::Value>,
+    ) -> Self {
+        Self {
+            sub_id: sub_id.into(),
+            tx,
+            parent_tail_json: Arc::new(RwLock::new(parent_tail_json)),
+            os_sandbox: None,
+        }
+    }
+
+    /// 发出一条协议事件(非阻塞;通道满则丢弃)。
+    pub fn forward(&self, msg: reflect_protocol::EventMsg) {
+        let _ = self
+            .tx
+            .try_send(reflect_protocol::Event::new(self.sub_id.clone(), msg));
+    }
+
+    /// 底层通道句柄(输出增量等 `EVENT_ID_NONE` 事件直发用)。
+    pub fn raw_sender(&self) -> tokio::sync::mpsc::Sender<reflect_protocol::Event> {
+        self.tx.clone()
+    }
+}
+
+/// v1.4 A3:进度回调句柄。newtype 包裹 `Arc<dyn Fn>` —— 让
+/// `ToolContext` 的 `Debug` / `Clone` derive 保持可用(裸 trait 对象
+/// 两者都不可派生)。
+#[derive(Clone)]
+pub struct ProgressSink(pub Arc<dyn ToolProgressFn>);
+
+/// 进度回调的函数对象形态:`(is_stderr, delta) -> ()`。
+/// 单独定义 trait alias 形态,避免 clippy type_complexity。
+pub trait ToolProgressFn: Fn(bool, &str) + Send + Sync {}
+impl<T: Fn(bool, &str) + Send + Sync> ToolProgressFn for T {}
+
+impl std::fmt::Debug for ProgressSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProgressSink(..)")
+    }
+}
+
+impl ProgressSink {
+    /// 构造一个进度回调句柄(便捷:`Arc<dyn Fn>` 自动满足 `ToolProgressFn`)。
+    pub fn new(f: impl Fn(bool, &str) + Send + Sync + 'static) -> Self {
+        Self(Arc::new(f))
+    }
+
+    /// 上报一段增量。`is_stderr` 区分标准错误流;`delta` 为原始分片。
+    pub fn emit(&self, is_stderr: bool, delta: &str) {
+        (self.0)(is_stderr, delta);
+    }
+}
+
+/// v1.5 R2:后台任务信息快照(状态查询工具渲染用)。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BackgroundTaskInfo {
+    pub id: String,
+    /// running / completed / failed
+    pub status: String,
+    /// 完成时的输出(截断后);未完成为 `None`。
+    pub result: Option<String>,
+}
+
+/// v1.5 R2:后台任务生成器 —— 由宿主(core)实现,工具侧只发请求。
+/// 实现方负责:进程生命周期、输出捕获(限量)、结果投递(turn 边界
+/// 注入 / 状态查询)。会话级取消令牌由实现方持有(后台任务存活期
+/// 跨越单个 turn,不跟随工具调用的取消令牌)。
+pub trait TaskSpawner: Send + Sync + std::fmt::Debug {
+    /// 后台执行一条 shell 命令,立即返回任务 id。
+    ///
+    /// `os_sandbox` 为每 turn 的 OS 沙箱覆盖(`ToolContext.os_sandbox`):
+    /// `None` = 跟随 env,`Some(on)` = 强制开/关。实现方必须与前台
+    /// BashTool 同等对待 —— 沙箱启用且严格时 fail-closed,否则后台路径
+    /// 会成为绕过 OS 沙箱的逃逸口(review 修复)。
+    fn spawn_bash(
+        &self,
+        cmd: &str,
+        cwd: &std::path::Path,
+        os_sandbox: Option<bool>,
+    ) -> Result<String, ToolError>;
+
+    /// 全部任务快照。
+    fn snapshot(&self) -> Vec<BackgroundTaskInfo>;
 }
 
 impl ToolContext {
@@ -173,6 +312,12 @@ impl Default for ToolContext {
             session_usage: Arc::new(RwLock::new(reflect_protocol::TokenUsage::default())),
             token_budget: Arc::new(RwLock::new(None)),
             context_window_size: Arc::new(RwLock::new(None)),
+            progress: None,
+            event_forwarder: None,
+            os_sandbox: None,
+            background: None,
+            human_input: None,
+            parent_tail_json: Arc::new(RwLock::new(Vec::new())),
         }
     }
 }

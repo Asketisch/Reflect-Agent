@@ -59,9 +59,10 @@ pub async fn run(
         );
     }
 
-    // runner 闭包:根据 label 选预设。`TeamNodeRunner` 需要 team 文件,
-    // 实际 `factory.add_spec` 在 runner.run 阶段完成,这里只构造 runner 实例。
-    let pipeline = Pipeline::from_toml(&toml_src, |label, _params| {
+    // runner 闭包:按 runner 类型分发("shell" 直跑命令;team 类节点按
+    // label 选预设)。`TeamNodeRunner` 需要 team 文件,实际
+    // `factory.add_spec` 在 runner.run 阶段完成,这里只构造 runner 实例。
+    let pipeline = Pipeline::from_toml(&toml_src, |label, runner, params| {
         let team_name = label;
         // 4 阶段预设都映射到一个名为 `<label>` 的 team(用户事先
         // `reflect task team create` 创好)。
@@ -74,7 +75,7 @@ pub async fn run(
                 return None;
             }
         };
-        reflect_pipeline::nodes::preset_for(label, |_| Some(team.clone()))
+        reflect_pipeline::nodes::default_runner_for(label, runner, params, |_| Some(team.clone()))
     })?;
 
     let mut pipeline = pipeline;

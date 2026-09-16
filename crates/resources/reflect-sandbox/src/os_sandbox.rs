@@ -152,6 +152,13 @@ impl OsSandbox {
                 )
             })
             .unwrap_or(true);
+        Self::with_enabled(on)
+    }
+
+    /// v1.5 R1:显式指定开关的构造器 —— `ThreadSettingsOverrides
+    /// .sandbox_policy` 每 turn 覆盖时使用,绕过 env。strict 仍读 env
+    /// (`REFLECT_SANDBOX_STRICT`,fail-closed 基线不变)。
+    pub fn with_enabled(on: bool) -> Self {
         let strict = std::env::var("REFLECT_SANDBOX_STRICT")
             .ok()
             .map(|s| {

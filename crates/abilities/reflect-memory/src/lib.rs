@@ -26,9 +26,11 @@
 //! [`MAX_MEMORY_INJECT_CHARS`](8000,与 Reflect 一致)。
 
 pub mod model;
+pub mod retrieval;
 pub mod scope;
 pub mod store;
 
 pub use model::{MemoryError, MemoryScope};
+pub use retrieval::{MemorySection, retrieve_relevant, retrieve_relevant_arc, split_sections};
 pub use scope::{MAX_MEMORY_INJECT_CHARS, resolve_path};
 pub use store::{FileMemoryStore, InMemoryStore, MemoryStore, truncate_for_injection};

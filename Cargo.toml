@@ -7,6 +7,7 @@ members = [
     # ── abilities ── 能力原语层
     "crates/abilities/reflect-llm",
     "crates/abilities/reflect-tools",
+    "crates/abilities/reflect-bm25",
     "crates/abilities/reflect-hooks",
     "crates/abilities/reflect-skills",
     "crates/abilities/reflect-memory",
@@ -112,6 +113,7 @@ toml               = "0.8"
 async-trait        = "0.1"
 anyhow             = "1"
 thiserror          = "1"
+tiktoken-rs = "0.12"
 clap               = { version = "4", features = ["derive"] }
 # S2:TUI 反射 `TaskManager::list_tasks`(async)—— 用 pollster 在 sync 上下文
 # block_on,免去给整个 App 套 tokio runtime。pollster 无依赖、~200 LOC。
@@ -148,6 +150,7 @@ ignore  = "0.4"
 similar = "2"
 regex   = "1"
 rankfns = "0.1"
+reflect-bm25 = { path = "crates/abilities/reflect-bm25" }
 # v1.0.0-rc4: `web_fetch` builtin —— HTML 转 Markdown。
 htmd        = "0.5"
 # 通用 lazy container(`WebSearchTool` 等延迟初始化的场景)。

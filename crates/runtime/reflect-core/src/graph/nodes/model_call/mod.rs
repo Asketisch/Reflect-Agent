@@ -334,6 +334,31 @@ pub async fn model_call(state: &mut AgentState, ctx: &NodeContext) -> Option<Gra
             }
             Err(action) => match action {
                 RetryAction::RetrySame { delay_ms } => {
+                    // v1.5 review:同凭证 RetrySame 上限 —— 与 stream 初始化
+                    // 错误分支的意图对齐:同一凭证最多尝试 2 次,超限强制
+                    // failover(exclude 后 next_for 换池中下一个凭证)。
+                    // 此前 mid-stream 错误路径没有上限检查,持久 SSE 解析 /
+                    // 网络错误会把 max_attempts 全部烧在一个死凭证上,从不
+                    // 尝试其他凭证。
+                    let ca = per_cred_attempts.entry(cred_ptr).or_insert(0);
+                    if *ca >= 2 {
+                        let _ = ctx
+                            .event_tx
+                            .send(Event::new(
+                                ctx.sub_id.clone(),
+                                EventMsg::Routing(RoutingEvent {
+                                    kind: RoutingEventKind::Switched,
+                                    role: "main".into(),
+                                    from_credential: Some(label.clone()),
+                                    to_credential: None,
+                                    reason: "retry_same_exhausted".into(),
+                                    cooldown_until_ms: None,
+                                }),
+                            ))
+                            .await;
+                        exclude.push(client.clone());
+                        continue;
+                    }
                     sleep(Duration::from_millis(delay_ms)).await;
                     continue;
                 }

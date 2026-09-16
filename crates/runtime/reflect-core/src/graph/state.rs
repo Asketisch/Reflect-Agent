@@ -111,6 +111,11 @@ pub struct AgentState {
     /// 受 `MAX_AUTO_CONTINUATIONS` 上限保护,避免无限续作;同时每次续作都
     /// 让 `iteration` +1,天然受 `max_iterations` 安全阀约束。每 turn 重置。
     pub auto_continue_count: u32,
+    /// v1.4 A2:本 turn 已注入的回合中途转向消息条数(Now + Attachment)。
+    /// `pre_loop` 每次入口收割时累加,受 `MAX_MID_TURN_STEERING` 上限
+    /// 保护(超限丢弃并 warn)—— 防止外部无限投喂把上下文撑爆。
+    /// 每 turn 经 `AgentState::default` 重置。
+    pub mid_turn_steering_injected: u32,
 }
 
 /// v1.x progress-nudge:每条 web_fetch 的 URL + 200 字符片段摘要,供

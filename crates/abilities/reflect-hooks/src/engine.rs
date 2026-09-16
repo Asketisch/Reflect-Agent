@@ -68,6 +68,15 @@ impl HookEngine {
         before != hooks.len()
     }
 
+    /// v1.5 R3:按名字前缀批量注销(插件作用域清理)。返回移除数量。
+    /// 与 `unregister` 相同的 `disabled` set 语义:悬挂条目无害。
+    pub fn unregister_by_prefix(&self, prefix: &str) -> usize {
+        let mut hooks = self.hooks.write();
+        let before = hooks.len();
+        hooks.retain(|h| !h.name().starts_with(prefix));
+        before - hooks.len()
+    }
+
     /// 标记指定名字的 hook 为 disabled —— dispatch 时跳过,但 hook
     /// 仍在 vec 中。返回 `true` 表示之前是 enabled,`false` 表示已是
     /// disabled 或不存在。

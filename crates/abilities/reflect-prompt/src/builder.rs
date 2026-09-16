@@ -224,12 +224,15 @@ impl LayeredPrompt {
             );
             out.push_str("Do not keep researching once you can articulate the plan.");
         } else {
+            // 收口压力靠上面两句(必须给文字结论 + 别继续调工具)。不再常驻
+            // 注入 `FINAL ANSWER:` 模板:运行时没有任何代码消费该标记(收尾
+            // 判定是「模型不再调工具」),常驻只会让照字面执行的模型
+            // (MiniMax-M3 等)把标记回显进每条回答。收口模板保留在真正的
+            // 边路 —— nudge / max-iterations force-final / auto-continue。
             out.push_str("When you have gathered enough information using tools, you MUST provide a text response with your final answer. ");
             out.push_str(
                 "Do NOT continue making tool calls after you have the information needed. ",
             );
-            out.push_str("Always end your response with: ");
-            out.push_str(crate::FINAL_ANSWER_TEMPLATE);
         }
         out.push('\n');
         out.push('\n');
@@ -609,31 +612,27 @@ mod tests {
         assert!(out.ends_with("</system-reminder>"));
     }
 
-    /// 非 Plan mode(Auto / Prompt)保持原 final-answer 行为:含 `FINAL ANSWER`
-    /// 模板。回归保护,避免普通执行模式被误改。
+    /// 非 Plan mode(Auto / Prompt)不再常驻注入 `FINAL ANSWER` 模板:
+    /// 没有任何运行时代码消费该标记(收尾判定 = 模型不再调工具),常驻注入
+    /// 只会被照字面执行的模型回显进每条回答。收口模板保留在边路
+    /// (nudge / force-final / auto-continue),由 `pre_loop_m4` 等测试覆盖。
     #[test]
-    fn compose_ephemeral_with_mode_non_plan_keeps_final_answer_template() {
-        let auto = LayeredPrompt::compose_ephemeral_with_mode(
-            &[],
-            "",
-            "",
+    fn compose_ephemeral_with_mode_non_plan_omits_final_answer_template() {
+        for mode in [
             reflect_protocol::PermissionMode::Auto,
-        );
-        assert!(
-            auto.contains("FINAL ANSWER"),
-            "Auto 应保留 FINAL ANSWER: {auto}"
-        );
-
-        let prompt = LayeredPrompt::compose_ephemeral_with_mode(
-            &[],
-            "",
-            "",
             reflect_protocol::PermissionMode::Prompt,
-        );
-        assert!(
-            prompt.contains("FINAL ANSWER"),
-            "Prompt 应保留 FINAL ANSWER: {prompt}"
-        );
+        ] {
+            let out = LayeredPrompt::compose_ephemeral_with_mode(&[], "", "", mode);
+            assert!(
+                !out.contains("FINAL ANSWER"),
+                "{mode:?} 不应常驻 FINAL ANSWER 模板: {out}"
+            );
+            // 收口压力本身仍在(文字结论 + 停止调工具),只是不再要求标记。
+            assert!(
+                out.contains("MUST provide a text response"),
+                "{mode:?} 应保留收口指引: {out}"
+            );
+        }
     }
 
     #[test]

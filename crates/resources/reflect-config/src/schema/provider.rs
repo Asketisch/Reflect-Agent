@@ -16,6 +16,11 @@ pub struct CredentialConfig {
     pub api_key: String,
     #[serde(default)]
     pub base_url: Option<String>,
+    /// 该 plan 的模型名。解析优先级:env `REFLECT_MODEL` > 被钉住条目的
+    /// `model` > `[<provider>].model` 段级覆盖 > 未配置(不编造内置默认)。
+    /// GUI 的 coding plan 编辑器把 model 写在这里而非段级。
+    #[serde(default)]
+    pub model: Option<String>,
     #[serde(default = "default_weight")]
     pub weight: u32,
     /// 覆盖 `RoutingPolicy` 全局 cooldown 默认值,单位秒。

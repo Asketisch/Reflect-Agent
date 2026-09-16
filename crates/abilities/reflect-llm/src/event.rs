@@ -7,6 +7,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::LlmError;
 
+/// v1.4 B2:一次调用的 token 用量快照(`ChatEvent::Usage` 的具名形态),
+/// 供 `ModelClient::complete` 的非流式产出携带。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageSnapshot {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub cached_tokens: u32,
+    pub cache_write_tokens: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChatEvent {

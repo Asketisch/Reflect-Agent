@@ -59,6 +59,18 @@ impl Hook for VerificationHook {
         if let HookEvent::Stop { reason, attempt } = event {
             if matches!(reason, StopReason::AgentDecision) && *attempt < MAX_ATTEMPTS {
                 let result = run_command(&self.test_command).await;
+                // 命令本身不存在(toolchain 未安装 / 不在 PATH,桌面端 Finder
+                // 启动无 ~/.cargo/bin 时必现)或无法执行 → 验证前提不成立,
+                // 视为「无法验证」而非「测试失败」:注入假失败 + 否决完成
+                // 会让与任务无关的 turn(如纯问候)被迫连答数轮。
+                if result.cannot_verify {
+                    tracing::warn!(
+                        command = %self.test_command,
+                        tail = %result.tail,
+                        "verification hook: test command not executable; skipping verification"
+                    );
+                    return Ok(HookDecision::Allow);
+                }
                 if !result.passed {
                     let summary = format!(
                         "Tests failed ({}). Last 30 lines:\n{}",
@@ -81,6 +93,9 @@ struct CommandResult {
     command: String,
     passed: bool,
     tail: String,
+    /// 命令无法执行(spawn 失败 / exit 127 command not found)—— 区别于
+    /// 「测试跑了但失败」。
+    cannot_verify: bool,
 }
 
 async fn run_command(cmd: &str) -> CommandResult {
@@ -99,6 +114,7 @@ async fn run_command(cmd: &str) -> CommandResult {
                 command: cmd.to_string(),
                 passed: false,
                 tail: format!("spawn error: {e}"),
+                cannot_verify: true,
             };
         }
     };
@@ -116,13 +132,20 @@ async fn run_command(cmd: &str) -> CommandResult {
         child.wait().await
     };
     let exit = timeout(VERIFY_TIMEOUT, collect).await;
-    let passed = match exit {
-        Ok(Ok(status)) => status.success(),
+    let (passed, cannot_verify) = match exit {
+        Ok(Ok(status)) => match status.code() {
+            Some(0) => (true, false),
+            // 127 = command not found:验证命令本身不存在。
+            Some(127) => (false, true),
+            Some(_) => (false, false),
+            None => (false, true), // 被信号杀死,结果不可信
+        },
         Ok(Err(e)) => {
             return CommandResult {
                 command: cmd.to_string(),
                 passed: false,
                 tail: format!("wait error: {e}"),
+                cannot_verify: true,
             };
         }
         Err(_) => {
@@ -130,6 +153,7 @@ async fn run_command(cmd: &str) -> CommandResult {
                 command: cmd.to_string(),
                 passed: false,
                 tail: format!("timeout after {}s", VERIFY_TIMEOUT.as_secs()),
+                cannot_verify: false, // 超时说明命令存在且在跑,按失败处理
             };
         }
     };
@@ -152,6 +176,7 @@ async fn run_command(cmd: &str) -> CommandResult {
         command: cmd.to_string(),
         passed,
         tail,
+        cannot_verify,
     }
 }
 
@@ -208,5 +233,30 @@ mod tests {
             attempt: MAX_ATTEMPTS,
         };
         assert_eq!(h.handle(&e).await.unwrap(), HookDecision::Allow);
+    }
+
+    /// 命令不存在(exit 127)≠ 测试失败:视为「无法验证」并放行,
+    /// 否则无 toolchain 的环境里每个 turn 都会被假失败否决(桌面端
+    /// Finder 启动无 ~/.cargo/bin 时必现)。
+    #[tokio::test]
+    async fn command_not_found_allows() {
+        let h = VerificationHook::new(true, "definitely-not-a-real-cmd-xyz");
+        let e = HookEvent::Stop {
+            reason: StopReason::AgentDecision,
+            attempt: 0,
+        };
+        assert_eq!(h.handle(&e).await.unwrap(), HookDecision::Allow);
+    }
+
+    /// 非零退出(测试真的跑了但挂了)仍然否决 + 注入摘要。
+    #[tokio::test]
+    async fn real_test_failure_still_denies() {
+        let h = VerificationHook::new(true, "echo FAILED && exit 1");
+        let e = HookEvent::Stop {
+            reason: StopReason::AgentDecision,
+            attempt: 0,
+        };
+        let d = h.handle(&e).await.unwrap();
+        assert!(matches!(d, HookDecision::Combined(_)));
     }
 }

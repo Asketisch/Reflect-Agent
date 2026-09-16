@@ -29,6 +29,8 @@ pub struct AgentThread {
     tools_queue: Arc<ToolExecutionQueue>,
     sub_tx: mpsc::Sender<Submission>,
     cancel: CancellationToken,
+    /// v1.5 R2:后台任务队列(测试 / 诊断快照入口)。
+    background_tasks: Arc<crate::background_tasks::BackgroundTaskQueue>,
     /// `Submission.id` → 该 submission 的事件 channel。submission loop 在
     /// 回合结束时移除条目,随之 drop `Sender` 并关闭调用方
     /// `TurnHandle` 里的 `Receiver`。
@@ -66,6 +68,21 @@ impl AgentThread {
         let session_subs: Arc<Mutex<Vec<mpsc::Sender<Event>>>> = Arc::new(Mutex::new(Vec::new()));
         let mut base_ctx = cfg.shared_tool_context();
         base_ctx.cancel = cfg.cancel.clone();
+        // v1.5 R2:后台任务队列 + 桥 —— bash 的 run_in_background 经
+        // `TaskSpawner` 落到这里;完成的输出由 submission_loop 在 turn
+        // 边界注入。队列 Arc 同时暴露给 `background_tasks()` 供测试 /
+        // 诊断快照。
+        let background_tasks = Arc::new(crate::background_tasks::BackgroundTaskQueue::new());
+        let background_bridge = Arc::new(crate::background_tasks::CoreTaskSpawner::new(
+            background_tasks.clone(),
+            cfg.workspace.clone(),
+            cfg.cancel.clone(),
+        ));
+        base_ctx.background = Some(background_bridge);
+        // v1.5 E2:人工输入持久化存储 —— request_human_input 的挂起 /
+        // 应答文件闭环(~/.reflect/human_input 或 env 覆盖)。缺失 HOME
+        // 时为 None(工具退化为 TUI-only)。
+        base_ctx.human_input = reflect_tools::HumanInputStore::from_env_or_default().map(Arc::new);
         // v1.x:允许外部注入从 config.toml `[hooks]` 构建的 HookEngine(含
         // builtin hook + 插件 hook)。此前硬编码 `HookEngine::new()`,导致
         // `[hooks]` 配置整段死信。`None` 时回退空 engine(向后兼容)。
@@ -89,6 +106,7 @@ impl AgentThread {
         let tools_c = tools.clone();
         let cfg_c = cfg.clone();
         let tools_queue_for_loop = tools_queue.clone();
+        let background_for_loop = background_tasks.clone();
         tokio::spawn(async move {
             submission_loop(
                 sub_rx,
@@ -98,6 +116,7 @@ impl AgentThread {
                 registry_c,
                 tools_c,
                 tools_queue_for_loop,
+                background_for_loop,
             )
             .await;
         });
@@ -109,9 +128,15 @@ impl AgentThread {
             tools_queue,
             sub_tx,
             cancel,
+            background_tasks,
             turn_subs,
             session_subs,
         }
+    }
+
+    /// v1.5 R2:后台任务队列快照入口(测试 / 诊断)。
+    pub fn background_tasks(&self) -> Arc<crate::background_tasks::BackgroundTaskQueue> {
+        self.background_tasks.clone()
     }
 
     /// 提交一个 `Submission`,并获取对应的 `TurnHandle` 用于接收其事件。

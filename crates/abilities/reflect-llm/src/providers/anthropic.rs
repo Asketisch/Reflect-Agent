@@ -90,6 +90,12 @@ impl ModelClient for AnthropicClient {
         request: ChatRequest,
         cancel: CancellationToken,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError> {
+        // v1.4 B1:结构化输出经强制工具调用实现(`AnthropicRequest::from`
+        // 注入 `structured_output` 工具 + tool_choice)。此处记录是否
+        // 启用,启用则对流做解包适配 —— 模型的 tool_use 参数在流侧被
+        // 还原为 ContentDelta 文本,上层无感知(声明 json_mode 的既有
+        // 注释 "via tool-forced JSON" 由此真正落地)。
+        let structured = request.response_format.is_some();
         let body: Value = serde_json::to_value(AnthropicRequest::from(request))
             .map_err(|e| LlmError::Internal(e.to_string()))?;
 
@@ -135,7 +141,74 @@ impl ModelClient for AnthropicClient {
             return Err(classify_status(status_code, &text, &headers));
         }
 
-        Ok(Box::pin(stream_sse(response, cancel)))
+        if structured {
+            Ok(Box::pin(unwrap_structured_output(stream_sse(
+                response, cancel,
+            ))))
+        } else {
+            Ok(Box::pin(stream_sse(response, cancel)))
+        }
+    }
+}
+
+/// v1.4 B1:结构化输出内部工具名(`AnthropicRequest::from` 注入,
+/// 本函数的流适配层据此拦截解包)。
+pub(crate) const STRUCTURED_OUTPUT_TOOL: &str = "structured_output";
+
+/// v1.4 B1:流侧解包 —— 把强制 `structured_output` 工具调用的参数
+/// 还原为普通文本输出。
+///
+/// - `ToolUseStart { name: "structured_output" }`:进入捕获模式(吞掉,
+///   上层不应看到这个内部工具);
+/// - `ToolUseDelta`:累积参数 JSON 分片;
+/// - `MessageStop` / `MessageStopTruncated`:若有捕获内容,先产出一条
+///   `ContentDelta`(完整 JSON 文本)再透传终止事件 —— 上层与纯文本
+///   输出的处理路径完全一致;
+/// - 其余事件(MessageStart / Usage / ThinkingDelta)原样透传。
+///
+/// 模型未按约束调用工具时(异常路径)无捕获内容,终止事件照常透传,
+/// 上层看到空文本 —— 语义同「模型没回答」,不 panic。
+fn unwrap_structured_output<S>(inner: S) -> impl Stream<Item = Result<ChatEvent, LlmError>> + Send
+where
+    S: Stream<Item = Result<ChatEvent, LlmError>> + Send,
+{
+    async_stream::stream! {
+        let mut inner = Box::pin(inner);
+        let mut capturing = false;
+        let mut json = String::new();
+        while let Some(item) = inner.next().await {
+            let ev = match item {
+                Ok(e) => e,
+                Err(e) => {
+                    yield Err(e);
+                    continue;
+                }
+            };
+            match ev {
+                ChatEvent::ToolUseStart { name, .. } if name == STRUCTURED_OUTPUT_TOOL => {
+                    capturing = true;
+                    json.clear();
+                }
+                ChatEvent::ToolUseDelta(d) if capturing => {
+                    json.push_str(&d);
+                }
+                ChatEvent::MessageStop => {
+                    if capturing && !json.is_empty() {
+                        yield Ok(ChatEvent::ContentDelta(std::mem::take(&mut json)));
+                    }
+                    capturing = false;
+                    yield Ok(ChatEvent::MessageStop);
+                }
+                ChatEvent::MessageStopTruncated { stop_reason } => {
+                    if capturing && !json.is_empty() {
+                        yield Ok(ChatEvent::ContentDelta(std::mem::take(&mut json)));
+                    }
+                    capturing = false;
+                    yield Ok(ChatEvent::MessageStopTruncated { stop_reason });
+                }
+                other => yield Ok(other),
+            }
+        }
     }
 }
 
@@ -395,6 +468,10 @@ pub struct AnthropicRequest {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<Value>,
+    /// v1.4 B1:结构化输出的强制工具选择(`{"type":"tool","name":
+    /// "structured_output"}`)。`None` 不序列化,历史请求体不变。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<Value>,
 }
 
 impl From<ChatRequest> for AnthropicRequest {
@@ -477,6 +554,32 @@ impl From<ChatRequest> for AnthropicRequest {
             }
         }
 
+        // v1.4 B1:结构化输出 —— Anthropic 无原生 response_format,经强制
+        // 工具调用实现:注入 `structured_output` 工具(schema 来自请求的
+        // JsonSchema;JsonObject 用「任意对象」宽松 schema)+ `tool_choice`
+        // 强制选择。流侧由 `unwrap_structured_output` 把参数解包回文本,
+        // 上层无感知。
+        let tool_choice = match &req.response_format {
+            Some(crate::request::ResponseFormat::JsonSchema { name, schema, .. }) => {
+                tools.push(serde_json::json!({
+                    "name": STRUCTURED_OUTPUT_TOOL,
+                    "description": format!("Output the final answer as a JSON value conforming to this schema ({name})."),
+                    "input_schema": schema,
+                }));
+                Some(serde_json::json!({"type": "tool", "name": STRUCTURED_OUTPUT_TOOL}))
+            }
+            Some(crate::request::ResponseFormat::JsonObject) => {
+                tools.push(serde_json::json!({
+                    "name": STRUCTURED_OUTPUT_TOOL,
+                    "description": "Output the final answer as a single JSON object.",
+                    "input_schema": serde_json::json!({"type": "object"}),
+                }));
+                Some(serde_json::json!({"type": "tool", "name": STRUCTURED_OUTPUT_TOOL}))
+            }
+            // `Text` 与 `None`:纯文本,不注入内部工具。
+            _ => None,
+        };
+
         // Anthropic 要求提供 max_tokens
         let max_tokens = req.max_tokens.unwrap_or(4096);
 
@@ -507,6 +610,7 @@ impl From<ChatRequest> for AnthropicRequest {
             stop_sequences: req.stop,
             stream: true,
             thinking,
+            tool_choice,
         }
     }
 }
@@ -676,6 +780,7 @@ mod tests {
     #[test]
     fn system_gets_cache_control_injected() {
         let req = ChatRequest {
+            response_format: None,
             model: "claude-3-5-sonnet-latest".into(),
             messages: vec![],
             tools: vec![],
@@ -705,6 +810,7 @@ mod tests {
     #[test]
     fn existing_cache_control_is_preserved() {
         let req = ChatRequest {
+            response_format: None,
             model: "claude-3-5-sonnet-latest".into(),
             messages: vec![],
             tools: vec![],
@@ -734,6 +840,7 @@ mod tests {
     #[test]
     fn thinking_forces_temperature_one() {
         let req = ChatRequest {
+            response_format: None,
             model: "claude-3-5-sonnet-latest".into(),
             messages: vec![],
             tools: vec![],
@@ -757,6 +864,7 @@ mod tests {
     #[test]
     fn max_tokens_defaults_to_4096() {
         let req = ChatRequest {
+            response_format: None,
             model: "m".into(),
             messages: vec![],
             tools: vec![],
@@ -840,6 +948,7 @@ mod tests {
 
     fn make_req_with_tools_and_cache() -> ChatRequest {
         let mut req = ChatRequest {
+            response_format: None,
             model: "claude-3-5-sonnet-latest".into(),
             messages: vec![ChatMessage::User(UserContent {
                 blocks: vec![CB::text("hi")],
@@ -902,6 +1011,7 @@ mod tests {
     fn from_request_anchor_message_gets_cache_control() {
         use crate::request::CacheBreak;
         let req = ChatRequest {
+            response_format: None,
             model: "claude-3-5-sonnet-latest".into(),
             messages: vec![
                 ChatMessage::User(UserContent {
@@ -955,6 +1065,7 @@ mod tests {
         // 断言只有 text 块获得 cache_control。
         use crate::request::AssistantContent;
         let req = ChatRequest {
+            response_format: None,
             model: "claude-3-5-sonnet-latest".into(),
             messages: vec![ChatMessage::Assistant(AssistantContent {
                 text: Some("hi".into()),
@@ -994,5 +1105,86 @@ mod tests {
         let client = AnthropicClient::new(AnthropicConfig::default()).unwrap();
         assert_eq!(client.provider_kind(), crate::ProviderKind::Anthropic);
         assert_eq!(client.name(), "anthropic");
+    }
+    // ── v1.4 B1:结构化输出的强制工具注入与流解包 ────────────────
+
+    #[test]
+    fn anthropic_structured_output_injects_tool_and_tool_choice() {
+        let req = ChatRequest {
+            model: "claude-3-5-sonnet-latest".into(),
+            response_format: Some(crate::ResponseFormat::JsonSchema {
+                name: "verdict".into(),
+                schema: serde_json::json!({"type": "object", "properties": {"ok": {"type": "boolean"}}}),
+                strict: true,
+            }),
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(AnthropicRequest::from(req)).unwrap();
+        let tools = wire["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 1, "只注入 structured_output 一个工具");
+        assert_eq!(tools[0]["name"], "structured_output");
+        assert!(
+            tools[0]["input_schema"]["properties"]["ok"].is_object(),
+            "schema 原样进入 input_schema"
+        );
+        assert_eq!(wire["tool_choice"]["type"], "tool");
+        assert_eq!(wire["tool_choice"]["name"], "structured_output");
+    }
+
+    #[test]
+    fn anthropic_no_response_format_no_tool_choice() {
+        let req = ChatRequest {
+            model: "claude-3-5-sonnet-latest".into(),
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(AnthropicRequest::from(req)).unwrap();
+        assert!(wire.get("tool_choice").is_none());
+        assert!(
+            wire["tools"]
+                .as_array()
+                .map(|a| a.is_empty())
+                .unwrap_or(true)
+        );
+    }
+
+    /// 流解包:structured_output 的 tool_use 参数被还原为 ContentDelta,
+    /// 内部工具名对上层不可见。
+    #[tokio::test]
+    async fn unwrap_structured_output_restores_text() {
+        use futures::StreamExt;
+        let events = vec![
+            Ok(ChatEvent::MessageStart {
+                id: "m".into(),
+                model: "claude".into(),
+            }),
+            Ok(ChatEvent::ToolUseStart {
+                id: "t1".into(),
+                name: STRUCTURED_OUTPUT_TOOL.into(),
+                input_json: String::new(),
+            }),
+            Ok(ChatEvent::ToolUseDelta(r#""ok": true"#.into())),
+            Ok(ChatEvent::MessageStop),
+        ];
+        let inner = futures::stream::iter(events);
+        let out: Vec<ChatEvent> = unwrap_structured_output(inner)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .map(|r| r.unwrap())
+            .collect();
+        // 期望:MessageStart → ContentDelta(完整 JSON 文本) → MessageStop。
+        // 内部 ToolUseStart / ToolUseDelta 不应透传。
+        let mut saw_json = false;
+        for ev in &out {
+            match ev {
+                ChatEvent::ContentDelta(t) if t.contains("\"ok\"") => saw_json = true,
+                ChatEvent::ToolUseStart { .. } | ChatEvent::ToolUseDelta(_) => {
+                    panic!("内部工具事件不应透传: {ev:?}")
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_json, "应产出包含 JSON 的 ContentDelta,实际: {out:?}");
+        assert!(matches!(out.last(), Some(ChatEvent::MessageStop)));
     }
 }

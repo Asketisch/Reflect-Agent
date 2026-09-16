@@ -53,6 +53,6 @@ pub use quota::{CredentialKey, QuotaConfig, QuotaSource, QuotaTracker, SharedQuo
 pub use registry::{CredentialPool, ModelRegistry, NextClient, PoolEntry, SharedModelRegistry};
 pub use request::{
     AssistantContent, CacheBreak, CacheControl, CacheControlKind, CacheTtl, ChatMessage,
-    ChatRequest, ContentBlock, ReasoningEffort, SystemBlock, SystemBlocks, ThinkingConfig,
-    ToolCallRequest, ToolResult, ToolSpec, UserContent,
+    ChatRequest, ContentBlock, ReasoningEffort, ResponseFormat, SystemBlock, SystemBlocks,
+    ThinkingConfig, ToolCallRequest, ToolResult, ToolSpec, UserContent,
 };

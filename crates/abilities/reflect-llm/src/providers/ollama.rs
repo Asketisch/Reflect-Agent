@@ -375,8 +375,12 @@ pub struct OllamaRequest {
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f32>,
+    /// v1.4 B1:结构化输出。`JsonObject` → `"json"`(字符串);`JsonSchema`
+    /// → schema 对象(Ollama 结构化输出支持把 JSON Schema 直接作为
+    /// `format` 值)。原来是 `Option<String>`,为承载 schema 对象放宽为
+    /// `Option<Value>`(wire 形态不变:None 时跳过序列化)。
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub format: Option<String>,
+    pub format: Option<Value>,
     /// Ollama 调参(`num_ctx` / `num_gpu` 等)放在 `options` 子对象。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub options: Option<Value>,
@@ -412,13 +416,20 @@ impl From<ChatRequest> for OllamaRequest {
                 }),
             })
             .collect();
+        // v1.4 B1:结构化输出 → Ollama `format` 字段。
+        let format = match &req.response_format {
+            Some(crate::request::ResponseFormat::JsonObject) => Some(serde_json::json!("json")),
+            Some(crate::request::ResponseFormat::JsonSchema { schema, .. }) => Some(schema.clone()),
+            // Text / None:纯文本,不设置 format。
+            _ => None,
+        };
         Self {
             model: req.model,
             messages,
             stream: true,
             temperature: req.temperature,
             top_p: req.top_p,
-            format: None,
+            format,
             options: None,
             keep_alive: None,
             tools,
@@ -570,6 +581,7 @@ mod tests {
     #[test]
     fn ollama_request_basic() {
         let req = ChatRequest {
+            response_format: None,
             model: "llama3.2".into(),
             messages: vec![ChatMessage::User(UserContent {
                 blocks: vec![ContentBlock::text("hi")],
@@ -595,6 +607,7 @@ mod tests {
     #[test]
     fn ollama_request_with_tools() {
         let req = ChatRequest {
+            response_format: None,
             model: "qwen2.5:7b".into(),
             messages: vec![],
             tools: vec![ToolSpec::Function {
@@ -620,6 +633,7 @@ mod tests {
     #[test]
     fn build_request_with_keep_alive_zero_and_options() {
         let req = ChatRequest {
+            response_format: None,
             model: "llama3.2".into(),
             messages: vec![],
             tools: vec![],
@@ -845,5 +859,43 @@ mod tests {
         let client = OllamaClient::new(OllamaConfig::default()).unwrap();
         assert_eq!(client.provider_kind(), crate::ProviderKind::Ollama);
         assert_eq!(client.name(), "ollama");
+    }
+    // ── v1.4 B1:format 映射 ─────────────────────────────────────
+
+    #[test]
+    fn ollama_json_object_sets_format_json() {
+        let req = ChatRequest {
+            model: "llama3".into(),
+            response_format: Some(crate::ResponseFormat::JsonObject),
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(OllamaRequest::from(req)).unwrap();
+        assert_eq!(wire["format"], "json");
+    }
+
+    #[test]
+    fn ollama_json_schema_sets_format_object() {
+        let schema = serde_json::json!({"type": "object", "properties": {}});
+        let req = ChatRequest {
+            model: "llama3".into(),
+            response_format: Some(crate::ResponseFormat::JsonSchema {
+                name: "a".into(),
+                schema: schema.clone(),
+                strict: true,
+            }),
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(OllamaRequest::from(req)).unwrap();
+        assert_eq!(wire["format"], schema, "schema 对象应原样作为 format");
+    }
+
+    #[test]
+    fn ollama_no_response_format_no_format() {
+        let req = ChatRequest {
+            model: "llama3".into(),
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(OllamaRequest::from(req)).unwrap();
+        assert!(wire.get("format").is_none());
     }
 }

@@ -74,14 +74,55 @@ pub async fn pre_loop(state: &mut AgentState, ctx: &NodeContext) -> Option<Graph
     } else {
         llm_reported
     };
-    let (compacted, evt) = m4
-        .compactor
-        .compact_with_prior_and_tokens(
-            state.messages.messages.clone(),
-            state.compaction_summary.as_deref(),
-            llm_reported,
+    // v1.5 E1:PreCompact hook —— 压缩前最后关口。Deny 跳过本轮压缩
+    // (本轮照常执行,阈值下一轮再议);InjectMessage 在压缩后追加
+    // System 提醒。ctx 无 hook_engine 的测试路径跳过 dispatch。
+    let (compact_denied, compact_injected) = {
+        let hook_ctx = reflect_hooks::HookContext {
+            session_id: ctx.session_id,
+            turn_id: ctx.turn_id,
+            workspace: ctx.cfg.current_workspace(),
+            permission_mode: ctx.cfg.permission_mode(),
+        };
+        let trigger = if force_compact { "manual" } else { "threshold" };
+        let decision = ctx
+            .hook_engine
+            .dispatch(&reflect_hooks::HookEvent::PreCompact {
+                trigger: trigger.into(),
+                ctx: hook_ctx,
+            })
+            .await;
+        let resolved = decision.resolve();
+        (
+            resolved.deny_reason.is_some(),
+            resolved
+                .injected
+                .iter()
+                .map(|m| m.content.clone())
+                .collect::<Vec<_>>(),
         )
-        .await;
+    };
+
+    let (compacted, evt) = if compact_denied {
+        tracing::info!("PreCompact hook denied; skipping compaction this round");
+        (
+            state.messages.messages.clone(),
+            reflect_protocol::ContextCompactedEvent {
+                strategy: ContextCompactedStrategy::Noop,
+                removed_messages: 0,
+                before_tokens: 0,
+                after_tokens: 0,
+            },
+        )
+    } else {
+        m4.compactor
+            .compact_with_prior_and_tokens(
+                state.messages.messages.clone(),
+                state.compaction_summary.as_deref(),
+                llm_reported,
+            )
+            .await
+    };
     state.compact_triggered = !matches!(evt.strategy, ContextCompactedStrategy::Noop);
     if state.compact_triggered {
         // 在 `evt` 被移入 wire event 之前捕获我们需要的字段。
@@ -132,12 +173,49 @@ pub async fn pre_loop(state: &mut AgentState, ctx: &NodeContext) -> Option<Graph
         }
     }
     state.messages.messages = compacted;
+    // v1.5 E1:PreCompact 的 InjectMessage 以 System 消息追加(压缩后
+    // 可见,天然进入下一请求上下文)。
+    for content in compact_injected {
+        state.messages.messages.push(ChatMessage::System(content));
+    }
+
+    // 1.5 v1.4 A2:回合中途转向收割。ToolExec → PreLoop 回环的每次入口
+    // 都执行 —— 用户对正在跑的回合「边跑边改需求」:Now 优先级消息作为
+    // 纯 User 消息追加(语义上是用户中途说话);Attachment 作为包裹
+    // `<system-reminder>` 的 User 消息追加(补充参考信息,不构成新指令)。
+    // 收割放在 compact 之后:注入内容属于「最新指示」,不应被本轮压缩
+    // 修剪。上限 `MAX_MID_TURN_STEERING` 防外部无限投喂;注入的消息同步
+    // 落盘(recorder),否则 resume 时丢失这段中途指示。
+    inject_mid_turn_steering(state, ctx).await;
 
     // 3. 按 active_agent_def.memory 作用域加载内存。
-    let memory_text = match m4
-        .memory
-        .load_combined(&m4.active_agent_def.memory, &m4.active_agent_def.name)
-    {
+    // v1.4 D2:检索化注入 —— 用本轮用户输入作查询,BM25 选相关记忆
+    // 条目 + 最近条目(8000 字符预算不变);查询为空 / 记忆总量装得下
+    // 时等价历史全量注入。旧格式(无 `## 标题`)整文件为单条目,兼容。
+    let memory_query: String = ctx
+        .messages
+        .iter()
+        .rev()
+        .find_map(|m| match m {
+            ChatMessage::User(u) => Some(
+                u.blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        reflect_llm::ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let memory_text = match reflect_memory::retrieve_relevant_arc(
+        &m4.memory,
+        &m4.active_agent_def.memory,
+        &m4.active_agent_def.name,
+        memory_query.trim(),
+    ) {
         Ok(s) => reflect_memory::truncate_for_injection(&s),
         Err(e) => {
             tracing::warn!(?e, "failed to load memory; using empty");
@@ -160,6 +238,11 @@ pub async fn pre_loop(state: &mut AgentState, ctx: &NodeContext) -> Option<Graph
     let ephemeral_skills = m4.skills.render_for_system_prompt();
     let reminder = format!("Iteration {}/{}", state.iteration, ctx.max_iterations);
     let mut effective = m4.skills.active_tool_names();
+    // v1.x:外部工具(MCP / LSP / plugin / serve 远程)注册即对 LLM 可见 ——
+    // 用户显式接入的工具不应被 skills catalog 的 always_on 白名单挡住
+    // (GUI 的 MCP/LSP 全部走 Runtime/Mcp 源;CLI 的 MCP 走 Mcp 源,同受益)。
+    // 只并集不删减:Builtin 集仍由 catalog 策略(curated)管理。
+    effective.extend(ctx.tools_queue.registry().external_tool_names());
 
     // v1.x Plan mode：从 LLM 可见工具集中移除通用 `write` / `edit`，强制 LLM
     // 使用 `PlanWrite`（`required_permission = Auto`，审批层跳过）。否则 LLM
@@ -331,4 +414,98 @@ pub async fn pre_loop(state: &mut AgentState, ctx: &NodeContext) -> Option<Graph
     }
 
     Some(GraphNode::ModelCall)
+}
+
+/// v1.4 A2:单 turn 允许注入的回合中途转向消息总数上限。
+const MAX_MID_TURN_STEERING: u32 = 16;
+
+/// v1.4 A2:收割会话级转向队列并注入 `state.messages` 尾部。
+///
+/// - `Now` 优先级:纯 User 消息(provider 视角 = 用户中途说话,权重最高);
+/// - `Attachment` 优先级:`<system-reminder>` 包裹的 User 消息(补充参考,
+///   不构成新指令);
+/// - 首次进入 pre_loop(turn 开头)时队列通常已被 submission_loop 的
+///   turn 边界合并清空,本函数自然 no-op;真正生效于 ToolExec 回环。
+/// - 注入消息同步写 recorder(`MessageRole::User`),resume 不丢中途指示。
+/// - 超过 `MAX_MID_TURN_STEERING` 的消息丢弃并 warn(防投喂撑爆上下文)。
+async fn inject_mid_turn_steering(state: &mut AgentState, ctx: &NodeContext) {
+    use crate::steering_queue::SteeringPriority;
+    let Some(sq) = ctx.steering_queue.as_ref() else {
+        return;
+    };
+    let drained = sq.lock().drain_all();
+    if drained.is_empty() {
+        return;
+    }
+    // protocol 副本(落盘用)与 llm 副本(注入用)同步构建;仅 Text/Image
+    // 参与 —— 与 submission_loop 的 user 输入转换域一致。
+    let mut protocol_blocks: Vec<reflect_protocol::ContentBlock> = Vec::new();
+    for msg in drained {
+        let remaining = MAX_MID_TURN_STEERING.saturating_sub(state.mid_turn_steering_injected);
+        if remaining == 0 {
+            tracing::warn!(
+                injected = state.mid_turn_steering_injected,
+                "mid-turn steering 上限已满,丢弃后续消息"
+            );
+            break;
+        }
+        state.mid_turn_steering_injected += 1;
+        for item in msg.items {
+            let block = match item {
+                reflect_protocol::UserInputItem::Text { text } => {
+                    if matches!(msg.priority, SteeringPriority::Now) {
+                        reflect_protocol::ContentBlock::Text { text }
+                    } else {
+                        // Attachment:包 system-reminder,与项目内其他 meta
+                        // 注入的惯例一致 —— 模型可见但不冒充直接指令。
+                        reflect_protocol::ContentBlock::Text {
+                            text: format!("<system-reminder>{text}</system-reminder>"),
+                        }
+                    }
+                }
+                reflect_protocol::UserInputItem::Image { data, mime_type } => {
+                    reflect_protocol::ContentBlock::Image { data, mime_type }
+                }
+                // 其余 item 类型(LocalImage / Skill / QuestionAnswer)本就
+                // 未在消息转换中接通,这里同样跳过,保持输入域一致。
+                _ => continue,
+            };
+            protocol_blocks.push(block);
+        }
+    }
+    if protocol_blocks.is_empty() {
+        return;
+    }
+    let llm_blocks: Vec<reflect_llm::ContentBlock> = protocol_blocks
+        .iter()
+        .map(|b| match b {
+            reflect_protocol::ContentBlock::Text { text } => {
+                reflect_llm::ContentBlock::Text { text: text.clone() }
+            }
+            reflect_protocol::ContentBlock::Image { data, mime_type } => {
+                reflect_llm::ContentBlock::Image {
+                    data: data.clone(),
+                    mime_type: mime_type.clone(),
+                }
+            }
+            _ => unreachable!("protocol_blocks 只含 Text/Image"),
+        })
+        .collect();
+    state
+        .messages
+        .messages
+        .push(ChatMessage::User(reflect_llm::UserContent {
+            blocks: llm_blocks,
+        }));
+    // 落盘:与 submission_loop 的 user 输入持久化同格式,resume 忠实回放
+    // 中途指示(否则恢复后的会话丢掉这段「用户插话」)。
+    if let Some(rec) = ctx.recorder.as_ref() {
+        let _ = rec
+            .record(RolloutRecord::message(
+                ctx.turn_id,
+                reflect_protocol::MessageRole::User,
+                serde_json::to_value(&protocol_blocks).unwrap_or(serde_json::Value::Null),
+            ))
+            .await;
+    }
 }

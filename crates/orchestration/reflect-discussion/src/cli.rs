@@ -105,6 +105,7 @@ impl DiscussionToml {
             consensus_window: self.discussion.consensus_window,
             max_rounds: self.discussion.max_rounds,
             mailbox_capacity: self.discussion.mailbox_capacity,
+            judge: false,
         }
     }
 }
@@ -448,6 +449,7 @@ system_prompt = "x"
                 consensus_window: 1,
                 max_rounds: 1,
                 mailbox_capacity: 4,
+                judge: false,
             };
             let r = try_build_llm_orchestrator(&config, &bus);
             assert!(r.is_none(), "expected None when no provider configured");

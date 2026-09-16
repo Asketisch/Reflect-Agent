@@ -16,21 +16,18 @@
 //!   `SubAgentFactory::spawn` 的 `parent_tail: Vec<ChatMessage>` 后,可改
 //!   为结构化消息列表。
 //!
-//! ## 已知限制:`SubAgentFactory::MAX_DEPTH = 3`
+//! ## 并发深度(历史限制已解除)
 //!
-//! `SubAgentFactory` 当前**只在 spawn 时自增**,**不在 terminal 时自减**
-//! (见 [`reflect_subagent::factory`] 的 `fetch_add` / `fetch_sub` 注释),
-//! 等价于「总 spawn 数上限」,**不是**「并发 in-flight 上限」。对 discussion
-//! 的实际影响:
+//! `SubAgentFactory` 的 `MAX_DEPTH`(= 16)是**并发 in-flight 上限**:
+//! spawn 时 `fetch_add`,`SpawnedChild` Drop / collect 完成时释放,
+//! 嵌套 spawn 共享同一计数器。对 discussion 的实际影响:
 //!
-//! - [`DiscussionMode::Sequential`]:每轮只有 1 个 spawn,depth 永远是 1,
-//!   任意 round 数 OK。
-//! - [`DiscussionMode::Concurrent`]:每轮 N 个 participant 同时 spawn,
-//!   第 1 轮 depth 直接到 N;N ≤ 3 时 ~1 轮 OK,N > 3 时立即 `MaxDepthExceeded`。
+//! - [`DiscussionMode::Sequential`]:每轮只有 1 个 spawn,任意 round 数 OK。
+//! - [`DiscussionMode::Concurrent`]:每轮 N 个 participant 并发, participant
+//!   数(含嵌套)≤ 16 即可;超出返回 `MaxDepthExceeded`。
 //!
-//! `crates/reflect-discussion/examples/discussion.toml` 默认 3 participants,
-//! Sequential 模式无限轮 OK;Concurrent 模式建议作为 v0.3.x 的优化项
-//! (在 `SpawnedChild::collect_result` 末尾 `fetch_sub(1)` 自减)。
+//! (v1.5 注:本注释曾长期描述「MAX_DEPTH=3 且不在 terminal 自减」的旧行为,
+//! 该行为自 in-flight 语义重构后已不存在,此处更正以免误导。)
 //!
 //! ## 用法
 //!
@@ -318,6 +315,74 @@ fn render_user_prompt(
          Use read_messages to drain your inbox.\n\
          Use finish_discussion when consensus is reached.",
     )
+}
+
+// ── v1.4 C3:LLM 裁判 ───────────────────────────────────────────
+
+/// 裁判子代理的 system prompt —— 强调证据导向 + 严格 JSON 输出。
+const JUDGE_SYSTEM_PROMPT: &str = "\
+You are a strict discussion judge. You read the full transcript of a \
+multi-agent discussion and decide whether the participants have reached a \
+genuine consensus.\n\n\
+RULES:\n\
+1. Consensus requires substantive agreement on the core question — mere \
+politeness, repeated self-declarations without engagement, or residual \
+disagreement on key points means NOT agreed.\n\
+2. If agreed, `summary` must faithfully state what was agreed upon.\n\
+3. If not agreed, `summary` states the current focus of disagreement and \
+`blockers` lists the concrete unresolved points (each a short sentence).\n\
+4. Respond with STRICT JSON only, no prose outside the object.";
+
+/// 构造 LLM 裁判闭包:每轮 spawn 一个独立 judge 子代理(禁用全部工具,
+/// `max_turns = 1`),让它通读全量 transcript 后输出结构化 JSON 裁决,
+/// 解析为 [`JudgeVerdict`]。裁判沿用工厂的默认模型路由;spawn / 解析
+/// 失败都以 Err(String) 返回(调用方 runtime 回退自报共识路径)。
+pub fn make_judge_closure(factory: Arc<SubAgentFactory>) -> Arc<crate::models::JudgeCallback> {
+    use crate::models::{JudgeVerdict, MessageKind as MK};
+    Arc::new(move |round, transcript| {
+        let factory = factory.clone();
+        Box::pin(async move {
+            // 渲染 transcript(全部消息,含轮次与发送者)。
+            let mut body = String::new();
+            for m in &transcript {
+                let kind = match m.kind {
+                    MK::Utterance => "utterance",
+                    MK::Consensus => "self-reported-consensus",
+                    MK::Finish => "finish",
+                };
+                body.push_str(&format!(
+                    "[round {}] {} ({}): {}\n",
+                    m.round, m.from.0, kind, m.content
+                ));
+            }
+            let prompt = format!(
+                "<transcript round={round}>\n{body}</transcript>\n\n\
+                 Has the discussion reached a genuine consensus? Respond as a \
+                 single JSON object: {{\"agreed\": bool, \"summary\": \"...\", \
+                 \"blockers\": [\"...\"]}}. JSON only."
+            );
+            let spec = SubAgentSpec {
+                name: "Judge".into(),
+                role: "judge".into(),
+                model: None, // 继承工厂默认模型(通常配为便宜模型)
+                system_prompt: JUDGE_SYSTEM_PROMPT.into(),
+                allowed_tools: vec![], // 裁判不需要工具,纯文本裁决
+                data_transfer: DataTransferConfig::default(),
+                max_turns: Some(1),
+                allowed_skills: vec![],
+            };
+            let spawned = factory
+                .spawn(spec, vec![], prompt)
+                .await
+                .map_err(|e| format!("judge spawn failed: {e}"))?;
+            let text = spawned
+                .collect_result()
+                .await
+                .map_err(|e| format!("judge collect failed: {e}"))?;
+            JudgeVerdict::parse(&text)
+                .inspect_err(|_| warn!(round, raw = %text, "judge verdict parse failed"))
+        })
+    })
 }
 
 #[cfg(test)]

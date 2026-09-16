@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::error::PipelineError;
 use crate::graph::DiGraph;
@@ -145,7 +145,7 @@ pub struct PipelineConfig {
 /// 单节点 TOML 定义。
 #[derive(Debug, Clone, Deserialize)]
 pub struct NodeConfigDef {
-    /// runner 类型(目前只支持 `"team"`,留给未来扩展 `"shell"` / `"passthrough"` 等)。
+    /// runner 类型(`"team"` / `"shell"`,见 [`crate::nodes::default_runner_for`])。
     #[serde(default = "default_runner")]
     pub runner: String,
     /// runner 接受的参数(由 `NodeRunner::from_config` 解析)。
@@ -155,6 +155,40 @@ pub struct NodeConfigDef {
     /// 依赖的上游节点 label 列表;空 = 根节点。
     #[serde(default)]
     pub depends_on: Vec<String>,
+    /// v1.4 C2:节点级重试配置。`None` = 不重试(历史行为)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<RetryConfig>,
+}
+
+/// v1.4 C2:节点级重试配置(与 FailurePolicy 正交 —— 重试耗尽才算
+/// 节点真正失败,之后才进入失败策略)。
+///
+/// ```toml
+/// [nodes.build.retry]
+/// max_attempts = 3   # 总尝试次数(含首次);1 = 不重试
+/// backoff_ms = 500   # 两次尝试之间的固定间隔
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+pub struct RetryConfig {
+    /// 总尝试次数(含首次)。`0` 视为 1。
+    #[serde(default = "default_max_attempts")]
+    pub max_attempts: u32,
+    /// 重试间隔毫秒。
+    #[serde(default)]
+    pub backoff_ms: u64,
+}
+
+fn default_max_attempts() -> u32 {
+    1
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: 1,
+            backoff_ms: 0,
+        }
+    }
 }
 
 fn default_runner() -> String {
@@ -165,6 +199,8 @@ fn default_runner() -> String {
 pub struct Pipeline {
     graph: DiGraph,
     runners: HashMap<String, Arc<dyn NodeRunner>>,
+    /// v1.4 C2:节点级重试配置(label → 配置;未配置 = 不重试)。
+    retries: HashMap<String, RetryConfig>,
     failure_policy: FailurePolicy,
     name: String,
 }
@@ -186,6 +222,7 @@ impl Pipeline {
         Self {
             graph: DiGraph::new(),
             runners: HashMap::new(),
+            retries: HashMap::new(),
             failure_policy: FailurePolicy::default(),
             name: String::new(),
         }
@@ -214,6 +251,12 @@ impl Pipeline {
         self
     }
 
+    /// v1.4 C2:设置节点级重试配置(手工构造 Pipeline 的路径;
+    /// from_toml 在解析 `[nodes.X.retry]` 时内部调用)。
+    pub fn set_retry(&mut self, label: impl Into<String>, retry: RetryConfig) {
+        self.retries.insert(label.into(), retry);
+    }
+
     /// 节点数。
     pub fn node_count(&self) -> usize {
         self.graph.node_count()
@@ -222,11 +265,13 @@ impl Pipeline {
     /// 从 TOML 字符串解析 pipeline 配置 + 用 `runner_for` 闭包为每个节点
     /// 实例化 runner。
     ///
-    /// 闭包签名:`runner_for(label: &str, params: Option<&toml::Value>) -> Option<Arc<dyn NodeRunner>>`
+    /// 闭包签名(v1.4 起透传 runner 类型):
+    /// `runner_for(label: &str, runner: &str, params: Option<&toml::Value>) -> Option<Arc<dyn NodeRunner>>`
     /// —— 找不到返回 `None`,Pipeline 报 `MissingRunner`。
+    /// 推荐直接用 [`crate::nodes::default_runner_for`] 组合。
     pub fn from_toml<F>(s: &str, mut runner_for: F) -> Result<Self, PipelineError>
     where
-        F: FnMut(&str, Option<&toml::Value>) -> Option<Arc<dyn NodeRunner>>,
+        F: FnMut(&str, &str, Option<&toml::Value>) -> Option<Arc<dyn NodeRunner>>,
     {
         let cfg: PipelineConfig =
             toml::from_str(s).map_err(|e| PipelineError::Config(e.to_string()))?;
@@ -240,9 +285,12 @@ impl Pipeline {
         };
         // 先建所有节点,再建边 —— 保证 `add_edge` 时所有节点已存在。
         for (label, node_def) in &cfg.nodes {
-            let runner = runner_for(label, node_def.params.as_ref())
+            let runner = runner_for(label, &node_def.runner, node_def.params.as_ref())
                 .ok_or_else(|| PipelineError::MissingRunner(label.clone()))?;
             pipeline.add_node(label.clone(), runner)?;
+            if let Some(retry) = &node_def.retry {
+                pipeline.retries.insert(label.clone(), retry.clone());
+            }
         }
         for (label, node_def) in &cfg.nodes {
             for dep in &node_def.depends_on {
@@ -318,6 +366,7 @@ impl Pipeline {
         let pipeline_ref = PipelineRef {
             runners: &self.runners,
             graph: &self.graph,
+            retries: &self.retries,
         };
         // 共享状态句柄的显式类型(避免 async 闭包参数里 `Arc<_>` 推断失败)。
         type OutputsStore = std::sync::Mutex<HashMap<String, serde_json::Value>>;
@@ -364,9 +413,33 @@ impl Pipeline {
             debug!(node = %label, iteration, "pipeline: running node");
             let node_started = Instant::now();
             let started_at_ms = system_time_ms();
-            let mut outcome = match runner.run(&node_ctx).await {
-                Ok(o) => o,
-                Err(e) => NodeOutcome::failure(e.to_string()),
+            // v1.4 C2:节点级重试 —— Failed 且还有剩余尝试时按 backoff_ms
+            // 间隔重跑 runner。与 FailurePolicy 正交:重试耗尽才算节点真正
+            // 失败,之后才进入 Abort / ContinueCollect 判定。取消令牌触发
+            // 时立即停止重试。
+            let retry_cfg = pipeline_ref.retries.get(&label);
+            let max_attempts = retry_cfg.map(|r| r.max_attempts.max(1)).unwrap_or(1);
+            let backoff_ms = retry_cfg.map(|r| r.backoff_ms).unwrap_or(0);
+            let mut attempt: u32 = 1;
+            let mut outcome = loop {
+                let o = match runner.run(&node_ctx).await {
+                    Ok(o) => o,
+                    Err(e) => NodeOutcome::failure(e.to_string()),
+                };
+                let failed = o.is_failure();
+                if !failed || attempt >= max_attempts || node_ctx.cancel.is_cancelled() {
+                    break o;
+                }
+                warn!(
+                    node = %label,
+                    attempt,
+                    max_attempts,
+                    "pipeline: node failed, retrying"
+                );
+                if backoff_ms > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                }
+                attempt += 1;
             };
 
             // Human Gate 阻塞:Failed 且配了回调时,阻塞等审批,true 则改判 success。
@@ -602,6 +675,8 @@ impl Pipeline {
 struct PipelineRef<'a> {
     runners: &'a HashMap<String, Arc<dyn NodeRunner>>,
     graph: &'a DiGraph,
+    /// v1.4 C2:节点级重试配置(未配置 = 不重试)。
+    retries: &'a HashMap<String, RetryConfig>,
 }
 
 fn system_time_ms() -> u64 {

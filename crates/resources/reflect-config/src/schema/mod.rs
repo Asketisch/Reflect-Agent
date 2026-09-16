@@ -182,6 +182,13 @@ impl Default for ReflectConfig {
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ActiveSection {
     pub provider: Option<String>,
+    /// 钉住该 provider 凭证池中的某个条目(`[[<provider>.credentials]]` 的
+    /// `label`)。`Some` 且命中池内条目时,该条目健康则始终优先派位,其余
+    /// 条目仅在其 cooldown 时作为 failover;`None` = 不钉住,全池加权
+    /// round-robin。顶层 `[<provider>].api_key` 隐式条目的 label 固定为
+    /// `"default"`,钉它就显式写 `credential = "default"`。
+    #[serde(default)]
+    pub credential: Option<String>,
     #[serde(default)]
     pub max_iterations: Option<u32>,
 }

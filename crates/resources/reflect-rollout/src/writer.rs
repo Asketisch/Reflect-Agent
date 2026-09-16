@@ -43,10 +43,14 @@ use reflect_protocol::{RolloutRecord, RolloutRecorder, SessionInfo, ThreadId, Tu
 /// [`JsonlRolloutWriter`] 上;此处只缓存 `model` + `started_at` 以便
 /// `rotate()` 能合成一份 `SessionMeta`,写入新打开文件的首行
 /// (不变量含义见模块级 doc)。
+///
+/// v1.x:增加 `workspace` 缓存 —— 轮转时把同一份 `workspace` 带到新文件首行,
+/// 保证索引层 `SessionInfo.workspace` 在轮转后仍可命中。
 #[derive(Clone)]
 struct CachedSessionMeta {
     model: String,
     started_at: DateTime<Utc>,
+    workspace: Option<String>,
 }
 
 /// 内部可变状态,由外层 `Mutex` 保护。
@@ -170,6 +174,7 @@ impl JsonlRolloutWriter {
                 session_id,
                 model: meta.model,
                 started_at: meta.started_at,
+                workspace: meta.workspace,
             })?;
             if let Some(w) = g.writer.as_mut() {
                 writeln!(w, "{line}")?;
@@ -194,12 +199,16 @@ impl RolloutRecorder for JsonlRolloutWriter {
         // (引擎每个 thread 只发一次 SessionMeta)。
         if g.session_meta.is_none()
             && let RolloutRecord::SessionMeta {
-                model, started_at, ..
+                model,
+                started_at,
+                workspace,
+                ..
             } = &r
         {
             g.session_meta = Some(CachedSessionMeta {
                 model: model.clone(),
                 started_at: *started_at,
+                workspace: workspace.clone(),
             });
         }
 

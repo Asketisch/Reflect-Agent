@@ -143,6 +143,31 @@ pub enum Op {
     /// v1.3 SDK:客户端对 `EventMsg::ToolExecutionRequest` 的回执,
     /// `call_id` 与请求配对,`output` 为本地执行结果。
     ToolExecutionResponse { call_id: String, output: ToolOutput },
+
+    /// v1.4 A2:回合中途转向 —— 对正在跑的回合投喂补充指示或参考资料,
+    /// 引擎把它 push 进会话转向队列,由下一次 `pre_loop`(通常是
+    /// ToolExec → PreLoop 回环入口)收割注入为用户消息。
+    ///
+    /// 与 `UserInput` 的区别:`UserInput` 开新 turn;`Steer` 不打断当前
+    /// turn,消息在「下一个安全点」进入模型上下文 —— 实现「边跑边改
+    /// 需求」。`Now` 优先级是用户中途说话(纯文本直入);`Attachment`
+    /// 是参考资料(以 `<system-reminder>` 包裹注入,不冒充直接指令)。
+    /// 无在飞 turn 时消息留在队列,下一个 `UserInput` turn 边界合并
+    /// (既有行为)。
+    Steer {
+        #[serde(default)]
+        priority: crate::item::SteeringPriorityMirror,
+        items: Vec<UserInputItem>,
+    },
+
+    /// v1.4 C1:查询子代理状态(状态中心快照)。`child_id = None` 列出
+    /// 全部在飞 + 近期终态子代理;`Some(id)` 只查指定子代理(未知 id 返回
+    /// 空列表)。应答为 `EventMsg::SubagentStatus`(per-turn 通道 + 会话
+    /// 扇出双路送达)。
+    QuerySubagents {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        child_id: Option<String>,
+    },
 }
 
 /// v1.3 SDK:客户端注册的自定义工具声明(spec 由客户端提供,
@@ -188,6 +213,8 @@ impl Op {
             Op::ExitGoalMode => "exit_goal_mode",
             Op::RegisterTools { .. } => "register_tools",
             Op::ToolExecutionResponse { .. } => "tool_execution_response",
+            Op::Steer { .. } => "steer",
+            Op::QuerySubagents { .. } => "query_subagents",
         }
     }
 }
@@ -487,6 +514,26 @@ mod tests {
                 assert_eq!(verify_command, None);
                 assert_eq!(token_budget, None);
             }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    /// v1.4 C1:QuerySubagents serde —— child_id 缺省 → None。
+    #[test]
+    fn serde_roundtrip_query_subagents() {
+        let op = Op::QuerySubagents { child_id: None };
+        let json = serde_json::to_string(&op).unwrap();
+        assert!(json.contains(r#""type":"query_subagents""#), "got: {json}");
+        let back: Op = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.discriminant(), "query_subagents");
+
+        let op2 = Op::QuerySubagents {
+            child_id: Some("c-9".into()),
+        };
+        let json2 = serde_json::to_string(&op2).unwrap();
+        let back2: Op = serde_json::from_str(&json2).unwrap();
+        match back2 {
+            Op::QuerySubagents { child_id } => assert_eq!(child_id.as_deref(), Some("c-9")),
             other => panic!("wrong variant: {other:?}"),
         }
     }

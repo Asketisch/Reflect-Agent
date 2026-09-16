@@ -87,6 +87,7 @@ pub fn to_markdown(records: &[RolloutRecord]) -> String {
                 session_id,
                 model,
                 started_at,
+                workspace: _,
             } => {
                 if session_meta_emitted {
                     // 理论上 SessionMeta 只 emit 一次,但 JSONL forward-compat
@@ -365,6 +366,7 @@ mod tests {
                 session_id: sid,
                 model: "anthropic/claude-3-5-sonnet-latest".into(),
                 started_at: Utc.with_ymd_and_hms(2026, 6, 18, 12, 0, 0).unwrap(),
+                workspace: None,
             },
             RolloutRecord::message(tid, MessageRole::User, serde_json::json!("hi")),
         ]
@@ -409,6 +411,7 @@ mod tests {
                 session_id: sid,
                 model: "openai/gpt-4o".into(),
                 started_at: Utc.with_ymd_and_hms(2026, 6, 18, 13, 0, 0).unwrap(),
+                workspace: None,
             },
             RolloutRecord::message(tid, MessageRole::User, serde_json::json!("q")),
             RolloutRecord::message(tid, MessageRole::Assistant, serde_json::json!("a")),
@@ -458,6 +461,7 @@ mod tests {
                 session_id: ThreadId::new(),
                 model: "m".into(),
                 started_at: Utc::now(),
+                workspace: None,
             },
             RolloutRecord::DiscussionTranscript {
                 discussion_id: did,
@@ -495,6 +499,7 @@ mod tests {
                 session_id: ThreadId::new(),
                 model: "m".into(),
                 started_at: Utc.with_ymd_and_hms(2026, 8, 5, 10, 0, 0).unwrap(),
+                workspace: None,
             },
             RolloutRecord::PlanRequest {
                 plan_id: pid,
@@ -567,6 +572,7 @@ mod tests {
                 session_id: ThreadId::new(),
                 model: "m".into(),
                 started_at: Utc::now(),
+                workspace: None,
             },
             RolloutRecord::message(TurnId::new(), MessageRole::User, serde_json::json!(big)),
         ];

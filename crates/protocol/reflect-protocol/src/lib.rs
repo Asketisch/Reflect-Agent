@@ -37,15 +37,17 @@ pub use event_msg::{
     McpToolInvokedEvent, McpTransportMirror, PermissionBubbleEvent, PermissionModeChangedEvent,
     PlanApprovedEvent, PlanDraftUpdatedEvent, PlanReadyEvent, PlanRejectedEvent, PlanRequestEvent,
     PlanStepEvent, PlanStepStatus, PluginLoadedEvent, QuotaExhaustedEvent, RoutingEvent,
-    RoutingEventKind, StreamErrorEvent, ThinkingDelta, TokenCountEvent, TokenUsage,
-    ToolCallBeginEvent, ToolCallEndEvent, ToolExecutionRequestEvent, TriedCredential,
-    TurnAbortedEvent, TurnCompleteEvent, TurnRewoundEvent, TurnStartedEvent, TurnStatus,
+    RoutingEventKind, StreamErrorEvent, SubagentProgressEvent, SubagentProgressKind,
+    SubagentRunStateMirror, SubagentStatusEvent, SubagentStatusSnapshot, ThinkingDelta,
+    TokenCountEvent, TokenUsage, ToolCallBeginEvent, ToolCallEndEvent, ToolCallOutputDeltaEvent,
+    ToolExecutionRequestEvent, TriedCredential, TurnAbortedEvent, TurnCompleteEvent,
+    TurnRewoundEvent, TurnStartedEvent, TurnStatus,
 };
 pub use item::{
     ApprovalPolicy, ContentBlock, PermissionMode, PlanApprovalChoice, PlanId,
     ReasoningEffortMirror, ReviewDecision, RiskLevel, SandboxPolicy, SessionConfiguredEvent,
-    ThreadId, ThreadSettingsOverrides, ToolError, ToolOutput, TurnId, UserInputItem,
-    is_edit_tool_name,
+    SteeringPriorityMirror, ThreadId, ThreadSettingsOverrides, ToolError, ToolOutput, TurnId,
+    UserInputItem, is_edit_tool_name,
 };
 pub use op::{Op, RemoteToolSpec};
 pub use question::{

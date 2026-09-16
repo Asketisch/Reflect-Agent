@@ -19,6 +19,7 @@ pub fn bundled_skills() -> Vec<SkillMeta> {
             body: include_str!("bundled/code-review.md").to_string(),
             plugin_id: None,
             when_paths: vec!["**/*.rs".into(), "**/*.ts".into()],
+            version: None,
         },
         SkillMeta {
             name: "commit-helper".into(),
@@ -30,6 +31,7 @@ pub fn bundled_skills() -> Vec<SkillMeta> {
             body: include_str!("bundled/commit-helper.md").to_string(),
             plugin_id: None,
             when_paths: vec![],
+            version: None,
         },
         SkillMeta {
             name: "test-runner".into(),
@@ -41,6 +43,7 @@ pub fn bundled_skills() -> Vec<SkillMeta> {
             body: include_str!("bundled/test-runner.md").to_string(),
             plugin_id: None,
             when_paths: vec!["**/Cargo.toml".into()],
+            version: None,
         },
         // v1.2.0:补齐至 15 项常用编码技能。
         skill(
@@ -145,6 +148,7 @@ fn skill(name: &str, description: &str, triggers: &[&str], tools: &[&str]) -> Sk
         body: body.to_string(),
         plugin_id: None,
         when_paths: vec![],
+        version: None,
     }
 }
 

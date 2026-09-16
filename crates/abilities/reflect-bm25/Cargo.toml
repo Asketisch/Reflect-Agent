@@ -1,0 +1,9 @@
+[package]
+name = "reflect-bm25"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reflect: BM25 relevance ranking (leaf crate, shared by tools grep and memory retrieval)"
+
+[dependencies]
+rankfns = { workspace = true }

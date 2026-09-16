@@ -63,6 +63,11 @@ pub struct NodeOutcome {
 }
 
 impl NodeOutcome {
+    /// 是否失败(v1.4 C2:重试循环判定用)。
+    pub fn is_failure(&self) -> bool {
+        matches!(self.status, NodeStatus::Failed(_))
+    }
+
     /// 构造成功 outcome,outputs 默认为空对象。
     pub fn success(outputs: Value) -> Self {
         Self {

@@ -124,15 +124,19 @@ fn active_provider_falls_back_to_ollama_when_section_present() {
 }
 
 #[test]
-fn model_for_ollama_returns_section_override() {
+fn resolve_model_ollama_returns_section_override() {
     let cfg = cfg_with_ollama(Some("qwen2.5:7b"));
-    assert_eq!(cfg.model_for("ollama"), "qwen2.5:7b");
+    assert_eq!(cfg.resolve_model("ollama"), Some("qwen2.5:7b".to_string()));
 }
 
+/// v1.5 诚实化:未显式配置任何 model → `None`(不再编造内置默认)。
 #[test]
-fn model_for_ollama_returns_default_when_section_missing() {
+fn resolve_model_returns_none_when_nothing_configured() {
     let cfg = ReflectConfig::default();
-    assert_eq!(cfg.model_for("ollama"), DEFAULT_OLLAMA_MODEL);
+    assert_eq!(cfg.resolve_model("ollama"), None);
+    assert_eq!(cfg.resolve_model("anthropic"), None);
+    assert_eq!(cfg.resolve_model("openai"), None);
+    assert_eq!(cfg.resolve_model("gemini"), None);
 }
 
 #[test]
@@ -222,6 +226,7 @@ fn credentials_array_takes_precedence_over_legacy_api_key() {
                 label: "only".into(),
                 api_key: "sk-array".into(),
                 base_url: None,
+                model: None,
                 weight: 1,
                 cooldown_override_secs: None,
                 quota: None,
@@ -333,22 +338,21 @@ fn active_provider_unknown_string_returns_none() {
 }
 
 #[test]
-fn model_for_returns_section_override() {
+fn resolve_model_returns_section_override() {
     let cfg = cfg_with_anthropic("sk-a");
-    assert_eq!(cfg.model_for("anthropic"), "claude-test");
+    assert_eq!(
+        cfg.resolve_model("anthropic"),
+        Some("claude-test".to_string())
+    );
 }
 
+/// v1.5 诚实化:段级 / env / 钉住条目都没有 → `None`,不再回落内置默认。
 #[test]
-fn model_for_returns_default_when_section_missing() {
+fn resolve_model_returns_none_when_section_missing() {
     let cfg = ReflectConfig::default();
-    assert_eq!(cfg.model_for("anthropic"), DEFAULT_ANTHROPIC_MODEL);
-    assert_eq!(cfg.model_for("openai"), DEFAULT_OPENAI_MODEL);
-}
-
-#[test]
-fn model_for_unknown_provider_returns_openai_default() {
-    let cfg = ReflectConfig::default();
-    assert_eq!(cfg.model_for("gemini"), DEFAULT_OPENAI_MODEL);
+    assert_eq!(cfg.resolve_model("anthropic"), None);
+    assert_eq!(cfg.resolve_model("openai"), None);
+    assert_eq!(cfg.resolve_model("gemini"), None);
 }
 
 #[test]
@@ -433,9 +437,10 @@ fn resolved_model_spec_returns_none_when_no_provider() {
     }
 }
 
-/// `[openai]` section 无 `model` 字段 → 用内置默认 `gpt-4o`。
+/// provider 已配置但没有任何显式 model → `None`(诚实化:GUI/TUI 据此
+/// 显示"未配置模型",而不是编造 `claude-3-5-sonnet-latest` 之类默认值)。
 #[test]
-fn resolved_model_spec_falls_back_to_builtin_default() {
+fn resolved_model_spec_returns_none_when_no_model_configured() {
     let cfg = ReflectConfig {
         active: ActiveSection {
             provider: Some("openai".into()),
@@ -447,10 +452,125 @@ fn resolved_model_spec_falls_back_to_builtin_default() {
         }),
         ..Default::default()
     };
+    assert_eq!(cfg.resolved_model_spec(), None);
+}
+
+// ── v1.5:[active].credential 钉住 + 条目级 model ────────────────────
+
+/// `[active].credential` 命中条目时,该条目的 `model` 优先于段级覆盖。
+#[test]
+fn resolve_model_prefers_pinned_credential_model() {
+    let toml = r#"
+        [active]
+        provider = "anthropic"
+        credential = "minimax"
+
+        [anthropic]
+        model = "section-model"
+
+        [[anthropic.credentials]]
+        label = "minimax"
+        api_key = "sk-m"
+
+        [[anthropic.credentials]]
+        label = "other"
+        api_key = "sk-o"
+        model = "other-model"
+    "#;
+    let cfg: ReflectConfig = toml::from_str(toml).unwrap();
+    assert_eq!(cfg.active_credential().as_deref(), Some("minimax"));
+    // 命中条目无 model → 回落段级;不因别的条目有 model 而误取。
+    assert_eq!(
+        cfg.resolve_model("anthropic"),
+        Some("section-model".to_string())
+    );
+
+    // 被钉住的条目自带 model → 压过段级。
+    let toml = toml.replace(
+        "api_key = \"sk-m\"",
+        "api_key = \"sk-m\"\n        model = \"minimax-model\"",
+    );
+    let cfg: ReflectConfig = toml::from_str(&toml).unwrap();
+    assert_eq!(
+        cfg.resolve_model("anthropic"),
+        Some("minimax-model".to_string())
+    );
     assert_eq!(
         cfg.resolved_model_spec(),
-        Some(format!("openai/{DEFAULT_OPENAI_MODEL}"))
+        Some("anthropic/minimax-model".to_string())
     );
+}
+
+/// 钉住只对 active provider 生效:解析别的 provider 时仍走段级。
+#[test]
+fn resolve_model_pin_applies_only_to_active_provider() {
+    let toml = r#"
+        [active]
+        provider = "anthropic"
+        credential = "minimax"
+
+        [openai]
+        model = "gpt-section"
+
+        [[anthropic.credentials]]
+        label = "minimax"
+        api_key = "sk-m"
+        model = "minimax-model"
+    "#;
+    let cfg: ReflectConfig = toml::from_str(toml).unwrap();
+    assert_eq!(
+        cfg.resolve_model("openai"),
+        Some("gpt-section".to_string()),
+        "openai 不是 active provider,不受 anthropic 的钉住影响"
+    );
+}
+
+/// `active_credential` 的 trim + 空串过滤。
+#[test]
+fn active_credential_trims_and_filters_empty() {
+    let toml = r#"
+        [active]
+        provider = "anthropic"
+        credential = "  MiniMax  "
+    "#;
+    let cfg: ReflectConfig = toml::from_str(toml).unwrap();
+    assert_eq!(cfg.active_credential().as_deref(), Some("MiniMax"));
+
+    let toml = r#"
+        [active]
+        provider = "anthropic"
+        credential = "   "
+    "#;
+    let cfg: ReflectConfig = toml::from_str(toml).unwrap();
+    assert_eq!(cfg.active_credential(), None);
+}
+
+/// `apply_to_registry` 把 `[active].credential` 注册为 preferred label。
+#[test]
+fn apply_to_registry_sets_preferred_label() {
+    let toml = r#"
+        [active]
+        provider = "anthropic"
+        credential = "minimax"
+
+        [[anthropic.credentials]]
+        label = "minimax"
+        api_key = "sk-m"
+
+        [[anthropic.credentials]]
+        label = "backup"
+        api_key = "sk-b"
+    "#;
+    let cfg: ReflectConfig = toml::from_str(toml).unwrap();
+    let r = cfg.to_registry().unwrap();
+    assert_eq!(r.preferred_label("anthropic").as_deref(), Some("minimax"));
+    assert_eq!(r.preferred_label("openai"), None);
+
+    // 未钉住 → preferred 不设。
+    let toml = toml.replace("credential = \"minimax\"", "");
+    let cfg: ReflectConfig = toml::from_str(&toml).unwrap();
+    let r = cfg.to_registry().unwrap();
+    assert_eq!(r.preferred_label("anthropic"), None);
 }
 
 // ── MCP (v0.3) ────────────────────────────────────────────────────────
@@ -586,10 +706,20 @@ fn mock_provider_opt_in_paths_and_model_resolution() {
         cfg.active_provider_inner(Some("anthropic"), Some("mock/mock-1")),
         Some("anthropic")
     );
-    // model 解析:剥前缀 / 裸 mock 回退默认 / 未设回退默认。
-    assert_eq!(cfg.model_for_inner("mock", Some("mock/mock-1")), "mock-1");
-    assert_eq!(cfg.model_for_inner("mock", Some("mock")), "mock-1");
-    assert_eq!(cfg.model_for_inner("mock", None), "mock-1");
+    // model 解析:剥前缀 / 裸 mock 回退内置 mock model(mock 是显式
+    // opt-in 的离线 provider,内置 model 名属于其契约)。
+    assert_eq!(
+        cfg.resolve_model_inner("mock", Some("mock/mock-1")),
+        Some("mock-1".to_string())
+    );
+    assert_eq!(
+        cfg.resolve_model_inner("mock", Some("mock")),
+        Some("mock-1".to_string())
+    );
+    assert_eq!(
+        cfg.resolve_model_inner("mock", None),
+        Some("mock-1".to_string())
+    );
 }
 
 /// 显式真实 provider 时 mock 不参与 active 选择。
@@ -601,4 +731,31 @@ fn mock_not_active_for_real_provider_config() {
         Some("anthropic")
     );
     assert_eq!(cfg.active_provider_inner(None, None), Some("anthropic"));
+}
+
+// ── v1.5 review:`[routing] max_attempts` 配置透传 ────────────────
+
+/// `[routing] max_attempts` 覆盖 `RoutingPolicy.max_attempts`(缺省 16)。
+#[test]
+fn routing_max_attempts_from_toml() {
+    // 显式配置 → 生效(用户要把最坏情况重试从 16 压到 10 的入口)。
+    let toml = r#"
+        [routing]
+        max_attempts = 10
+    "#;
+    let cfg: ReflectConfig = toml::from_str(toml).unwrap();
+    assert_eq!(cfg.routing_policy().max_attempts, 10);
+
+    // `[routing]` 段存在但未写 max_attempts → 缺省 16。
+    let toml_default = r#"
+        [routing]
+        [routing.main]
+        primary = "anthropic/claude-test"
+    "#;
+    let cfg_default: ReflectConfig = toml::from_str(toml_default).unwrap();
+    assert_eq!(cfg_default.routing_policy().max_attempts, 16);
+
+    // 整个 `[routing]` 段缺省 → 缺省 16。
+    let cfg_none = cfg_with_anthropic("sk-a");
+    assert_eq!(cfg_none.routing_policy().max_attempts, 16);
 }

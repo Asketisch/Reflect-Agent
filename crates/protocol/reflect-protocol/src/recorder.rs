@@ -66,6 +66,11 @@ pub struct SessionInfo {
     /// `None` = 没有 TokenCount 记录,或 model 不在 pricing 表里。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+    /// v1.x: 会话归属工作区(绝对路径)。`None` = 旧 session / CLI 创建未指定。
+    /// 旧 JSONL 反序列化为 `None`(#[serde(default)]),前端按 "未归属" 展示
+    /// 且不进入任何工作区视图。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
 }
 
 /// 一条在线程 JSONL rollout 中持久化的事件。
@@ -84,6 +89,10 @@ pub enum RolloutRecord {
         session_id: ThreadId,
         model: String,
         started_at: DateTime<Utc>,
+        /// v1.x: 会话归属工作区(绝对路径)。`None` = 旧文件 / CLI 创建未指定。
+        /// 旧 JSONL 反序列化为 `None`(#[serde(default)])。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace: Option<String>,
     },
     /// 一条持久化对话回合。`content` 是对 JSON 不透明的负载,让 recorder
     /// 既能携带 `ContentBlock`,也能携带纯文本或工具 payload。
@@ -215,6 +224,7 @@ impl RolloutRecord {
             session_id,
             model: model.into(),
             started_at: Utc::now(),
+            workspace: None,
         }
     }
 }

@@ -97,6 +97,7 @@ pub async fn register(
             body: String::new(),
             plugin_id: Some(loaded.plugin_id.to_string()),
             when_paths: vec![],
+            version: None,
         })
         .collect();
     if !skill_metas.is_empty() {
@@ -166,23 +167,55 @@ pub async fn register(
         }
     }
 
-    // 4. Commands / 5. Hooks —— plugin hooks 尚未实现 ShellHook;
-    //    扫描到的 hook 声明仅 log,不注册到 HookEngine。
-    if !loaded.hooks.is_empty() {
-        tracing::info!(
-            plugin = %loaded.plugin_id,
-            count = loaded.hooks.len(),
-            "plugin hooks deferred: ShellHook not implemented yet (Phase B-internal)"
-        );
-        for hook in &loaded.hooks {
-            tracing::debug!(
+    // 4. Commands / 5. Hooks —— v1.5 R3:LoadedHook → ShellHook 真挂载。
+    // 每条声明构造一个外部命令 hook(事件 JSON 进 stdin,stdout JSON
+    // 决策回传;超时 / 非零退出 fail-closed)。未知事件名或缺 command
+    // 的声明跳过并 warn,不阻断其余能力挂载。
+    let mut registered_hooks = 0usize;
+    for (i, hook) in loaded.hooks.iter().enumerate() {
+        let Some(kind) = reflect_hooks::shell::ShellHook::parse_kind(&hook.event) else {
+            tracing::warn!(
                 plugin = %loaded.plugin_id,
                 event = %hook.event,
-                matcher = ?hook.matcher,
-                source = %hook.source,
-                "plugin hook stub (not registered)"
+                "plugin hook: unknown event name, skipping"
             );
-        }
+            continue;
+        };
+        let Some(command) = hook
+            .command
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+        else {
+            tracing::warn!(
+                plugin = %loaded.plugin_id,
+                event = %hook.event,
+                "plugin hook: missing command, skipping"
+            );
+            continue;
+        };
+        let timeout = hook
+            .command
+            .get("timeout")
+            .and_then(|v| v.as_u64())
+            .map(std::time::Duration::from_secs)
+            .unwrap_or(reflect_hooks::DEFAULT_SHELL_HOOK_TIMEOUT);
+        let shell = reflect_hooks::ShellHook::new(
+            format!("plugin:{}:{}#{}", loaded.plugin_id, hook.event, i),
+            kind,
+            hook.matcher.clone(),
+            command,
+            timeout,
+        );
+        registries.hooks.register(shell);
+        registered_hooks += 1;
+    }
+    if registered_hooks > 0 {
+        tracing::info!(
+            plugin = %loaded.plugin_id,
+            count = registered_hooks,
+            "plugin hooks registered (ShellHook)"
+        );
     }
 
     if errors.is_empty() {
@@ -235,8 +268,17 @@ pub async fn unregister(registries: &LoaderRegistries, plugin_id: &PluginId) -> 
         .subagent_factory
         .take_plugin_specs(plugin_id.as_str());
 
-    // 5. Hooks —— ShellHook 未实现;register 阶段仅 log,unregister 无状态可清。
-    tracing::debug!(plugin = %plugin_id, "unregister: plugin hooks stub had no HookEngine entries");
+    // 5. Hooks —— ShellHook 命名前缀 `plugin:{id}:` 整段注销。
+    let removed_hooks = registries
+        .hooks
+        .unregister_by_prefix(&format!("plugin:{}:", plugin_id.as_str()));
+    if removed_hooks > 0 {
+        tracing::debug!(
+            plugin = %plugin_id,
+            count = removed_hooks,
+            "unregister: removed plugin ShellHooks"
+        );
+    }
     Ok(())
 }
 
@@ -479,6 +521,7 @@ mod tests {
                 body: String::new(),
                 plugin_id: Some(id.to_string()),
                 when_paths: vec![],
+                version: None,
             })
             .collect();
         catalog.lock().add_plugin_skills(id.as_str(), &skill_metas);

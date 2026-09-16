@@ -85,14 +85,105 @@ impl Tool for CallSubAgentTool {
                 message: "missing 'prompt' string".into(),
             })?
             .to_string();
-        let parent_tail: Vec<reflect_llm::ChatMessage> = vec![];
+        // v1.4 C1:父上下文传递接通 —— 截取条数优先取调用参数
+        // `context_tail`,否则用 spec 的 `pass_context_messages`(默认 0,
+        // 行为不变)。元素从 tool_exec 注入的父历史尾部快照(JSON)还原。
+        let pass_n = args
+            .get("context_tail")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .unwrap_or(self.spec.data_transfer.pass_context_messages);
+        let parent_tail: Vec<reflect_llm::ChatMessage> = if pass_n > 0 {
+            ctx.parent_tail_json
+                .read()
+                .iter()
+                .rev()
+                .take(pass_n)
+                .rev()
+                .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                .collect()
+        } else {
+            Vec::new()
+        };
         let spawned = self
             .factory
             .spawn(self.spec.clone(), parent_tail, prompt.clone())
             .await
             .map_err(ToolError::from)?;
         let child_session_id = spawned.session_id.to_string();
-        let result = spawned.collect_result().await.map_err(ToolError::from)?;
+        // v1.4 C1:进度推送 —— 把子代理的中间事件(助手文本 / 工具开始 /
+        // 结束)包装为 SubagentProgress 事件经转发器发往父事件通道;
+        // 转发器缺席(测试 / 直接构造)时 no-op。
+        // review 修复:ToolEnd 的 text 按协议契约回填工具名 —— End 事件
+        // 本身只带 call_id,这里用 Begin 事件积累的 call_id → 工具名映射
+        // 反查(此前发的是 "tool done"/"tool failed",与协议 doc 相悖)。
+        let progress_cb = ctx.event_forwarder.clone().map(|fwd| {
+            let child_id = child_session_id.clone();
+            let role = self.spec.role.clone();
+            // 回调以 `&(dyn Fn(..))` 形式被 collect 消费 —— 需要保持 Fn,
+            // 可变映射用 Mutex 包裹(Interior mutability)。
+            let tool_names: std::sync::Mutex<std::collections::HashMap<String, String>> =
+                std::sync::Mutex::new(std::collections::HashMap::new());
+            move |ev: &reflect_protocol::Event| {
+                let payload = match &ev.msg {
+                    reflect_protocol::EventMsg::AgentMessage(m) => Some((
+                        reflect_protocol::SubagentProgressKind::Message,
+                        m.text.clone(),
+                        None,
+                    )),
+                    reflect_protocol::EventMsg::ToolCallBegin(b) => {
+                        tool_names
+                            .lock()
+                            .unwrap()
+                            .insert(b.call_id.clone(), b.tool_name.clone());
+                        Some((
+                            reflect_protocol::SubagentProgressKind::ToolBegin,
+                            b.tool_name.clone(),
+                            Some(b.call_id.clone()),
+                        ))
+                    }
+                    reflect_protocol::EventMsg::ToolCallEnd(e) => {
+                        // 反查工具名;未见 Begin(极端时序)时退化为占位名。
+                        let name = tool_names
+                            .lock()
+                            .unwrap()
+                            .remove(&e.call_id)
+                            .unwrap_or_else(|| "tool".to_string());
+                        let text = if e.is_error {
+                            format!("{name} (failed)")
+                        } else {
+                            name
+                        };
+                        Some((
+                            reflect_protocol::SubagentProgressKind::ToolEnd,
+                            text,
+                            Some(e.call_id.clone()),
+                        ))
+                    }
+                    _ => None,
+                };
+                if let Some((kind, text, call_id)) = payload {
+                    fwd.forward(reflect_protocol::EventMsg::SubagentProgress(
+                        reflect_protocol::SubagentProgressEvent {
+                            child_id: child_id.clone(),
+                            role: role.clone(),
+                            kind,
+                            text,
+                            call_id,
+                        },
+                    ));
+                }
+            }
+        });
+        let result = spawned
+            .collect_result_with_progress(
+                progress_cb
+                    .as_ref()
+                    .map(|cb| cb as &(dyn Fn(&reflect_protocol::Event) + Send + Sync)),
+            )
+            .await
+            .map_err(ToolError::from)?
+            .text;
         // v1.1.0:coordinator 模式下 subagent 返回后向父协调者注入 principle footer。
         let result_text = if self.factory.is_coordinator_mode() {
             crate::data_transfer::append_coordinator_principle_footer(
