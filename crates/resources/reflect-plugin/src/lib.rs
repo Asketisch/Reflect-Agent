@@ -6,8 +6,14 @@
 //! 并接入 `reflect-exec::handle_reload` 的 plugins 分支。
 //!
 //! 关键 schema 字段保持一致,便于跨工具互读 manifest。
+//!
+//! [`runtime`] 模块承载运行时装配(`PluginRuntime` / `bootstrap_plugins`),
+//! 从 `reflect-exec` 下沉而来,供 exec / serve / 门面 Builder / Python
+//! 绑定共用同一套挂载入口;[`commands_registry`] 承载插件 slash 命令的
+//! 注册与用户输入展开。
 
 pub mod capabilities;
+pub mod commands_registry;
 pub mod dependency;
 pub mod errors;
 pub mod identifier;
@@ -15,6 +21,7 @@ pub mod loader;
 pub mod manager;
 pub mod manifest;
 pub mod marketplace;
+pub mod runtime;
 pub mod state;
 
 // ── 公共 re-export ────────────────────────────────────────────────────
@@ -27,6 +34,7 @@ pub use capabilities::{
     mcp::{LoadedMcpServer, McpSource, McpTransportKind},
     skills::LoadedSkill,
 };
+pub use commands_registry::{CommandRegistry, ExpandError, expand_command, expand_user_input};
 pub use dependency::{DepResolver, ResolvedDep};
 pub use errors::{PluginError, Result};
 pub use identifier::{MarketplaceName, PluginId, RESERVED_MARKETPLACE_NAMES};
@@ -38,6 +46,9 @@ pub use manifest::{
 };
 pub use reflect_skills::{SkillMeta, SkillsCatalog};
 pub use reflect_subagent::{CallSubAgentTool, SubAgentFactory, SubAgentSpec};
+pub use runtime::{
+    PluginRuntime, SharedPluginRuntime, bootstrap_plugins, empty_plugin_runtime, reload_plugins,
+};
 pub use state::{
     InstallationEntry, InstalledPluginsFile, KnownMarketplace, KnownMarketplacesFile, PluginScope,
     PluginStatus,

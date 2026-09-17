@@ -129,6 +129,7 @@ fn user_sub(id: &str, text: &str) -> Submission {
         workspace: None,
         client_user_message_id: None,
         trace: None,
+        source_command: None,
     }
 }
 
@@ -142,6 +143,7 @@ fn plan_approval_sub(submission_id: &str, plan_id: &str, choice: PlanApprovalCho
         workspace: None,
         client_user_message_id: None,
         trace: None,
+        source_command: None,
     }
 }
 

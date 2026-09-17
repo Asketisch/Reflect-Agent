@@ -67,6 +67,7 @@ fn user_input_sub(id: &str, text: &str) -> Submission {
         client_user_message_id: None,
         trace: None,
         workspace: None,
+        source_command: None,
     }
 }
 
@@ -77,6 +78,7 @@ fn shutdown_sub(id: &str) -> Submission {
         client_user_message_id: None,
         trace: None,
         workspace: None,
+        source_command: None,
     }
 }
 

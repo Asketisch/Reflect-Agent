@@ -69,6 +69,7 @@ async-trait = { workspace = true }
 futures     = { workspace = true }
 parking_lot = { workspace = true }
 reflect-mcp      = { workspace = true }
+reflect-plugin   = { workspace = true }
 reflect-tools    = { workspace = true }
 reflect-llm      = { workspace = true }
 

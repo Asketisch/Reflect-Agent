@@ -441,6 +441,7 @@ fn make_sub(op: Op) -> Submission {
         client_user_message_id: None,
         trace: None,
         workspace: None,
+        source_command: None,
     }
 }
 

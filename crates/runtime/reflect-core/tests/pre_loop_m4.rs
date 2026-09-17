@@ -139,6 +139,7 @@ fn make_sub(text: &str) -> Submission {
         client_user_message_id: None,
         trace: None,
         workspace: None,
+        source_command: None,
     }
 }
 
@@ -1555,6 +1556,7 @@ async fn recorder_refill_respects_rewind_truncation() {
             client_user_message_id: None,
             trace: None,
             workspace: None,
+            source_command: None,
         })
         .await;
     while let Some(ev) = hr.next().await {

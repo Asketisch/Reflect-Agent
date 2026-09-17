@@ -18,8 +18,8 @@ use reflect_core::{AgentConfig, AgentThread};
 use reflect_hooks::builtins::{PlanModeGate, build_read_before_edit};
 use reflect_llm::ModelRegistry;
 use reflect_mcp::McpConnectionManager;
-use reflect_protocol::{Event, ThreadId};
-use reflect_rollout::JsonlRolloutWriter;
+use reflect_plugin::runtime::{SharedPluginRuntime, bootstrap_plugins};
+use reflect_protocol::{Event, Submission, ThreadId};
 use reflect_task::coordinator::CoordinatorConfig;
 use reflect_tools::{Sanitizer, ToolRegistry, ToolSource};
 use tokio::sync::mpsc;
@@ -28,7 +28,6 @@ use tokio_util::sync::CancellationToken;
 use crate::bootstrap::{
     self, bootstrap_lsp, bootstrap_m4, bootstrap_m5, bootstrap_m6, bootstrap_resume,
 };
-use crate::bootstrap_plugins;
 use crate::jsonl::JsonlWriter;
 use crate::reload::spawn_reload_task;
 use crate::runtime_config::{
@@ -83,6 +82,10 @@ pub struct HeadlessSession {
     /// resume 分支回放进 thread 的历史消息数(普通分支为 0)。exec 用它
     /// 拼合成 reminder 文案;serve 忽略。
     pub prior_messages: usize,
+    /// 运行时插件状态 —— exec / serve 用它在 submit 前展开
+    /// `/plugin:ns:name args` 形式的 slash 命令(`expand_user_input`)。
+    /// `HOME` 缺失或 plugins 目录不存在时 `Option` 内为 `None`。
+    pub plugin_runtime: SharedPluginRuntime,
 }
 
 /// 装配公共前半段:config → tracing → 工具注册表 → task manager →
@@ -498,7 +501,7 @@ pub async fn bootstrap_normal(
         mcp_for_plugins.clone(),
     )));
 
-    let plugin_runtime = bootstrap_plugins::bootstrap_plugins(
+    let plugin_runtime = bootstrap_plugins(
         tools.clone(),
         thread.hook_engine(),
         mcp_for_plugins,
@@ -521,7 +524,7 @@ pub async fn bootstrap_normal(
         Some(parent_recorder),
         mcp_manager,
         tools.clone(),
-        Some(plugin_runtime),
+        Some(plugin_runtime.clone()),
     );
     let (sync_tx, sync_rx) = std::sync::mpsc::channel::<Event>();
     std::thread::spawn(move || {
@@ -547,11 +550,19 @@ pub async fn bootstrap_normal(
         thread,
         tools,
         prior_messages: 0,
+        plugin_runtime,
     })
 }
 
-/// 装配 resume 分支(与原 `async_main` resume 分支逐行对应):回放历史
-/// 消息到全新 AgentThread,不带 factory / plugin(回放补足先前状态)。
+/// 装配 resume 分支:回放历史消息到全新 AgentThread,并与普通分支共用
+/// 完整 M4/M5 装配 + 插件挂载。
+///
+/// 历史 resume 分支为了最小依赖用了测试辅助 `default_m4_deps`(空壳
+/// skills catalog + "You are a test agent." system prompt)且不带
+/// factory / plugin,导致续跑会话丢失 skills / 子代理 / 插件能力。
+/// 现在 resume 与普通分支同权:M4 真实装配(recorder 仍续写原
+/// session)、SubAgentFactory 在位、`enabled_plugins` 挂载且
+/// `[plugins]` 段热重载生效。
 pub async fn bootstrap_resumed(
     common: HeadlessCommon,
     args: &HeadlessArgs,
@@ -574,16 +585,44 @@ pub async fn bootstrap_resumed(
     } = common;
 
     let bundle = bootstrap_resume(thread_id_str).await?;
-    // 最小 M4 依赖:不做 compaction,recorder 续写原 session。
-    let resume_recorder: Arc<dyn reflect_protocol::RolloutRecorder> = Arc::new(
-        JsonlRolloutWriter::new(reflect_rollout::path::default_base(), bundle.thread_id),
+    let thread_id = bundle.thread_id;
+    let telemetry_sink = build_telemetry_sink(&initial_cfg);
+    // 与普通分支相同的 M4 装配:真实 skills 扫描 + 记忆 + 压缩器 + note
+    // 落盘。`bootstrap_m4` 内部按 thread_id 续写同一 JSONL,与旧 resume
+    // 的 `resume_recorder` 等价。
+    let m4 = bootstrap_m4(
+        &workspace,
+        args.agent.as_deref().unwrap_or("default"),
+        &model,
+        &registry,
+        thread_id,
+        initial_cfg.compact.trigger_tokens,
+        &initial_cfg,
+        telemetry_sink.clone(),
+    )
+    .expect("bootstrap_m4 must succeed for the resume path");
+    let resume_recorder: Arc<dyn reflect_protocol::RolloutRecorder> = m4
+        .recorder
+        .clone()
+        .unwrap_or_else(|| Arc::new(reflect_protocol::NullRecorder));
+    let skills_for_plugins = m4.skills.clone();
+    // M5:子代理工厂 —— 插件 agents 能力与内置 subagent spec 都落在这里。
+    let factory = bootstrap_m5(
+        &workspace,
+        args.agent.as_deref().unwrap_or("default"),
+        &model,
+        &registry,
+        thread_id,
+        resume_recorder.clone(),
+        &m4,
+        &initial_cfg,
     );
-    let mut m4 = reflect_core::config::default_m4_deps(args.agent.as_deref().unwrap_or("default"));
-    m4.recorder = Some(resume_recorder.clone());
+    factory.set_telemetry(telemetry_sink.clone());
+    factory.set_cancel(cancel.clone());
     let cfg = AgentConfig::new(model.clone(), workspace.clone())
         .with_m4(m4)
         .with_policy(Arc::new(initial_cfg.routing_policy()))
-        .with_telemetry(build_telemetry_sink(&initial_cfg))
+        .with_telemetry(telemetry_sink)
         .with_cancel(cancel.clone())
         .with_preload_messages(bundle.initial_messages.clone());
     let cfg_for_reload = cfg.clone();
@@ -597,6 +636,23 @@ pub async fn bootstrap_resumed(
     // resume 也跑 MCP bootstrap,方便继续使用之前挂的 MCP server。
     let mcp_manager = bootstrap_m6(&initial_cfg, reload_tx.clone()).await;
     let _lsp_manager = bootstrap_lsp(&initial_cfg, reload_tx.clone(), tools.clone()).await;
+    // 插件 runtime —— resume 与普通分支同权:挂载 enabled_plugins。
+    // resume 分支历史上没有 reload drainer(事件静默丢弃),插件
+    // `PluginLoaded` 事件同样无消费者,传 `None` 静默。
+    let mcp_for_plugins = mcp_manager.clone().unwrap_or_else(|| {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<reflect_mcp::McpLifecycleEvent>(16);
+        Arc::new(McpConnectionManager::new(tx))
+    });
+    let plugin_runtime = bootstrap_plugins(
+        tools.clone(),
+        hook_engine.clone(),
+        mcp_for_plugins,
+        skills_for_plugins,
+        factory.clone(),
+        &initial_cfg.plugins.enabled_plugins,
+        None,
+    )
+    .await;
     spawn_reload_task(
         registry.clone(),
         watcher,
@@ -604,11 +660,11 @@ pub async fn bootstrap_resumed(
         config_path.clone(),
         initial_cfg,
         cfg_for_reload,
-        None,
+        Some(factory),
         Some(resume_recorder),
         mcp_manager,
         tools.clone(),
-        None,
+        Some(plugin_runtime.clone()),
     );
     // resume 分支历史上没有 reload drainer(事件静默丢弃),保持原行为:
     // 这里同样不桥接 reload_rx,drop 即让 reload task 的发送端自然退出。
@@ -618,6 +674,7 @@ pub async fn bootstrap_resumed(
         thread,
         tools,
         prior_messages: bundle.initial_messages.len(),
+        plugin_runtime,
     })
 }
 
@@ -643,4 +700,43 @@ pub fn resumed_prompt(thread_id: &str, prior_messages: usize) -> String {
     format!(
         "<system-reminder>Resumed session {thread_id} ({prior_messages} prior messages)</system-reminder>\n\nContinue."
     )
+}
+
+/// 展开用户输入中的插件 slash 命令(`/plugin:ns:name args`)并构造
+/// Submission。
+///
+/// - 输入不以 `/` 开头或未命中任何已挂载命令 → 原样构造
+///   `Submission::user_input`(直通,不影响普通 prompt);
+/// - 命中 → 以命令 md 正文(剥 frontmatter + `$ARGUMENTS`/`$1`..`$9`
+///   替换)替换输入,并在 `Submission::source_command` 标注命令名;
+/// - 命中但命令文件读取失败 → 返回 `Err`(exec 直接报错退出;serve
+///   侧调用方选择降级为原样转发)。
+pub async fn expand_plugin_command(
+    plugin_runtime: &SharedPluginRuntime,
+    prompt: String,
+) -> anyhow::Result<Submission> {
+    // 先快照命令注册表并尽快释放 runtime 锁 —— 展开期间的文件 IO 不占锁。
+    let registry = {
+        let guard = plugin_runtime.lock().await;
+        match guard.as_ref() {
+            Some(rt) => rt.commands(),
+            None => return Ok(Submission::user_input(prompt)),
+        }
+    };
+    match reflect_plugin::expand_user_input(&prompt, &registry) {
+        None => Ok(Submission::user_input(prompt)),
+        Some(Ok(expanded)) => {
+            tracing::info!(command = %expanded.name, "plugin command expanded");
+            Ok(Submission::user_input(expanded.body).with_source_command(expanded.name))
+        }
+        Some(Err(e)) => {
+            // split_whitespace 自带按首尾空白裁切,无需先 trim。
+            let name = prompt
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_start_matches('/');
+            Err(anyhow::anyhow!("插件命令 `{name}` 展开失败: {e}"))
+        }
+    }
 }

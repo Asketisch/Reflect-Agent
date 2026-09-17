@@ -13,7 +13,6 @@
 //! 以 JSONL 流形式向 stdout 输出事件。tracing 日志走 stderr。
 
 mod bootstrap;
-pub mod bootstrap_plugins;
 mod checkpoint_tool;
 mod cron_tool;
 mod headless;
@@ -150,7 +149,9 @@ async fn async_main(args: ExecArgs) -> anyhow::Result<()> {
         .prompt
         .ok_or_else(|| anyhow::anyhow!("usage: reflect exec <prompt>"))?;
     let session = headless::bootstrap_normal(common, &hargs).await?;
-    let sub = Submission::user_input(prompt);
+    // 插件 slash 命令展开:`/demo:hello world` → 命令 md 正文;未命中
+    // 任何命令时原样提交。展开失败(命令文件不可读)直接报错退出。
+    let sub = headless::expand_plugin_command(&session.plugin_runtime, prompt).await?;
     let mut handle = session.thread.submit(sub).await;
     while let Some(event) = handle.next().await {
         let mut w = JsonlWriter::new(std::io::stdout().lock());

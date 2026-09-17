@@ -93,6 +93,7 @@ fn sub_with_settings(id: &str, text: &str, settings: ThreadSettingsOverrides) ->
         client_user_message_id: None,
         trace: None,
         workspace: None,
+        source_command: None,
     }
 }
 
@@ -103,6 +104,7 @@ fn sub(id: &str, op: Op) -> Submission {
         client_user_message_id: None,
         trace: None,
         workspace: None,
+        source_command: None,
     }
 }
 

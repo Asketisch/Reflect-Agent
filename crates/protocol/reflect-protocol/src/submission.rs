@@ -26,6 +26,11 @@ pub struct Submission {
     /// v1.x:会话归属工作区(绝对路径字符串)。`None` = 不指定(CLI / 测试场景)。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
+    /// v1.x:用户文本来自插件 slash 命令展开时的命令全名
+    /// (`/plugin:ns:name args` → `plugin:ns:name`)。`None` = 普通 prompt。
+    /// 仅作 rollout / 遥测的来源标注,不影响 core 语义。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_command: Option<String>,
 }
 
 impl Submission {
@@ -37,6 +42,7 @@ impl Submission {
             client_user_message_id: None,
             trace: None,
             workspace: None,
+            source_command: None,
         }
     }
 
@@ -48,6 +54,7 @@ impl Submission {
             client_user_message_id: None,
             trace: None,
             workspace: None,
+            source_command: None,
         }
     }
 
@@ -59,7 +66,15 @@ impl Submission {
             client_user_message_id: None,
             trace: None,
             workspace: Some(workspace.into()),
+            source_command: None,
         }
+    }
+
+    /// v1.x:链式标注来源命令(配合 `reflect_plugin::expand_user_input`
+    /// 使用,记录该 prompt 由哪个插件命令展开而来)。
+    pub fn with_source_command(mut self, command: impl Into<String>) -> Self {
+        self.source_command = Some(command.into());
+        self
     }
 }
 

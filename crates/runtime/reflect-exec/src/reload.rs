@@ -9,11 +9,11 @@ use reflect_config::ConfigWatcher;
 use reflect_core::AgentConfig;
 use reflect_llm::ModelRegistry;
 use reflect_mcp::{McpConnectionManager, McpServerConfig};
+use reflect_plugin::runtime::{SharedPluginRuntime, reload_plugins};
 use reflect_subagent::SubAgentFactory;
 use reflect_tools::ToolRegistry;
 
 use crate::apply_coordinator_from_config;
-use crate::bootstrap_plugins;
 
 /// 监听 config watcher,每次变更重建 `ModelRegistry` 内的 provider client。
 /// 已发出的 LLM 请求不受影响;下一个 turn 用新 client。
@@ -42,7 +42,7 @@ pub fn spawn_reload_task(
     recorder: Option<Arc<dyn reflect_protocol::RolloutRecorder>>,
     mcp_manager: Option<Arc<McpConnectionManager>>,
     tools: Arc<ToolRegistry>,
-    plugin_runtime: Option<bootstrap_plugins::SharedPluginRuntime>,
+    plugin_runtime: Option<SharedPluginRuntime>,
 ) {
     tokio::spawn(async move {
         let mut rx = watcher.subscribe();
@@ -109,7 +109,7 @@ pub async fn handle_reload(
     event_tx: &tokio::sync::mpsc::Sender<reflect_protocol::Event>,
     mcp_manager: Option<&McpConnectionManager>,
     tools: &ToolRegistry,
-    plugin_runtime: Option<&bootstrap_plugins::SharedPluginRuntime>,
+    plugin_runtime: Option<&SharedPluginRuntime>,
 ) -> Result<(), String> {
     if let Err(e) = new_cfg.apply_to_registry(registry) {
         return Err(format!("apply_to_registry failed: {e}"));
@@ -204,7 +204,7 @@ pub async fn handle_reload(
     // v1.0.0-rc2: `[plugins]` 段变更 → 同步 enabled_plugins 挂载。
     if sections_changed.iter().any(|s| s == "plugins") {
         if let Some(rt) = plugin_runtime {
-            bootstrap_plugins::reload_plugins(rt, &new_cfg.plugins.enabled_plugins).await;
+            reload_plugins(rt, &new_cfg.plugins.enabled_plugins).await;
         }
     }
 

@@ -141,6 +141,7 @@ fn make_sub(text: &str) -> Submission {
         client_user_message_id: None,
         trace: None,
         workspace: None,
+        source_command: None,
     }
 }
 

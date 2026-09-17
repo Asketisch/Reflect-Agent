@@ -21,12 +21,14 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::sync::mpsc;
 
 use reflect_core::AgentThread;
-use reflect_protocol::{EVENT_ID_NONE, ErrorEvent, Event, EventMsg, Op, Submission};
+use reflect_plugin::runtime::SharedPluginRuntime;
+use reflect_protocol::{EVENT_ID_NONE, ErrorEvent, Event, EventMsg, Op, Submission, UserInputItem};
 use reflect_tools::remote::{RemoteBridge, RemoteTool};
 use reflect_tools::{ToolRegistry, ToolSource};
 
 use crate::headless::{
-    HeadlessArgs, bootstrap_common, bootstrap_normal, bootstrap_resumed, resolve_resume_thread_id,
+    HeadlessArgs, bootstrap_common, bootstrap_normal, bootstrap_resumed, expand_plugin_command,
+    resolve_resume_thread_id,
 };
 
 /// 单次远程工具执行等待回执的默认上限。
@@ -111,7 +113,14 @@ async fn serve_main(args: ServeArgs) -> anyhow::Result<()> {
     });
 
     let stdin = tokio::io::stdin();
-    serve_session(session.thread, session.tools, stdin, sink).await?;
+    serve_session(
+        session.thread,
+        session.tools,
+        session.plugin_runtime,
+        stdin,
+        sink,
+    )
+    .await?;
 
     // 有界等待 writer 排空:在跑 turn 的 reader task 可能还持有 sink
     // clone,超时后直接放弃(迟到事件丢弃,进程即将退出)。
@@ -123,9 +132,14 @@ async fn serve_main(args: ServeArgs) -> anyhow::Result<()> {
 ///
 /// `reader` 产 Submission JSONL 行;所有事件(turn / session / 远程工具
 /// 请求)汇入 `sink`。返回即代表会话结束(EOF / Shutdown / 读错误)。
+///
+/// `plugin_runtime` 用于把 `/plugin:ns:name args` 形式的用户输入展开为
+/// 插件命令正文后再转发 core;不需要命令展开的调用方传
+/// [`empty_plugin_runtime`]。
 pub async fn serve_session<R>(
     thread: Arc<AgentThread>,
     tools: Arc<ToolRegistry>,
+    plugin_runtime: SharedPluginRuntime,
     reader: R,
     sink: mpsc::Sender<Event>,
 ) -> anyhow::Result<()>
@@ -241,9 +255,10 @@ where
                 break;
             }
             _ => {
-                // 普通 Submission:转发 core;turn 事件由后台 reader 汇入
-                // sink(允许上一 turn 未结束时提交下一 turn,engine 侧
-                // 串行排队)。
+                // 普通 Submission:插件命令展开后转发 core;turn 事件由后台
+                // reader 汇入 sink(允许上一 turn 未结束时提交下一 turn,
+                // engine 侧串行排队)。
+                let sub = expand_plugin_submission(sub, &plugin_runtime).await;
                 let sub_id = sub.id.clone();
                 let mut handle = thread.submit(sub).await;
                 let sink4 = sink.clone();
@@ -281,6 +296,29 @@ where
     }
     drop(sink);
     Ok(())
+}
+
+/// serve 侧的插件命令展开:仅处理「单条 Text 的 UserInput」—— SDK 组合
+/// 输入(多 item / 非 Text)不做命令替换。命中但展开失败时 warn +
+/// 原样转发(不中断已建立的 serve 会话)。
+async fn expand_plugin_submission(
+    sub: Submission,
+    plugin_runtime: &SharedPluginRuntime,
+) -> Submission {
+    let text = match &sub.op {
+        Op::UserInput { items, .. } if items.len() == 1 => match &items[0] {
+            UserInputItem::Text { text } if text.starts_with('/') => text.clone(),
+            _ => return sub,
+        },
+        _ => return sub,
+    };
+    match expand_plugin_command(plugin_runtime, text).await {
+        Ok(expanded) => expanded,
+        Err(e) => {
+            tracing::warn!(error = %e, "serve: 插件命令展开失败,原样转发");
+            sub
+        }
+    }
 }
 
 /// 注册单个远程工具:空名 / 与既有工具撞名时 emit Error 事件并跳过
