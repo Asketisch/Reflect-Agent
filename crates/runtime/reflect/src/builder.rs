@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use reflect_core::{AgentConfig, AgentThread};
+use reflect_plugin::runtime::{SharedPluginRuntime, bootstrap_plugins, empty_plugin_runtime};
 use reflect_protocol::{Event, Submission, ThreadId};
 use reflect_tools::ToolRegistry;
 use tokio::sync::mpsc;
@@ -40,6 +41,10 @@ pub struct ReflectBuilder {
     /// 调 `/exit-plan` 审批 plan 才能切回 `Prompt`。
     plan_mode: bool,
     cancel: Option<CancellationToken>,
+    /// 插件挂载列表:`Some(list)` = 显式启用;`None` = 按
+    /// `~/.reflect/config.toml` 的 `[plugins].enabled_plugins`。
+    /// 仅 [`ReflectBuilder::build_async`] 消费(挂载是异步操作)。
+    plugins: Option<Vec<String>>,
 }
 
 impl ReflectBuilder {
@@ -54,6 +59,7 @@ impl ReflectBuilder {
             approvals: true,
             plan_mode: false,
             cancel: None,
+            plugins: None,
         }
     }
 
@@ -84,6 +90,20 @@ impl ReflectBuilder {
     /// 提供自定义取消 token(Ctrl-C 处理器、超时截止)。
     pub fn cancel_token(mut self, token: CancellationToken) -> Self {
         self.cancel = Some(token);
+        self
+    }
+
+    /// 启用插件挂载(仅 [`ReflectBuilder::build_async`] 消费)。
+    ///
+    /// - `Some(list)` —— 显式启用列表,忽略 config;
+    /// - `None`(默认)—— 按 `~/.reflect/config.toml` 的
+    ///   `[plugins].enabled_plugins`。
+    ///
+    /// 插件的 skills / agents / MCP servers / shell hooks / slash 命令
+    /// 在 `build_async` 里挂载到共享 registry;未安装的 id 仅 warn 跳过,
+    /// 不阻塞启动。
+    pub fn with_plugins(mut self, enabled: Option<Vec<String>>) -> Self {
+        self.plugins = enabled;
         self
     }
 
@@ -149,7 +169,100 @@ impl ReflectBuilder {
         }
         cfg = cfg.with_m4(m4);
         let thread = Arc::new(AgentThread::new(cfg, registry, tools, None, None));
-        Ok(Reflect { thread, cancel })
+        Ok(Reflect {
+            thread,
+            cancel,
+            plugin_runtime: empty_plugin_runtime(),
+        })
+    }
+
+    /// [`ReflectBuilder::build`] 的异步完整版:额外构造真实 `HookEngine`
+    /// 与 MCP manager,并按 [`ReflectBuilder::with_plugins`] 挂载插件
+    /// (skills / agents / MCP servers / shell hooks / slash 命令)。
+    ///
+    /// 与 exec 路径的差异(与 `build()` 一致,嵌入场景从紧):
+    /// - config `[hooks]` 未显式列出 = 不启用内置 hook(verification 之类
+    ///   Stop hook 会在宿主 cwd 跑 shell,静默启用不可预期);插件自带
+    ///   hooks 不受此开关影响,照常挂载;
+    /// - config `[mcp_servers]` 不消费(空 manager 兜底,仅供插件的
+    ///   mcp_servers 能力落点)。
+    pub async fn build_async(self) -> anyhow::Result<Reflect> {
+        let registry = build_registry_from_env()?;
+        let tools = Arc::new(default_tool_registry());
+        let cancel = self.cancel.unwrap_or_default();
+        let thread_id = ThreadId::new();
+        let m4 = m4_bootstrap::build_default_m4(
+            &self.workspace,
+            "default",
+            &self.model,
+            &registry,
+            thread_id,
+        )?;
+        let skills_for_plugins = m4.skills.clone();
+
+        // HookEngine:插件 shell hooks 与内置 hook 的共同落点。嵌入场景
+        // 未显式配置的内置 hook 不启用(见方法 doc)。
+        let app_cfg = reflect_config::load_default();
+        let mut hooks_cfg =
+            reflect_hooks::config::HooksConfig::from_reflect_section(&app_cfg.hooks);
+        if hooks_cfg.enabled.is_none() {
+            hooks_cfg.enabled = Some(Vec::new());
+        }
+        let hook_engine: Arc<reflect_hooks::HookEngine> = Arc::new(hooks_cfg.build_engine());
+
+        // MCP manager:空壳兜底 —— 插件 mcp_servers 经 loader 挂进同一份。
+        let (mcp_tx, _mcp_rx) = mpsc::channel::<reflect_mcp::McpLifecycleEvent>(16);
+        let mcp: Arc<reflect_mcp::McpConnectionManager> =
+            Arc::new(reflect_mcp::McpConnectionManager::new(mcp_tx));
+
+        // SubAgentFactory:插件 agents 能力的落点(loader 会注册
+        // `call_<role>` 工具并把 spec 记在 factory 上)。
+        let factory = Arc::new(reflect_subagent::SubAgentFactory::new(
+            thread_id,
+            self.model.clone(),
+            registry.clone(),
+            None,
+            tools.clone(),
+            cancel.clone(),
+            None,
+        ));
+        factory.set_parent_skills(skills_for_plugins.clone());
+
+        let mut cfg = AgentConfig::new(self.model.clone(), self.workspace.clone())
+            .with_approvals(self.approvals);
+        if self.plan_mode {
+            cfg = cfg.with_initial_permission_mode(reflect_protocol::PermissionMode::Plan);
+        }
+        cfg = cfg.with_m4(m4);
+        let thread = Arc::new(AgentThread::new(
+            cfg,
+            registry,
+            tools.clone(),
+            None,
+            Some(hook_engine.clone()),
+        ));
+
+        // 插件挂载:显式列表优先,否则读 config。HOME 缺失等场景
+        // bootstrap_plugins 返回空句柄,不阻塞启动。
+        let enabled = self
+            .plugins
+            .unwrap_or_else(|| app_cfg.plugins.enabled_plugins.clone());
+        let plugin_runtime = bootstrap_plugins(
+            tools,
+            hook_engine,
+            mcp,
+            skills_for_plugins,
+            factory,
+            &enabled,
+            None,
+        )
+        .await;
+
+        Ok(Reflect {
+            thread,
+            cancel,
+            plugin_runtime,
+        })
     }
 }
 
@@ -159,6 +272,10 @@ impl ReflectBuilder {
 pub struct Reflect {
     thread: Arc<AgentThread>,
     cancel: CancellationToken,
+    /// 运行时插件状态(`build_async` 挂载;`build` / `from_thread` 为空)。
+    /// 使用方可用 [`reflect_plugin::expand_user_input`] + 此句柄展开
+    /// `/plugin:ns:name args` 形式的 slash 命令。
+    plugin_runtime: SharedPluginRuntime,
 }
 
 impl std::fmt::Debug for Reflect {
@@ -178,7 +295,17 @@ impl Reflect {
     /// 直接从一个已构造好的 thread 包装。
     pub fn from_thread(thread: Arc<AgentThread>) -> Self {
         let cancel = thread.cancel_token().clone();
-        Self { thread, cancel }
+        Self {
+            thread,
+            cancel,
+            plugin_runtime: empty_plugin_runtime(),
+        }
+    }
+
+    /// 运行时插件状态句柄(`build_async` 挂载的 skills / agents / MCP /
+    /// shell hooks / slash 命令都在这里;`build()` 构造的实例返回空句柄)。
+    pub fn plugin_runtime(&self) -> &SharedPluginRuntime {
+        &self.plugin_runtime
     }
 
     /// 借用底层的 thread。

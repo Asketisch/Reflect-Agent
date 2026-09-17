@@ -72,6 +72,21 @@ impl PyReflectBuilder {
         }
     }
 
+    #[pyo3(signature = (enabled=None))]
+    /// 启用插件挂载(`build` 时生效)。
+    ///
+    /// - `enabled=None`(默认):按 `~/.reflect/config.toml` 的
+    ///   `[plugins].enabled_plugins`;
+    /// - `enabled=["demo", ...]`:显式启用列表,忽略 config。
+    ///
+    /// 插件的 skills / agents / MCP servers / shell hooks / slash 命令
+    /// 在构建后挂载到共享 registry;未安装的 id 仅跳过,不报错。
+    fn plugins(&self, enabled: Option<Vec<String>>) -> Self {
+        Self {
+            inner: self.inner.clone().with_plugins(enabled),
+        }
+    }
+
     /// 返回当前 builder 配置快照(不触发 LLM / 网络)。
     fn describe(&self) -> (String, String, bool, bool) {
         (
@@ -83,11 +98,19 @@ impl PyReflectBuilder {
     }
 
     /// 构建 `Reflect` 实例(需要 `OPENAI_API_KEY` 等 env)。
-    fn build(&self) -> PyResult<PyReflect> {
-        let agent = self
-            .inner
-            .clone()
-            .build()
+    ///
+    /// 走 `build_async` 完整装配 —— 真实 HookEngine + 插件挂载。Python 侧
+    /// 无异步上下文,与 `run` 同款:释放 GIL 后在临时 current-thread
+    /// tokio runtime 上 `block_on`。
+    fn build<'py>(&self, py: Python<'py>) -> PyResult<PyReflect> {
+        let builder = self.inner.clone();
+        let agent = py
+            .allow_threads(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
+                rt.block_on(builder.build_async())
+            })
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         Ok(PyReflect { inner: agent })
     }
