@@ -354,6 +354,7 @@ reflect exec --plan-mode "refactor X"   # headless research (read-only)
 |----------|----------|
 | [`docs/architecture.md`](docs/architecture.md) | Architecture deep dive (Chinese): full directory tree, core data flow, per-node duties, design decisions |
 | [`docs/sdk.md`](docs/sdk.md) | SDK integration guide (Chinese): serve mode, Python / TS examples, remote-tool flow, offline debugging |
+| [`docs/plugins.md`](docs/plugins.md) | Plugin development guide (Chinese): manifest, five capability types, slash-command expansion, marketplaces, security model |
 | [`AGENTS.md`](AGENTS.md) | Development guide: commands, architecture layers, project conventions |
 | [`sdks/PROTOCOL.md`](sdks/PROTOCOL.md) | serve wire protocol spec (shared implementation basis for the SDKs) |
 | [`sdks/python/README.md`](sdks/python/README.md) | Python SDK usage and installation |

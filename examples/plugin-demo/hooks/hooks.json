@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '[plugin-demo] PostToolUse hook 触发' >&2",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

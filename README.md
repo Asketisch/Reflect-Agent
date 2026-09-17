@@ -335,6 +335,7 @@ reflect exec --plan-mode "refactor X"   # headless 调研(只读)
 |------|------|
 | [`docs/architecture.md`](docs/architecture.md) | 架构详解:完整目录结构、核心数据流、各节点职责、设计决策 |
 | [`docs/sdk.md`](docs/sdk.md) | SDK 接入指南:serve 模式、Python / TS 完整示例、远程工具流、离线联调 |
+| [`docs/plugins.md`](docs/plugins.md) | 插件开发指南:manifest、五类 capability、命令展开、marketplace、安全模型 |
 | [`AGENTS.md`](AGENTS.md) | 开发指南:命令、架构分层、项目约定 |
 | [`sdks/PROTOCOL.md`](sdks/PROTOCOL.md) | serve wire 协议规范(SDK 共同实现依据) |
 | [`sdks/python/README.md`](sdks/python/README.md) | Python SDK 用法与安装 |
