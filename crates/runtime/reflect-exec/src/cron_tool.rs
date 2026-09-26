@@ -8,9 +8,10 @@
 //! 权限路由:`list` / `get` → `Auto`(只读);`create` / `delete` / `update`
 //! → `Prompt`(改变调度状态,需用户确认)。
 //!
-//! **注册状态:v1.4 起,`cron` 工具尚未在主 bootstrap 中注册** —— 工具结构
-//! 已就绪,enable 时需要在 `reflect-exec::bootstrap` 里把 `CronTool` 挂到
-//! `ToolRegistry::Runtime`(参见 `register_all` 的实现风格)。
+//! **注册状态:已在主 bootstrap 接线** —— `reflect-exec::headless` 构造
+//! `CronScheduler`(绑定 submission sender,到期把 job.prompt 作为
+//! `Submission::user_input` 注入)并注册 `CronTool`,随后 `start(30)`
+//! 启动 30s tick 的后台 driver。
 
 use std::sync::Arc;
 

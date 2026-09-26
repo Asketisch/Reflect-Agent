@@ -4,7 +4,7 @@
 
 > An AI agent runtime **framework** written in Rust: a 33-crate workspace
 > (6-layer architecture), a 4-node StateGraph engine, 23 built-in tools,
-> 8 hook events, multiple LLM providers, MCP / LSP integration, and JSONL
+> 10 hook events, multiple LLM providers, MCP / LSP integration, and JSONL
 > rollout persistence.
 >
 > This repository is a **pure framework layer**: the primary interfaces are
@@ -157,7 +157,7 @@ See [docs/architecture.md](docs/architecture.md) (Chinese) for the full
 | 23 built-in tools | bash / read / write / edit / grep / glob / web_fetch / web_search / notebook_edit / image_view / task tools + Plan-mode control plane, etc. |
 | Trimmable tool surface | Three layers: agent-definition frontmatter (`tools` / `disallowed_tools` / `readonly`, activated via `--agent`) → `allowed_tools` per `[[subagents]]` in config.toml → code-level `unregister` / `register_except`; trimmed tools' schemas never reach the prompt (see [docs/architecture.md](docs/architecture.md), Chinese) |
 | Cross-language custom tools | Clients (Python / TS) register local functions as LLM tools; the core dispatches execution requests and receives results back |
-| 8 hook events × 7 decisions | PreToolUse / PostToolUse / PostToolUseFailure / Stop / SessionStart + 3 task-lifecycle events |
+| 10 hook events × 7 decisions | PreToolUse / PostToolUse / PostToolUseFailure / Stop / SessionStart / UserPromptSubmit / PreCompact + 3 task-lifecycle events |
 | 4-tier context compaction | microcompact → smart_prune → LLM summarize (escalation) |
 | Subagents | Tool-per-Agent, concurrent in-flight ≤ 16 (shared parent/child counter) |
 | Multi-agent orchestration | discussion (sequential/concurrent), task / team, DAG pipelines, goal mode |

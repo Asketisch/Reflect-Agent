@@ -3,7 +3,7 @@
 [简体中文](README.md) | **English**([README_EN.md](README_EN.md))
 
 > Rust 编写的 AI agent 运行时**框架**:33 crate workspace(6 层架构)、
-> 4 节点 StateGraph 引擎、23 内置工具、8 hook 事件、多 LLM provider、
+> 4 节点 StateGraph 引擎、23 内置工具、10 hook 事件、多 LLM provider、
 > MCP / LSP 集成、JSONL rollout 持久化。
 >
 > 本仓库是**纯框架层**:主接口为 `reflect` 库门面(Builder + 60+ re-exports)
@@ -32,7 +32,7 @@
 | 常驻会话 | 每次调用冷启动 | **`reflect serve` 常驻会话服务**:一个进程 = 一个常驻 AgentThread,多轮共享内存状态 + resume,SDK 以子进程方式嵌入 |
 | 多 Agent | 手工拼脚本 | **一等公民编排层**:子代理(Tool-per-Agent)、顺序 / 并发讨论、任务 / 团队、DAG pipeline、goal 模式 |
 | 上下文管理 | 截断或单一摘要 | **4 层压缩 escalation**:microcompact → smart_prune → LLM summarize,按 token 阈值逐级升级 |
-| 扩展面 | 零散 flag 与配置文件 | **hooks(8 事件 × 7 决策)+ Tool trait + MCP + LSP + 插件 + skills**,多层独立扩展机制 |
+| 扩展面 | 零散 flag 与配置文件 | **hooks(10 事件 × 7 决策)+ Tool trait + MCP + LSP + 插件 + skills**,多层独立扩展机制 |
 | 会话审计 | 日志散落、难以回放 | **JSONL rollout 持久化** + resume + session 索引 + LLM 调用 traces 全量落盘 |
 | 安全边界 | 逐条人工确认 | **权限规则引擎 + 多级 sandbox + Plan mode**(写操作前强制只读调研,`ExitPlanMode` 才放行) |
 | 自动化 / CI | 解析自然语言输出 | **JSONL stdout + stderr 日志**管道友好(`reflect exec \| jq`),内置 mock provider,examples / e2e / SDK 测试**全离线** |
@@ -143,7 +143,7 @@ flowchart LR
 | 23 内置工具 | bash / read / write / edit / grep / glob / web_fetch / web_search / notebook_edit / image_view / task 工具 + Plan mode 控制面等 |
 | 工具面可裁剪 | 三层裁剪:Agent 定义 frontmatter(`tools` / `disallowed_tools` / `readonly`,`--agent` 激活)→ config.toml `[[subagents]]` 的 `allowed_tools` → 代码层 `unregister` / `register_except`;被裁工具的 schema 不进 prompt(详见 [docs/architecture.md](docs/architecture.md)) |
 | 跨语言自定义工具 | 客户端(Python / TS)注册本地函数为 LLM 工具,core 下发执行请求、回执结果 |
-| 8 Hook 事件 × 7 决策 | PreToolUse / PostToolUse / PostToolUseFailure / Stop / SessionStart + 3 个 task 生命周期事件 |
+| 10 Hook 事件 × 7 决策 | PreToolUse / PostToolUse / PostToolUseFailure / Stop / SessionStart / UserPromptSubmit / PreCompact + 3 个 task 生命周期事件 |
 | 4 层上下文压缩 | microcompact → smart_prune → LLM summarize(escalation) |
 | 子代理 | Tool-per-Agent,并发在途 ≤ 16(父子共享计数器) |
 | 多 Agent 编排 | discussion(顺序/并发)、task / team、DAG pipeline、goal 模式 |
