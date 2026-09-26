@@ -295,6 +295,68 @@ pub async fn bootstrap_common(args: &HeadlessArgs) -> anyhow::Result<HeadlessCom
 /// send 失败后自然退出,不会泄漏。
 pub(crate) struct ReloadRxHandle(pub(crate) mpsc::Receiver<Event>);
 
+/// 装配权限层 + YOLO 分类器(normal 与 resume 分支共用)。
+///
+/// 优先级(链式 first-match-wins,更具体的作用域在前):
+/// config.toml `[permissions]`(会话) > project
+/// (`<workspace>/.reflect/permissions.toml`) > 用户级
+/// (`~/.reflect/permissions.toml`)。`add` / `remove` 委托链尾的用户级
+/// file store,运行时写入照旧落盘到用户文件;project 文件手工维护,
+/// 随工作区签入。
+///
+/// v1.5 修复:此前只有 normal 分支装配权限,resume 分支完全绕过
+/// 权限规则与 YOLO 分类器。
+async fn apply_permission_layers(
+    mut cfg: AgentConfig,
+    initial_cfg: &reflect_config::ReflectConfig,
+    workspace: &std::path::Path,
+) -> AgentConfig {
+    let Ok(file_store) = reflect_permissions::FilePermissionStore::with_default_home() else {
+        cfg.yolo_classifier = Some(Arc::new(reflect_permissions::HeuristicYoloClassifier));
+        return cfg;
+    };
+    let file_store: Arc<dyn reflect_permissions::PermissionStore> = Arc::new(file_store);
+    let cfg_store: Arc<dyn reflect_permissions::PermissionStore> =
+        Arc::new(reflect_permissions::InMemoryPermissionStore::new());
+    if let Some(sec) = &initial_cfg.permissions {
+        let rules = sec.expanded_rules();
+        for rule in &rules {
+            if let Err(e) = cfg_store.add(rule.clone()).await {
+                tracing::warn!(error = %e, "permission rule from config.toml 落库失败,跳过");
+            }
+        }
+        tracing::info!(
+            rules = rules.len(),
+            "loaded permissions rules from config.toml [permissions]"
+        );
+    }
+    // v1.5:project 级权限 —— `<workspace>/.reflect/permissions.toml`。
+    let project_path = workspace.join(".reflect").join("permissions.toml");
+    let project_store: Arc<dyn reflect_permissions::PermissionStore> = Arc::new(
+        reflect_permissions::FilePermissionStore::with_path(project_path.clone()),
+    );
+    if let Ok(rules) = project_store.list().await {
+        if !rules.is_empty() {
+            tracing::info!(
+                rules = rules.len(),
+                path = %project_path.display(),
+                "loaded project permissions from .reflect/permissions.toml"
+            );
+        }
+    }
+    let chained: Arc<dyn reflect_permissions::PermissionStore> =
+        Arc::new(reflect_permissions::ChainedPermissionStore::new(vec![
+            cfg_store,
+            project_store,
+            file_store,
+        ]));
+    let resolver: Arc<dyn reflect_permissions::PermissionResolver> =
+        Arc::new(reflect_permissions::StorePermissionResolver::new(chained));
+    cfg = cfg.with_permission_resolver(resolver);
+    cfg.yolo_classifier = Some(Arc::new(reflect_permissions::HeuristicYoloClassifier));
+    cfg
+}
+
 /// 装配普通分支后半段(与原 `async_main` 普通分支逐行对应),返回
 /// 可供 exec / serve 使用的 session。
 pub async fn bootstrap_normal(
@@ -395,7 +457,7 @@ pub async fn bootstrap_normal(
             }
         }
     }
-    let mut cfg = AgentConfig::new(model.clone(), workspace)
+    let mut cfg = AgentConfig::new(model.clone(), workspace.clone())
         .with_m4(m4)
         .with_policy(policy)
         .with_token_budget(token_budget)
@@ -417,31 +479,7 @@ pub async fn bootstrap_normal(
         } else {
             reflect_protocol::PermissionMode::Auto
         });
-    if let Ok(file_store) = reflect_permissions::FilePermissionStore::with_default_home() {
-        let file_store: Arc<dyn reflect_permissions::PermissionStore> = Arc::new(file_store);
-        let cfg_store: Arc<dyn reflect_permissions::PermissionStore> =
-            Arc::new(reflect_permissions::InMemoryPermissionStore::new());
-        if let Some(sec) = &initial_cfg.permissions {
-            let rules = sec.expanded_rules();
-            for rule in &rules {
-                if let Err(e) = cfg_store.add(rule.clone()).await {
-                    tracing::warn!(error = %e, "permission rule from config.toml 落库失败,跳过");
-                }
-            }
-            tracing::info!(
-                rules = rules.len(),
-                "loaded permissions rules from config.toml [permissions]"
-            );
-        }
-        let chained: Arc<dyn reflect_permissions::PermissionStore> =
-            Arc::new(reflect_permissions::ChainedPermissionStore::new(vec![
-                cfg_store, file_store,
-            ]));
-        let resolver: Arc<dyn reflect_permissions::PermissionResolver> =
-            Arc::new(reflect_permissions::StorePermissionResolver::new(chained));
-        cfg = cfg.with_permission_resolver(resolver);
-    }
-    cfg.yolo_classifier = Some(Arc::new(reflect_permissions::HeuristicYoloClassifier));
+    cfg = apply_permission_layers(cfg, &initial_cfg, &workspace).await;
     let cfg_for_reload = cfg.clone(); // 共享 model Arc<RwLock>
     let thread = Arc::new(AgentThread::new(
         cfg,
@@ -625,6 +663,9 @@ pub async fn bootstrap_resumed(
         .with_telemetry(telemetry_sink)
         .with_cancel(cancel.clone())
         .with_preload_messages(bundle.initial_messages.clone());
+    // 与 normal 分支同权:权限三层装配(config > project > user)+ YOLO
+    // 分类器。此前 resume 分支漏装,resume 会话会绕过权限规则。
+    let cfg = apply_permission_layers(cfg, &initial_cfg, &workspace).await;
     let cfg_for_reload = cfg.clone();
     let thread = Arc::new(AgentThread::new(
         cfg,

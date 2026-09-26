@@ -428,4 +428,49 @@ mod tests {
             "可写层(后)remove 应删掉 Bash 那条,剩 Write"
         );
     }
+
+    /// v1.5 exec 装配镜像:三层链 config(会话) > project > user。
+    /// project 规则先于 user 命中(first-match-wins),运行时写入仍落到
+    /// 链尾的 user file store —— 与 `headless::apply_permission_layers`
+    /// 的装配一致,防止后续改动破坏作用域优先级。
+    #[tokio::test]
+    async fn chained_three_layers_project_overrides_user() {
+        let cfg: Arc<dyn PermissionStore> = Arc::new(InMemoryPermissionStore::new());
+        let project: Arc<dyn PermissionStore> = Arc::new(FilePermissionStore::with_path(
+            tempdir().unwrap().path().join("project.toml"),
+        ));
+        let user_dir = tempdir().unwrap();
+        let user: Arc<dyn PermissionStore> = Arc::new(FilePermissionStore::with_path(
+            user_dir.path().join("user.toml"),
+        ));
+
+        // user 层:允许 Bash;project 层:对 Bash(git push *)Ask。
+        user.add(rule("Bash", PermissionAction::Allow))
+            .await
+            .unwrap();
+        project
+            .add(PermissionRule {
+                tool: "Bash".into(),
+                action: PermissionAction::Ask,
+                tool_glob: None,
+                shell_pattern: Some("git push *".into()),
+            })
+            .await
+            .unwrap();
+
+        let chained = ChainedPermissionStore::new(vec![cfg, project, user.clone()]);
+        let rules = chained.list().await.unwrap();
+        assert_eq!(rules.len(), 2);
+        // project 的规则排在 user 之前 → evaluate 时 project 先命中。
+        assert_eq!(rules[0].shell_pattern.as_deref(), Some("git push *"));
+        assert_eq!(rules[0].action, PermissionAction::Ask);
+        assert_eq!(rules[1].action, PermissionAction::Allow);
+
+        // 运行时写入落到链尾(user),project 文件不被污染。
+        chained
+            .add(rule("WebFetch", PermissionAction::Deny))
+            .await
+            .unwrap();
+        assert_eq!(user.list().await.unwrap().len(), 2, "user 层收到写入");
+    }
 }
