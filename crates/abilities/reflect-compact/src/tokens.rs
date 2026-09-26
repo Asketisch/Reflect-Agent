@@ -169,7 +169,6 @@ pub mod tiktoken {
                             .map(|b| match b {
                                 ContentBlock::Text { text } => count(bpe, text),
                                 ContentBlock::Image { .. } => IMAGE_TOKENS,
-                                _ => 0,
                             })
                             .sum(),
                         CM::Assistant(a) => {
