@@ -604,6 +604,100 @@ fn find_checkpoint_for_turn_none_when_no_checkpoints() {
     assert_eq!(find_checkpoint_for_turn(dir.path(), sid, &t), None);
 }
 
+// ── truncate_session_after_turn(rewind 工具 conversation 作用域的核心)──
+
+#[test]
+fn truncate_session_after_turn_drops_target_turn_and_after() {
+    let (dir, ids) = prepare_n_sessions(1);
+    let sid = ids[0];
+    let path = find_session_path(dir.path(), sid).unwrap();
+
+    // 追加两个 turn 的 Message:turn_a 一条、turn_b 两条。
+    // prepare_n_sessions 写 SessionMeta 时末尾不带换行,先补一个。
+    let turn_a = TurnId::new();
+    let turn_b = TurnId::new();
+    let mut extra = String::from("\n");
+    for (tid, n) in [(turn_a, 1usize), (turn_b, 2usize)] {
+        for i in 0..n {
+            extra.push_str(
+                &serde_json::to_string(&RolloutRecord::message(
+                    tid,
+                    MessageRole::Assistant,
+                    serde_json::json!({ "i": i }),
+                ))
+                .unwrap(),
+            );
+            extra.push('\n');
+        }
+    }
+    use std::io::Write as _;
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    write!(f, "{extra}").unwrap();
+
+    // 截断到 turn_b(含)之前 → 丢弃 turn_b 的 2 条 Message。
+    let dropped = truncate_session_after_turn(dir.path(), sid, Some(&turn_b)).unwrap();
+    assert_eq!(dropped, 2);
+
+    // 文件只剩 SessionMeta + turn_a 的 1 条 Message;`.bak` 备份已生成。
+    let body = std::fs::read_to_string(&path).unwrap();
+    let non_empty = body.lines().filter(|l| !l.trim().is_empty()).count();
+    assert_eq!(non_empty, 2, "body after truncate: {body}");
+    assert!(body.contains(&turn_a.to_string()));
+    assert!(!body.contains(&turn_b.to_string()));
+    let has_backup = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|e| e.file_name().to_string_lossy().ends_with(".bak"));
+    assert!(has_backup, "rewind backup must be kept");
+
+    // 目标 turn 不存在 → no-op 返回 0(文件不变)。
+    let before = std::fs::read_to_string(&path).unwrap();
+    let dropped = truncate_session_after_turn(dir.path(), sid, Some(&TurnId::new())).unwrap();
+    assert_eq!(dropped, 0);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+
+    // session 不存在 → Ok(0),不报错。
+    let dropped = truncate_session_after_turn(dir.path(), ThreadId::new(), None).unwrap();
+    assert_eq!(dropped, 0);
+}
+
+#[test]
+fn truncate_session_after_turn_none_drops_last_turn() {
+    let (dir, ids) = prepare_n_sessions(1);
+    let sid = ids[0];
+    let path = find_session_path(dir.path(), sid).unwrap();
+    let turn_a = TurnId::new();
+    let turn_b = TurnId::new();
+    let mut extra = String::from("\n");
+    for tid in [turn_a, turn_b] {
+        extra.push_str(
+            &serde_json::to_string(&RolloutRecord::message(
+                tid,
+                MessageRole::Assistant,
+                serde_json::json!("x"),
+            ))
+            .unwrap(),
+        );
+        extra.push('\n');
+    }
+    use std::io::Write as _;
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    write!(f, "{extra}").unwrap();
+
+    // None = 丢弃最后一个 turn(turn_b)。
+    let dropped = truncate_session_after_turn(dir.path(), sid, None).unwrap();
+    assert_eq!(dropped, 1);
+    let body = std::fs::read_to_string(&path).unwrap();
+    assert!(body.contains(&turn_a.to_string()));
+    assert!(!body.contains(&turn_b.to_string()));
+}
+
 // ── v1.x:TokenCount 聚合测试 ────────────────────────────────────────
 
 use reflect_protocol::TokenUsage;

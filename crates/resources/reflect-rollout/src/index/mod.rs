@@ -513,6 +513,26 @@ pub fn find_session_path(base: &Path, id: ThreadId) -> Option<std::path::PathBuf
     find_session_path_inner(base, id)
 }
 
+/// 会话级对话回退:按 `session_id` 定位活跃 JSONL,截断到 `to_turn_id`
+/// (含)之前(`None` = 丢弃最后一个 turn)。内部委托
+/// [`crate::writer::truncate_file_after_turn`](备份 + 原子重写,
+/// 语义与 writer 的 `truncate_after` 一致但不经 writer 内锁)。
+///
+/// 用途:`rewind` 工具的 `conversation` / `both` 作用域 —— 引擎每轮
+/// 从 rollout 回放重建历史,文件截断后下一个 turn 自然从更短的
+/// 历史回放。返回被丢弃的 `Message` 记录数;session 不存在或目标
+/// turn 未命中时返回 `Ok(0)`(no-op,调用方可据此提示)。
+pub fn truncate_session_after_turn(
+    base: &Path,
+    session_id: ThreadId,
+    to_turn_id: Option<&TurnId>,
+) -> anyhow::Result<usize> {
+    match find_session_path(base, session_id) {
+        Some(path) => crate::writer::truncate_file_after_turn(&path, to_turn_id),
+        None => Ok(0),
+    }
+}
+
 fn find_session_path_inner(dir: &Path, id: ThreadId) -> Option<std::path::PathBuf> {
     let entries = std::fs::read_dir(dir).ok()?;
     for entry in entries {
