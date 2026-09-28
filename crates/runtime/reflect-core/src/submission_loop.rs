@@ -191,6 +191,9 @@ pub async fn submission_loop(
             config: serde_json::json!({ "model": cfg.current_model() }),
         })
         .await;
+    // v1.6:SessionEnd 是否已派发。`Op::Shutdown` 与提交通道关闭两条
+    // 退出路径互斥触发,保证每个会话恰好一次(与 SessionStart 配对)。
+    let mut session_end_sent = false;
 
     let mut session_emitted = false;
     // v1.x:从首条 Submission(通常是首条 UserInput)携带的 `workspace`
@@ -945,6 +948,15 @@ pub async fn submission_loop(
                 // Shutdown 后 spawned turn 任务成为孤儿(其 turn_tx 已被本
                 // 循环 drop,send 永久失败却无人 await)。
                 cfg.cancel.cancel();
+                // v1.6:SessionEnd hook —— 显式关闭路径(与 SessionStart
+                // 配对)。通知外部命令式 hook 落审计 / 清理资源。
+                let _ = hook_engine
+                    .dispatch(&HookEvent::SessionEnd {
+                        session_id,
+                        reason: "shutdown".into(),
+                    })
+                    .await;
+                session_end_sent = true;
                 let ev = Event::new(sub.id, EventMsg::ShutdownComplete);
                 let _ = turn_tx.send(ev.clone()).await;
                 fan_out_session(&session_subs, &ev);
@@ -1188,6 +1200,18 @@ pub async fn submission_loop(
         }
 
         drop(turn_tx);
+    }
+
+    // v1.6:提交通道关闭(所有发送端 drop —— exec 进程收尾 / 客户端断开)
+    // 时触发 SessionEnd。`Op::Shutdown` 路径已派发过则跳过,保证每会话
+    // 恰好一次。注意此处在 loop 之外,`hook_engine` 仍存活。
+    if !session_end_sent {
+        let _ = hook_engine
+            .dispatch(&HookEvent::SessionEnd {
+                session_id,
+                reason: "closed".into(),
+            })
+            .await;
     }
 }
 

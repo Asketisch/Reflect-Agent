@@ -67,6 +67,8 @@ impl ShellHook {
             "sessionstart" => Some(HookEventKind::SessionStart),
             "userpromptsubmit" => Some(HookEventKind::UserPromptSubmit),
             "precompact" => Some(HookEventKind::PreCompact),
+            "postcompact" => Some(HookEventKind::PostCompact),
+            "sessionend" => Some(HookEventKind::SessionEnd),
             "taskcreated" => Some(HookEventKind::TaskCreated),
             "taskcompleted" => Some(HookEventKind::TaskCompleted),
             "taskupdated" => Some(HookEventKind::TaskUpdated),
@@ -439,6 +441,14 @@ mod tests {
             ShellHook::parse_kind("stop"),
             Some(HookEventKind::Stop),
             "大小写不敏感"
+        );
+        assert_eq!(
+            ShellHook::parse_kind("PostCompact"),
+            Some(HookEventKind::PostCompact)
+        );
+        assert_eq!(
+            ShellHook::parse_kind("SessionEnd"),
+            Some(HookEventKind::SessionEnd)
         );
         assert_eq!(ShellHook::parse_kind("Nonsense"), None);
     }

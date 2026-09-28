@@ -14,6 +14,7 @@ use reflect_plugin::state::PluginScope;
 
 mod config;
 mod doctor;
+mod init;
 mod login;
 mod lsp;
 mod mcp;
@@ -33,7 +34,7 @@ mod test_home;
 #[command(
     name = "reflect",
     version,
-    about = "Reflect — Rust agent runtime CLI (subcommands: exec, serve, discussion, login, mcp, config, session, traces, doctor, plugin, lsp, task, pipeline, security, workspace, update, version). 交互式 TUI 见独立仓库 Reflect-TUI.",
+    about = "Reflect — Rust agent runtime CLI (subcommands: exec, serve, discussion, login, init, mcp, config, session, traces, doctor, plugin, lsp, task, pipeline, security, workspace, update, version). 交互式 TUI 见独立仓库 Reflect-TUI.",
     propagate_version = true
 )]
 struct Cli {
@@ -142,6 +143,12 @@ enum Command {
         /// 预留给 v0.5 的 GitHub release API 检查。
         #[arg(long)]
         check_only: bool,
+    },
+    /// v1.6:在当前目录生成 AGENTS.md 项目说明(agent 上下文锚点)。
+    Init {
+        /// 已存在时覆盖(默认跳过,保护手工维护的内容)。
+        #[arg(long)]
+        force: bool,
     },
     /// 打印版本号并退出。
     Version,
@@ -460,6 +467,9 @@ enum PipelineAction {
         /// 可选 JSON 输出路径(默认:仅人可读 stdout)。
         #[arg(long, short = 'o')]
         output: Option<PathBuf>,
+        /// 模板附加输入 `key=value`(可重复);模板 `{{input.<key>}}` 可引用。
+        #[arg(long = "input", value_name = "KEY=VALUE")]
+        inputs: Vec<String>,
     },
     /// 为指定 team 运行预设流水线(plan → prd → exec → verify)。
     /// v1.x:接入此前孤儿的 `run_team_pipeline` / `TEAM_PIPELINE_TOML`。
@@ -708,6 +718,19 @@ fn main() -> anyhow::Result<()> {
             TracesAction::Show { id } => traces::show(&id),
         },
         Command::Doctor { check_network } => doctor::run(check_network),
+        Command::Init { force } => {
+            let existed = std::env::current_dir()
+                .ok()
+                .map(|d| d.join("AGENTS.md").exists())
+                .unwrap_or(false);
+            let path = init::run(force)?;
+            if existed && !force {
+                println!("AGENTS.md 已存在,跳过(用 --force 覆盖):{}", path.display());
+            } else {
+                println!("已生成 {}:请按项目实际情况填充 TODO 段落。", path.display());
+            }
+            Ok(())
+        }
         Command::Update { check_only } => update::run(check_only),
         Command::Plugin { action } => match action {
             PluginAction::Install { path, scope } => {
@@ -806,11 +829,13 @@ fn main() -> anyhow::Result<()> {
                 topic,
                 failure_policy,
                 output,
+                inputs,
             } => rt.block_on(pipeline::run(
                 &config,
                 &topic,
                 failure_policy.as_deref(),
                 output.as_deref(),
+                &inputs,
             )),
             PipelineAction::Team { name, topic } => rt.block_on(pipeline::run_team(&name, &topic)),
         },

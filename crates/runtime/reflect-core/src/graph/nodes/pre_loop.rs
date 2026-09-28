@@ -128,6 +128,8 @@ pub async fn pre_loop(state: &mut AgentState, ctx: &NodeContext) -> Option<Graph
         // 在 `evt` 被移入 wire event 之前捕获我们需要的字段。
         let strategy = evt.strategy;
         let removed_count = evt.removed_messages;
+        let before_tokens = evt.before_tokens;
+        let after_tokens = evt.after_tokens;
 
         // 从压缩后的消息列表里抽取 LLM 生成的摘要
         // (它是带 `<summary>...</summary>` 的 System 消息)。
@@ -146,6 +148,35 @@ pub async fn pre_loop(state: &mut AgentState, ctx: &NodeContext) -> Option<Graph
                 EventMsg::ContextCompacted(evt),
             ))
             .await;
+
+        // v1.6:PostCompact hook —— 压缩完成后触发(与 PreCompact 配对)。
+        // 决策仅作信息性记录(压缩已发生,不可回滚);典型用途:审计
+        // 落盘、上下文恢复钩子(重读 active files 等)。与 PreCompact
+        // 同构的 HookContext 便于外部命令式 hook 消费。
+        {
+            let hook_ctx = reflect_hooks::HookContext {
+                session_id: ctx.session_id,
+                turn_id: ctx.turn_id,
+                workspace: ctx.cfg.current_workspace(),
+                permission_mode: ctx.cfg.permission_mode(),
+            };
+            let strategy_name = match strategy {
+                ContextCompactedStrategy::Noop => "noop",
+                ContextCompactedStrategy::Microcompact => "microcompact",
+                ContextCompactedStrategy::SmartPrune => "smart_prune",
+                ContextCompactedStrategy::LlMSummarize => "llm_summarize",
+            };
+            let _ = ctx
+                .hook_engine
+                .dispatch(&reflect_hooks::HookEvent::PostCompact {
+                    strategy: strategy_name.into(),
+                    removed_messages: removed_count,
+                    before_tokens,
+                    after_tokens,
+                    ctx: hook_ctx,
+                })
+                .await;
+        }
 
         // M5:持久化 Compaction 记录,让 `resume` 能回放。
         //

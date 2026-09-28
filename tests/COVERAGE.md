@@ -82,9 +82,10 @@ SDK 审批面(`test_sdk_ops.py` / `ops.test.mjs`):
 
 ## 5. 已知产品限制(测试断言当前行为,防退化)
 
-- `pipeline run`:plan 预设模板硬编码 `{{input.audience}}` 而 CLI 不注入
-  → plan 节点渲染必败;`pipeline team` 退出 0 并输出失败报告
-  (`crates/orchestration/reflect-pipeline/src/nodes/mod.rs`)。
+- ~~`pipeline run`:plan 预设模板硬编码 `{{input.audience}}`~~(v1.6 已修复:
+  planner 预设只依赖 `{{topic}}`,CLI `--input k=v` 注入模板 inputs,
+  build_factory 从配置引导 registry 使 mock 可离线命中);
+  `pipeline team` 失败节点存在时退出非 0(v1.6 对齐 CI 语义)。
 - `discussion run`:concurrent 模式受 SubAgentFactory 深度上限约束;
   无 provider 时降级 `run_noop`(退出 0,Result JSON 仍含 outcome)。
 - `approval_request` / `ask_user*` 的**交互式工具路径**需要 TUI/modal;

@@ -8,7 +8,7 @@
 //!
 //! | 预设名 | 默认 prompt 模板(模板字符串为字面量) | 输出字段 |
 //! |---|---|---|
-//! | `planner` | `"Plan for: {{topic}}\n\n{{input.audience}}"` | `result` |
+//! | `planner` | `"Plan for: {{topic}}"` | `result` |
 //! | `prd` | `"PRD from plan: {{nodes.plan.outputs.result}}"` | `result` |
 //! | `executor` | `"Implement: {{nodes.prd.outputs.result}}"` | `result` |
 //! | `verifier` | `"Verify: {{nodes.exec.outputs.result}}"` | `result` |
@@ -277,8 +277,12 @@ impl NodeRunner for TeamNodeRunner {
 // ── 4 阶段预设工厂 ─────────────────────────────────────────────────────────
 
 /// `planner` 预设 — `Plan for {{topic}}`。
+///
+/// v1.6 修复:此前模板硬编码 `{{input.audience}}`,而 `pipeline run`
+/// 默认不传 inputs,渲染必失败(tests/README 已知限制 #1)。现在只依赖
+/// 必有的 `{{topic}}`;需要附加输入的节点经 `--input k=v` 显式传入。
 pub fn planner_node(name: impl Into<String>, team: TeamFile) -> TeamNodeRunner {
-    TeamNodeRunner::new(name, team, "Plan for: {{topic}}\n\n{{input.audience}}")
+    TeamNodeRunner::new(name, team, "Plan for: {{topic}}")
 }
 
 /// `prd` 预设 — `PRD from plan: {{nodes.plan.outputs.result}}`。

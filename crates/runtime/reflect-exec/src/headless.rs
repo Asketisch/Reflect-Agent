@@ -538,6 +538,13 @@ pub async fn bootstrap_normal(
     tools.register(Arc::new(reflect_mcp::ReadMcpResourceTool::new(
         mcp_for_plugins.clone(),
     )));
+    // v1.6:MCP Prompts 原语(与 Resources 对齐的第三类原语)。
+    tools.register(Arc::new(reflect_mcp::ListMcpPromptsTool::new(
+        mcp_for_plugins.clone(),
+    )));
+    tools.register(Arc::new(reflect_mcp::GetMcpPromptTool::new(
+        mcp_for_plugins.clone(),
+    )));
 
     let plugin_runtime = bootstrap_plugins(
         tools.clone(),

@@ -47,9 +47,11 @@ Python 3 + pytest、Node ≥ 18。缺依赖的批次自动 SKIP,不算失败。
   `[hooks] enabled = []`。此外 `~/.reflect/config.toml` 必须存在,
   否则 ConfigWatcher 启动即报错。
 - **已知限制**(断言当前行为,防意外退化):
-  - `pipeline run`:plan 预设模板硬编码 `{{input.audience}}` 而 CLI
-    不注入 → plan 节点渲染必败;`pipeline team` 整体退出 0 并输出
-    失败报告(见 `crates/orchestration/reflect-pipeline/src/nodes/mod.rs`)。
+  - ~~`pipeline run`:plan 预设模板硬编码 `{{input.audience}}`~~(v1.6 已
+    修复:planner 预设只依赖 `{{topic}}`,CLI 新增 `--input k=v` 注入
+    `PipelineContext.inputs`,build_factory 从配置引导 registry 使 mock
+    可离线命中);`pipeline team` 失败节点存在时退出非 0(v1.6 对齐
+    `pipeline run` 的 CI 语义)。
   - `discussion run`:concurrent 模式受 SubAgentFactory 深度上限约束;
     无 provider 时 CLI 降级 `run_noop`(退出 0,Result JSON 仍含
     `outcome` / `rounds_completed`)。

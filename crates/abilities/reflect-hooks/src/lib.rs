@@ -9,7 +9,7 @@
 #![allow(clippy::option_if_let_else)]
 #![allow(clippy::nonminimal_bool)]
 #![allow(clippy::manual_div_ceil)]
-//! `reflect-hooks` —— Hook trait、HookEngine、5 类事件、5 种决策、内置 hook。
+//! `reflect-hooks` —— Hook trait、HookEngine、12 类事件、7 种决策、内置 hook。
 //!
 //! 协议参见 `docs/tools-and-hooks.md §4`。`PermissionMode` 从
 //! `reflect-protocol` 再导出(其实际定义位于该 crate,以打破

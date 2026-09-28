@@ -11,11 +11,12 @@
 //! - 原语: Tools
 //! - 协议版本: `2025-06-18`
 //!
-//! ## 能力清单(v1.5 更正)
+//! ## 能力清单(v1.6 更正)
 //!
 //! - 已实现:Tools、Resources(`ListMcpResources` / `ReadMcpResource`,
-//!   v1.2 起真接线 —— 此前注释误标为未实现)。
-//! - 未实现(留后续):Prompts / Sampling / Elicitation / OAuth。
+//!   v1.2 起真接线 —— 此前注释误标为未实现)、Prompts
+//!   (`ListMcpPrompts` / `GetMcpPrompt`,v1.6 接线)。
+//! - 未实现(留后续):Sampling / Elicitation / OAuth。
 //!
 //! ## 关键约束
 //!
@@ -30,6 +31,7 @@
 pub mod config;
 pub mod content;
 pub mod manager;
+pub mod prompts;
 pub mod protocol_version;
 pub mod registry;
 pub mod resources;
@@ -43,6 +45,7 @@ pub use manager::{
     McpConnectionManager, McpLifecycleEvent, McpServerHandle, McpServerStatus, list_plugin_servers,
     scoped_plugin_name,
 };
+pub use prompts::{GetMcpPromptTool, ListMcpPromptsTool};
 pub use protocol_version::PROTOCOL_VERSION;
 pub use registry::{McpRegistryEntry, curated_catalog, find_entry, install_hint};
 pub use resources::{ListMcpResourcesTool, ReadMcpResourceTool};

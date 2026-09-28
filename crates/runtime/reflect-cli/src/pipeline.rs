@@ -25,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 use reflect_pipeline::{FailurePolicy, Pipeline, PipelineContext, PipelineReport};
 use reflect_subagent::SubAgentFactory;
 
-/// `reflect pipeline run -c <config.toml> --topic <topic> [--failure-policy abort|continue_collect] [--output <path>]`。
+/// `reflect pipeline run -c <config.toml> --topic <topic> [--failure-policy abort|continue_collect] [--output <path>] [--input k=v ...]`。
 ///
 /// 流程:
 /// 1. 读 TOML config。
@@ -33,21 +33,26 @@ use reflect_subagent::SubAgentFactory;
 /// 3. 构造 `SubAgentFactory` + `TaskManager` + `CancellationToken`。
 /// 4. `pipeline.run(ctx)` → `PipelineReport`。
 /// 5. 打印人类可读报告,JSON 序列化写到 `--output`(可选)。
+///
+/// v1.6:`--input key=value`(可重复)填充 `PipelineContext.inputs`,
+/// 模板 `{{input.<key>}}` 可引用 —— 此前 inputs 恒空,引用即渲染失败。
 pub async fn run(
     config: &std::path::Path,
     topic: &str,
     failure_policy: Option<&str>,
     output: Option<&std::path::Path>,
+    inputs: &[String],
 ) -> anyhow::Result<()> {
     if topic.trim().is_empty() {
         return Err(anyhow!("--topic must be non-empty"));
     }
+    let parsed_inputs = parse_inputs(inputs)?;
     let toml_src = std::fs::read_to_string(config)
         .with_context(|| format!("read config {}", config.display()))?;
 
     // 构造 manager(读 ~/.reflect 已有 team)与 factory。
     let manager = Arc::new(build_manager()?);
-    let factory = Arc::new(build_factory(manager.clone()));
+    let factory = Arc::new(build_factory(manager.clone())?);
 
     // 预加载所有 team 到本地 HashMap —— `from_toml` 的 runner_for 闭包
     // 签名是同步的,无法直接 `await manager.get_team`。
@@ -87,7 +92,7 @@ pub async fn run(
 
     let ctx = PipelineContext {
         topic: topic.to_string(),
-        inputs: Default::default(),
+        inputs: parsed_inputs,
         factory: factory.clone(),
         manager: manager.clone(),
         cancel: CancellationToken::new(),
@@ -117,22 +122,49 @@ pub async fn run(
     Ok(())
 }
 
+/// 把 `--input key=value` 参数列表解析为模板 inputs 映射。
+///
+/// 格式:`key=value`(首个 `=` 分割,value 可再含 `=`)。key 为空报错;
+/// 重复 key 后者覆盖前者。
+fn parse_inputs(inputs: &[String]) -> anyhow::Result<HashMap<String, String>> {
+    let mut map = HashMap::new();
+    for raw in inputs {
+        let (k, v) = raw
+            .split_once('=')
+            .ok_or_else(|| anyhow!("invalid --input '{raw}' (expected key=value)"))?;
+        let k = k.trim();
+        if k.is_empty() {
+            return Err(anyhow!("invalid --input '{raw}' (empty key)"));
+        }
+        map.insert(k.to_string(), v.to_string());
+    }
+    Ok(map)
+}
+
 /// 构造 `SubAgentFactory` —— 不带 recorder(headless CLI 不写 rollout)。
 ///
-/// 当前 CLI 阶段 factory 不直接接收 manager —— manager 通过 `PipelineContext`
-/// 注入,factory 主要承载 `ThreadId` / model / 取消信号等元数据。
-fn build_factory(_manager: Arc<TaskManager>) -> SubAgentFactory {
+/// v1.6:registry 从配置引导(含 `REFLECT_MODEL=mock` 离线注册),默认
+/// model 用 resolved spec —— 此前空 registry + 硬编码 `"openai/gpt-4o"`
+/// 使 team 节点 spawn 在任何配置下都无法命中客户端(测试只能断言
+/// 渲染失败路径)。mock 下整条 plan→prd→exec→verify 可离线跑通。
+fn build_factory(_manager: Arc<TaskManager>) -> anyhow::Result<SubAgentFactory> {
+    let cfg = reflect_config::load_default();
     let registry = Arc::new(ModelRegistry::new());
+    cfg.apply_to_registry(&registry)
+        .map_err(|e| anyhow!("build provider from config: {e}"))?;
+    let model = cfg
+        .resolved_model_spec()
+        .unwrap_or_else(|| "openai/gpt-4o".to_string());
     let parent_tools = Arc::new(ToolRegistry::default());
-    SubAgentFactory::new(
+    Ok(SubAgentFactory::new(
         ThreadId::new(),
-        "openai/gpt-4o", // 默认 model(实际模型从 provider 拉,留空)
+        model,
         registry,
         None, // child_registry: 回退父级 registry
         parent_tools,
         CancellationToken::new(),
         None,
-    )
+    ))
 }
 
 /// CLI 自带的 TaskManager —— 走 `~/.reflect/tasks/` 与 `~/.reflect/teams/`。
@@ -149,7 +181,7 @@ fn build_manager() -> anyhow::Result<TaskManager> {
 /// `run_team_pipeline` / `TEAM_PIPELINE_TOML`。
 pub async fn run_team(team_name: &str, topic: &str) -> anyhow::Result<()> {
     let manager = Arc::new(build_manager()?);
-    let factory = Arc::new(build_factory(manager.clone()));
+    let factory = Arc::new(build_factory(manager.clone())?);
     let cancel = CancellationToken::new();
     let report =
         reflect_pipeline::run_team_pipeline(manager, team_name, topic.to_string(), factory, cancel)
@@ -164,10 +196,16 @@ pub async fn run_team(team_name: &str, topic: &str) -> anyhow::Result<()> {
         "Team pipeline '{team_name}' completed: {} ({} ms)",
         report.status, report.total_elapsed_ms
     );
-    if !failed.is_empty() {
-        for n in &failed {
-            println!("  [{}] {}: {:?}", n.status, n.name, n.error);
+    // v1.6:逐节点打印状态(此前仅失败时打印;mock 全链成功后无任何
+    // 节点输出,e2e 与用户都无法确认各阶段结果)。
+    for n in &report.nodes {
+        println!("  - {:<8} [{:<7}] {:>6}ms", n.name, n.status, n.elapsed_ms);
+        if let Some(err) = &n.error {
+            println!("      error: {err}");
         }
+    }
+    if !failed.is_empty() {
+        std::process::exit(1);
     }
     Ok(())
 }
@@ -253,5 +291,20 @@ mod tests {
         assert_eq!(truncate_chars("你好世界", 2), "你好");
         // 不足 max_chars 时原样返回。
         assert_eq!(truncate_chars("hi", 10), "hi");
+    }
+
+    #[test]
+    fn parse_inputs_accepts_kv_and_rejects_malformed() {
+        let m = parse_inputs(&["audience=engineers".into(), "x=a=b".into()]).unwrap();
+        assert_eq!(m.get("audience").map(String::as_str), Some("engineers"));
+        assert_eq!(m.get("x").map(String::as_str), Some("a=b"), "首个 = 分割");
+        // 重复 key 后者覆盖。
+        let m = parse_inputs(&["k=1".into(), "k=2".into()]).unwrap();
+        assert_eq!(m.get("k").map(String::as_str), Some("2"));
+        // 缺 = / 空 key 报错。
+        assert!(parse_inputs(&["nokey".into()]).is_err());
+        assert!(parse_inputs(&["=v".into()]).is_err());
+        // 空列表 → 空映射。
+        assert!(parse_inputs(&[]).unwrap().is_empty());
     }
 }

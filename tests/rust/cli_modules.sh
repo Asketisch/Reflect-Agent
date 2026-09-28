@@ -6,9 +6,9 @@
 #       security audit、workspace(ls/clone)。
 #
 # 已知限制(断言为当前行为,防意外退化):
-#   - pipeline 的 plan 预设模板硬编码 {{input.audience}} 而 CLI 不注入该
-#     输入 → plan 节点模板渲染必败(`unknown input 'audience'`)。
-#     pipeline team 子命令整体退出 0 并输出失败报告;pipeline run 退出非 0。
+#   - v1.6 修复:pipeline 的 plan 预设不再硬编码 {{input.audience}},
+#     build_factory 从配置引导 registry(mock 可离线命中)→ 全链可跑通;
+#     CLI 新增 --input k=v 注入模板输入。
 #   - discussion 的 concurrent 模式受 SubAgentFactory 深度上限约束
 #     (见 crates/orchestration/reflect-discussion/src/llm.rs「已知限制」);
 #     无 provider 时 CLI 降级 run_noop(offline / CI 友好)→ 退出 0。
@@ -163,7 +163,41 @@ cli_modules_pipeline() {
     cat > pipeline.toml <<'EOF'
 [pipeline]
 name = "e2e-pipeline"
-failure_policy = "continue_collect"
+failure_policy = "abort"
+
+[nodes.plan]
+team = "plan"
+depends_on = []
+
+[nodes.prd]
+team = "prd"
+depends_on = ["plan"]
+
+[nodes.exec]
+team = "exec"
+depends_on = ["prd"]
+
+[nodes.verify]
+team = "verify"
+depends_on = ["exec"]
+EOF
+
+    # v1.6 修复:planner 预设不再硬编码 {{input.audience}};build_factory
+    # 从配置引导 registry(REFLECT_MODEL=mock 离线注册)→ 整链可跑通。
+    REFLECT_MODEL=mock "$REFLECT_BIN" pipeline run -c pipeline.toml --topic "e2e topic" \
+        --input audience=engineers -o pipe_out.json > pipe_out.txt 2>pipe_err.log
+    local rc=$?
+    tcase "pipeline run mock 全链退出 0" test "$rc" -eq 0
+    tcase "pipeline run 打印 4 阶段节点" sh -c "grep -q 'plan' pipe_out.txt && grep -q 'verify' pipe_out.txt"
+    tcase "pipeline run -o 写出 JSON 报告" test -s pipe_out.json
+    tcase "pipeline run JSON 报告 status success" grep -q '"status": "success"' pipe_out.json
+
+    # 重复节点链(仅 plan→verify,verify 模板引用 nodes.exec)→ 渲染失败,
+    # abort 策略下退出非 0,verify 标记失败。
+    cat > pipeline_broken.toml <<'EOF'
+[pipeline]
+name = "e2e-broken"
+failure_policy = "abort"
 
 [nodes.plan]
 team = "plan"
@@ -173,24 +207,20 @@ depends_on = []
 team = "verify"
 depends_on = ["plan"]
 EOF
-
-    # 已知限制:plan 预设模板含 {{input.audience}},CLI 不注入 → 渲染必败。
-    REFLECT_MODEL=mock "$REFLECT_BIN" pipeline run -c pipeline.toml --topic "e2e topic" \
-        -o pipe_out.json > pipe_out.txt 2>pipe_err.log
-    local rc=$?
-    tcase "pipeline run 因 plan 模板缺 audience 输入退出非 0" test "$rc" -ne 0
-    tcase "pipeline run 报告 unknown input 'audience'" grep -q "unknown input 'audience'" pipe_out.txt
-    tcase "pipeline run -o 写出 JSON 报告" test -s pipe_out.json
-    tcase "pipeline run abort 策略下 verify 被 skipped" grep -q "skipped" pipe_out.txt
+    REFLECT_MODEL=mock "$REFLECT_BIN" pipeline run -c pipeline_broken.toml --topic "e2e topic" \
+        > pbroken.txt 2>pbroken_err.log
+    tcase "pipeline run 缺 exec 节点退出非 0" test $? -ne 0
 
     # pipeline team:整体退出 0,报告打印每节点状态
     REFLECT_MODEL=mock "$REFLECT_BIN" pipeline team --topic "e2e" plan > pteam.txt 2>pteam_err.log
     tcase "pipeline team 退出 0" test $? -eq 0
     tcase "pipeline team 打印 4 阶段节点状态" sh -c "grep -q plan pteam.txt && grep -q verify pteam.txt"
 
-    # 空 topic 校验
+    # 空 topic / 非法 --input 校验
     "$REFLECT_BIN" pipeline run -c pipeline.toml --topic "" >/dev/null 2>&1
     tcase "pipeline run 空 topic 被拒绝" test $? -ne 0
+    REFLECT_MODEL=mock "$REFLECT_BIN" pipeline run -c pipeline.toml --topic t --input bad >/dev/null 2>&1
+    tcase "pipeline run 非法 --input(缺 =)被拒绝" test $? -ne 0
 }
 
 # ════════════════════════════════════════════════════════════════════════
