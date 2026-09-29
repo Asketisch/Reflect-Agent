@@ -96,18 +96,13 @@ fn user_input(text: &str) -> Op {
     }
 }
 
-mod common;
-
 /// 全链路:后台 bash → 立即返回 id → 完成输出在下一回合边界注入 →
 /// background_status 实时可查。
+///
+/// GHA runner 等 landlock 异常环境下,bash 工具的降级重试路径
+/// (spawn EACCES → 无沙箱重试)会被本测试真实覆盖。
 #[tokio::test]
 async fn background_bash_full_link() {
-    // Linux:GHA runner 等 landlock 异常环境(见 common::exec_capable
-    // 注释)下跳过 —— 沙箱层返回的错误是环境限制,不是本链路回归。
-    if !common::exec_capable() {
-        eprintln!("skip: landlock restrict 后 exec 不可用(runner 环境限制),跳过全链路");
-        return;
-    }
     let client = Arc::new(ScriptedClient {
         scripts: std::sync::Mutex::new(vec![
             // turn1:发起后台任务 → 收口。

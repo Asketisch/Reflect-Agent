@@ -212,8 +212,51 @@ pub fn spawn_command(
                 command.env(key, v);
             }
         }
+        // Linux Landlock:与前台 BashTool 同款 —— fork 后、exec 前应用
+        // 写白名单规则;内核不支持时闭包内降级放行。pre_exec 来自
+        // tokio Command 的固有方法,无需 std CommandExt 导入(多余导入
+        // 会在 Linux 上被 -D warnings 的 unused-imports 拦截)。
+        //
+        // v1.6 降级重试:受限环境(GHA runner 等)的 landlock 实现异常,
+        // restrict 成功后 execve 仍可能 EACCES/EPERM —— 权限类失败时
+        // 重建 command(不带沙箱)重试一次,对齐「尽力而为不阻塞」哲学。
         let child = match command.spawn() {
             Ok(c) => c,
+            Err(e)
+                if cfg!(target_os = "linux")
+                    && landlock
+                    && matches!(e.raw_os_error(), Some(13) | Some(1)) =>
+            {
+                tracing::warn!(
+                    %program,
+                    error = %e,
+                    "landlock sandboxed background spawn failed; retrying without sandbox"
+                );
+                let mut command = tokio::process::Command::new(&program);
+                command
+                    .args(&args)
+                    .current_dir(&cwd)
+                    .env_clear()
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .stdin(Stdio::null())
+                    .kill_on_drop(true);
+                for key in ["PATH", "HOME", "LANG", "LC_ALL", "USER", "SHELL", "TMPDIR"] {
+                    if let Ok(v) = std::env::var(key) {
+                        command.env(key, v);
+                    }
+                }
+                match command.spawn() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        q.fail(&id, format!("spawn failed: {e}"));
+                        if let Some(p) = seatbelt_profile {
+                            let _ = std::fs::remove_file(p);
+                        }
+                        return;
+                    }
+                }
+            }
             Err(e) => {
                 q.fail(&id, format!("spawn failed: {e}"));
                 if let Some(p) = seatbelt_profile {

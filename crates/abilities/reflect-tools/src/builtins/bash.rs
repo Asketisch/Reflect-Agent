@@ -231,8 +231,18 @@ impl Tool for BashTool {
         // 无需(也不能)导入 std 的 CommandExt —— 否则 Linux 上
         // `-D warnings` 会报 unused import(macOS 下该 cfg 块不编译,
         // 本地发现不了;CI ubuntu 实测踩坑)。
+        //
+        // v1.6 降级重试:受限环境(GHA runner 等)的 landlock 实现存在
+        // 异常 —— restrict 成功后 execve 仍可能 EACCES,且**间歇出现**。
+        // spawn 报权限类错误时:重建 command(不注入 pre_exec)降级重试
+        // 一次,对齐「沙箱尽力而为,不阻塞工作流」的既有哲学。
         #[cfg(target_os = "linux")]
-        if matches!(sandbox.status(), reflect_sandbox::OsSandboxStatus::Landlock) {
+        let landlock_applied =
+            matches!(sandbox.status(), reflect_sandbox::OsSandboxStatus::Landlock);
+        #[cfg(not(target_os = "linux"))]
+        let landlock_applied = false;
+        #[cfg(target_os = "linux")]
+        if landlock_applied {
             let ws_clone = workspace.clone();
             let mut pre_exec = sandbox.landlock_pre_exec(ws_clone);
             unsafe {
@@ -253,7 +263,40 @@ impl Tool for BashTool {
             }
         }
 
-        let mut child = command.spawn().map_err(ToolError::from)?;
+        let mut child = match command.spawn() {
+            Ok(c) => c,
+            // 权限类失败 + landlock 已注入 → 降级重试一次(不带沙箱)。
+            Err(e)
+                if cfg!(target_os = "linux")
+                    && landlock_applied
+                    && matches!(
+                        e.raw_os_error(),
+                        Some(13) | Some(1) // EACCES / EPERM(避免为此引 libc 依赖)
+                    ) =>
+            {
+                warn!(
+                    cmd,
+                    error = %e,
+                    "landlock sandboxed spawn failed (EACCES/EPERM); retrying without sandbox"
+                );
+                let mut command = Command::new(&program);
+                command.args(&argv);
+                command
+                    .current_dir(&workspace)
+                    .env_clear()
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .stdin(Stdio::null())
+                    .kill_on_drop(true);
+                for key in ENV_WHITELIST {
+                    if let Ok(v) = std::env::var(key) {
+                        command.env(key, v);
+                    }
+                }
+                command.spawn().map_err(ToolError::from)?
+            }
+            Err(e) => return Err(ToolError::from(e)),
+        };
         let mut stdout = child.stdout.take();
         let mut stderr = child.stderr.take();
         let kill_on_cancel = ctx.cancel.clone();
