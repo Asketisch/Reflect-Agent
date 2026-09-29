@@ -172,7 +172,7 @@ filetime    = "0.2"
 
 # v1.3 analytics 遥测:OTLP/HTTP 导出 + tracing bridge
 opentelemetry         = "0.27"
-opentelemetry_sdk     = { version = "0.27", features = ["rt-tokio"] }
+opentelemetry_sdk     = { version = "0.33", features = ["rt-tokio"] }
 opentelemetry-otlp    = { version = "0.27", features = ["http-proto", "reqwest-client", "trace"] }
 tracing-opentelemetry = "0.28"
 
