@@ -464,7 +464,14 @@ mod landlock {
         fn open(path: *const i8, flags: i32, ...) -> i32;
         fn close(fd: i32) -> i32;
         fn __errno_location() -> *mut i32;
+        fn prctl(option: i32, ...) -> i32;
     }
+
+    /// `PR_SET_NO_NEW_PRIVS`(linux/prctl.h)。Landlock 的
+    /// `restrict_self` 前置要求:必须先设置 no_new_privs(或持
+    /// CAP_SYS_ADMIN),否则返回 EPERM —— 此前缺失该调用,Linux 上
+    /// 沙箱从未真正生效(CI ubuntu 实测 spawn failed: EPERM)。
+    const PR_SET_NO_NEW_PRIVS: i32 = 38;
 
     fn errno() -> i32 {
         unsafe { *__errno_location() }
@@ -526,6 +533,16 @@ mod landlock {
         }
 
         // 3. 对自身应用限制(restrict self)。
+        //
+        // 前置:必须先设 no_new_privs(landlock 官方要求),否则
+        // restrict_self 返回 EPERM(CI ubuntu 实测)。prctl 被环境拦截
+        // (seccomp 环境同样报 EPERM)时降级放行 —— 与「内核不支持」
+        // 同语义:沙箱尽力而为,不阻塞 exec。
+        let nnp = unsafe { prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
+        if nnp != 0 {
+            let _ = unsafe { close(ruleset_fd) };
+            return Ok(()); // 降级:no_new_privs 无法设置,环境受限
+        }
         let r = unsafe { syscall(SYS_LANDLOCK_RESTRICT_SELF, ruleset_fd as i64, 0) };
         unsafe { close(ruleset_fd) };
         if r < 0 {
