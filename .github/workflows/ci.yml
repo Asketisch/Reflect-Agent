@@ -45,7 +45,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --workspace --all-targets
+      # --no-fail-fast:一个 test binary 失败不阻断其余 binaries(一次
+      # 看到全部失败面,失败诊断不再打地鼠)。
+      - run: cargo test --workspace --all-targets --no-fail-fast
 
   # SDK 测试用本地 Node "mock serve" 驱动协议,不依赖 reflect 二进制
   # 与网络(离线;真二进制的端到端覆盖在 Rust 集成测试 serve_stdio.rs)。
