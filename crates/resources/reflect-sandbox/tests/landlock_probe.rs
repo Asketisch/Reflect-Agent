@@ -41,15 +41,15 @@ struct PathBeneathAttr {
 
 #[tokio::test]
 async fn probe_landlock_stages() {
-    println!("== landlock probe ==");
-    println!(
+    eprintln!("== landlock probe ==");
+    eprintln!(
         "uname/runner info skipped; cwd = {:?}",
         std::env::current_dir()
     );
 
     // 1. prctl NNP。
     let nnp = unsafe { prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
-    println!(
+    eprintln!(
         "1. prctl(NNP) = {nnp} (errno={})",
         if nnp != 0 { errno() } else { 0 }
     );
@@ -68,7 +68,7 @@ async fn probe_landlock_stages() {
                 0,
             )
         };
-        println!(
+        eprintln!(
             "2. create_ruleset({name}) = {fd} (errno={})",
             if fd < 0 { errno() } else { 0 }
         );
@@ -84,7 +84,7 @@ async fn probe_landlock_stages() {
         ] {
             let c = CString::new(dir.clone()).unwrap();
             let pfd = unsafe { open(c.as_ptr(), 0o200000) };
-            println!(
+            eprintln!(
                 "3. open(O_PATH) {dir} = {pfd} (errno={})",
                 if pfd < 0 { errno() } else { 0 }
             );
@@ -96,7 +96,7 @@ async fn probe_landlock_stages() {
                 parent_fd: pfd,
             };
             let r = unsafe { syscall(SYS_LANDLOCK_ADD_RULE, fd as i64, 1, &pb as *const _, 0) };
-            println!(
+            eprintln!(
                 "4. add_rule({dir}) = {r} (errno={})",
                 if r < 0 { errno() } else { 0 }
             );
@@ -105,7 +105,7 @@ async fn probe_landlock_stages() {
 
         // 4. restrict self。
         let r = unsafe { syscall(SYS_LANDLOCK_RESTRICT_SELF, fd as i64, 0) };
-        println!(
+        eprintln!(
             "5. restrict_self({name}) = {r} (errno={})",
             if r < 0 { errno() } else { 0 }
         );
@@ -119,12 +119,12 @@ async fn probe_landlock_stages() {
                 .output()
                 .await;
             match out {
-                Ok(o) => println!(
+                Ok(o) => eprintln!(
                     "6. post-restrict spawn /bin/sh = ok, status={:?}, stdout={}",
                     o.status.code(),
                     String::from_utf8_lossy(&o.stdout).trim()
                 ),
-                Err(e) => println!(
+                Err(e) => eprintln!(
                     "6. post-restrict spawn /bin/sh = ERR {e} ({:?})",
                     e.raw_os_error()
                 ),
@@ -133,7 +133,7 @@ async fn probe_landlock_stages() {
             return;
         }
     }
-    println!("== probe done(未走到 restrict 成功分支)==");
+    eprintln!("== probe done(未走到 restrict 成功分支)==");
     // io 依赖占位,避免 unused。
     let _ = io::IoSlice::new(&[]);
     let _: PathBuf = Default::default();
