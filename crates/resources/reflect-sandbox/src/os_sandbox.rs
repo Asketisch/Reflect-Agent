@@ -442,8 +442,15 @@ mod landlock {
     const SYS_LANDLOCK_RESTRICT_SELF: i64 = 446;
 
     const LANDLOCK_RULE_PATH_BENEATH: i32 = 1;
-    // access_fs 位:read/write/execute/make-dir 等(取宽松集合,再加 write 全集)。
-    const ACCESS_FS_ALL: u64 = 0x1fff; // Landlock v1 ~1fff;v2 加 refer/delete
+    // handled access 位:只限制**写类**操作(写文件/删/建),执行与读
+    // 完全不受限 —— 设计注释「限制写是核心安全边界;读 / exec 不受限」
+    // 的直接实现:若 handled 含 EXECUTE / READ_*,则 /usr/bin/bash、
+    // 动态链接库(均在规则外)的 execve / mmap 全被拒(CI ubuntu 实测
+    // spawn failed: EACCES)。位值 = WRITE_FILE(0x2)| REMOVE_DIR(0x10)
+    // | REMOVE_FILE(0x20)| MAKE_CHAR(0x40)| MAKE_DIR(0x80)| MAKE_REG
+    // (0x100)| MAKE_SOCK(0x200)| MAKE_FIFO(0x400)| MAKE_BLOCK(0x800)
+    // | MAKE_SYM(0x1000) = 0xFFE(Landlock v1 范围,向后兼容旧内核)。
+    const ACCESS_FS_WRITE_ONLY: u64 = 0xffe;
 
     #[repr(C)]
     struct LandlockRulesetAttr {
@@ -483,7 +490,7 @@ mod landlock {
     pub(super) fn apply_landlock(workspace: &Path, writable: &[PathBuf]) -> io::Result<()> {
         // 1. create ruleset(仅 handled_access_fs;net 留 0)。
         let attr = LandlockRulesetAttr {
-            handled_access_fs: ACCESS_FS_ALL,
+            handled_access_fs: ACCESS_FS_WRITE_ONLY,
             handled_access_net: 0,
         };
         let fd = unsafe {
@@ -517,7 +524,7 @@ mod landlock {
                 continue;
             }
             let pb = LandlockPathBeneathAttr {
-                allowed_access: ACCESS_FS_ALL,
+                allowed_access: ACCESS_FS_WRITE_ONLY,
                 parent_fd,
             };
             let _ = unsafe {
