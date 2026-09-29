@@ -2554,6 +2554,7 @@ dependencies = [
  "reflect-protocol",
  "reflect-recovery",
  "reflect-rollout",
+ "reflect-sandbox",
  "reflect-skills",
  "reflect-stream",
  "reflect-subagent",

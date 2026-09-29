@@ -213,9 +213,17 @@ async fn deny_policy_rejects_prompt_tool_without_modal() {
     ));
 }
 
+mod common;
+
 /// approval_policy = prompt:会话级关闭时强制弹审批;Approve 回执后工具执行。
 #[tokio::test]
 async fn prompt_policy_forces_approval_modal_then_approves() {
+    // bash 工具会真实 spawn 子进程:GHA runner 的 landlock 异常环境
+    // (见 common::exec_capable)下跳过 —— 环境限制,非本链路回归。
+    if !common::exec_capable() {
+        eprintln!("skip: landlock restrict 后 exec 不可用(runner 环境限制)");
+        return;
+    }
     let client = Arc::new(ScriptedClient {
         scripts: std::sync::Mutex::new(vec![
             tool_call_script(

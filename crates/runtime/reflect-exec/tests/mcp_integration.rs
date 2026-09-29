@@ -263,10 +263,53 @@ async fn tool_name_collision_routes_to_register_if_absent() {
 
 use reflect_mcp::McpConnectionManager;
 
+/// 探针子入口(与 reflect-core/tests/common/mod.rs 同款):父进程以
+/// `LANDLOCK_PROBE_CHILD=1` env 触发实际探测,常规跑直接通过。
+#[test]
+fn landlock_probe_child() {
+    if std::env::var("LANDLOCK_PROBE_CHILD").as_deref() != Ok("1") {
+        return;
+    }
+    if !reflect_sandbox::probe_landlock_exec() {
+        std::process::exit(42);
+    }
+}
+
+/// GHA ubuntu runner 的 landlock 异常环境(restrict 后 exec 一律 EACCES,
+/// 见 reflect-core/tests/common 的注释)守卫 —— 真子进程类测试在能力
+/// 缺失时跳过(环境限制,非回归)。
+fn exec_capable() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        match std::env::current_exe() {
+            Ok(exe) => std::process::Command::new(exe)
+                .args([
+                    "--exact",
+                    "landlock_probe_child",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("LANDLOCK_PROBE_CHILD", "1")
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false),
+            Err(_) => true,
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
+    }
+}
+
 /// 6) `manager_start_server_real_subprocess` —— 启动 mock 子进程,确认
 ///    收到 Started event + handle.tools.len() == 2 (echo + slow)。
 #[tokio::test]
 async fn manager_start_server_real_subprocess() {
+    if !exec_capable() {
+        eprintln!("skip: landlock restrict 后 exec 不可用(runner 环境限制)");
+        return;
+    }
     let (tx, mut rx) = mpsc::channel::<reflect_mcp::McpLifecycleEvent>(8);
     let manager = McpConnectionManager::new(tx);
     let cfg = cfg_with(vec![("mock", stdio_cfg_entry("mock"))]);
