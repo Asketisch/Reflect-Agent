@@ -457,7 +457,9 @@ mod landlock {
         parent_fd: i32,
     }
 
-    extern "C" {
+    // Rust 2024 edition 要求 extern 块显式标注 unsafe(CI ubuntu 实测
+    // 编译失败点:extern blocks must be unsafe)。
+    unsafe extern "C" {
         fn syscall(num: i64, ...) -> i64;
         fn open(path: *const i8, flags: i32, ...) -> i32;
         fn close(fd: i32) -> i32;
@@ -496,7 +498,9 @@ mod landlock {
         let ruleset_fd = fd as i32;
 
         // 2. add rules:workspace + 额外可写目录。
-        for dir in std::iter::once(workspace).chain(writable.iter()) {
+        // `chain` 两臂类型必须一致:once 产出 `&Path`,故 iter 侧映射为
+        // as_path(此前直接 iter() 产出 &PathBuf,类型不匹配编译失败)。
+        for dir in std::iter::once(workspace).chain(writable.iter().map(|p| p.as_path())) {
             let cpath = match CString::new(dir.to_string_lossy().as_bytes()) {
                 Ok(c) => c,
                 Err(_) => continue,

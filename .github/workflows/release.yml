@@ -1,0 +1,110 @@
+# Reflect-Agent 跨平台发布构建。
+#
+# 仅由 `git push --tags v*` 或 Actions 手动触发。在三个 OS 上并行构建
+# 各平台原生分发包(macOS DMG / Linux tar.gz / Windows zip),上传到
+# workflow run,tag 触发时聚合到 GitHub Release。
+#
+# 本地一次性构建无需此 workflow —— 直接 `scripts/build.sh --dist`。
+# 日常分支推送不会触发。
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:    # Actions 标签页手动触发
+
+permissions:
+  contents: write       # softprops/action-gh-release 上传资产所需
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────
+  # 矩阵覆盖三个 OS。每个 runner 只产本 OS 原生包 —— 不做交叉编译
+  # (release 阶段交叉编译 toolchain 配置复杂,各平台原生构建最稳)。
+  # ─────────────────────────────────────────────────────────────────────
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-arm64
+            runner: macos-14
+          - os: macos-x86_64
+            runner: macos-13
+          - os: linux
+            runner: ubuntu-22.04
+          - os: windows
+            runner: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+
+      - name: Build + package (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: scripts/build.sh --dist
+
+      - name: Build + package (windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: scripts/build.sh --dist
+
+      - name: Locate artifacts
+        id: artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          # 把 dist/ 下所有分发包复制到扁平 staging 目录
+          find dist -type f \( \
+            -name '*.dmg' -o \
+            -name '*.tar.gz' -o \
+            -name '*.zip' \) -print -exec cp {} artifacts/ \;
+          echo "staged artifacts:"
+          ls -la artifacts/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: reflect-${{ matrix.os }}
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 30
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Release 上传:仅当所有矩阵 job 成功,且由 tag push 触发时运行。
+  # 手动 dispatch 只暂存 artifacts,不发 Release。
+  # ─────────────────────────────────────────────────────────────────────
+  release:
+    name: attach to release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: List downloaded
+        run: ls -la release-assets/
+
+      - name: Attach to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

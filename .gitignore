@@ -50,5 +50,4 @@ dist
 
 __pycache__
 .opencode
-.github
 .cargo
