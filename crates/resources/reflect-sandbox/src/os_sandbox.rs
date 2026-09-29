@@ -507,7 +507,12 @@ mod landlock {
             if e == 38 || e == 95 {
                 return Ok(());
             }
-            return Err(io::Error::from_raw_os_error(e));
+            // 带 stage 的错误信息:spawn 失败消息会透传给调用方,便于
+            // 在无法本地复现的环境(CI runner)定位具体失败阶段。
+            return Err(io::Error::new(
+                io::Error::from_raw_os_error(e).kind(),
+                format!("landlock[create_ruleset errno={e}]"),
+            ));
         }
         let ruleset_fd = fd as i32;
 
@@ -547,8 +552,12 @@ mod landlock {
         // 同语义:沙箱尽力而为,不阻塞 exec。
         let nnp = unsafe { prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
         if nnp != 0 {
+            let e = errno();
             let _ = unsafe { close(ruleset_fd) };
-            return Ok(()); // 降级:no_new_privs 无法设置,环境受限
+            return Err(io::Error::new(
+                io::Error::from_raw_os_error(if e == 0 { 1 } else { e }).kind(),
+                format!("landlock[prctl_no_new_privs errno={e}]"),
+            ));
         }
         let r = unsafe { syscall(SYS_LANDLOCK_RESTRICT_SELF, ruleset_fd as i64, 0) };
         unsafe { close(ruleset_fd) };
@@ -557,7 +566,10 @@ mod landlock {
             if e == 38 || e == 95 {
                 return Ok(()); // 降级
             }
-            return Err(io::Error::from_raw_os_error(e));
+            return Err(io::Error::new(
+                io::Error::from_raw_os_error(e).kind(),
+                format!("landlock[restrict_self errno={e}]"),
+            ));
         }
         Ok(())
     }
