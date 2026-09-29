@@ -192,10 +192,11 @@ pub fn spawn_command(
             .stdin(Stdio::null())
             .kill_on_drop(true);
         // Linux Landlock:与前台 BashTool 同款 —— fork 后、exec 前应用
-        // 写白名单规则;内核不支持时闭包内降级放行。
+        // 写白名单规则;内核不支持时闭包内降级放行。pre_exec 来自
+        // tokio Command 的固有方法,无需 std CommandExt 导入(多余导入
+        // 会在 Linux 上被 -D warnings 的 unused-imports 拦截)。
         #[cfg(target_os = "linux")]
         if landlock {
-            use std::os::unix::process::CommandExt;
             let ws = cwd.clone();
             let mut pre_exec = sandbox.landlock_pre_exec(ws);
             // 安全:仅在 pre_exec(子进程 fork 后)上下文调用,闭包内部
