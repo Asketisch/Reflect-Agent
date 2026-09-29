@@ -111,30 +111,68 @@ async fn probe_landlock_stages() {
         );
         unsafe { close(fd) };
         if r == 0 {
-            // 5. restrict 后 spawn /bin/sh -c echo(复现 bash 工具路径)。
-            let out = tokio::process::Command::new("/bin/sh")
+            // 5. restrict 后做一组分解实验,把 EACCES 的来源定位到具体变量。
+            let mut report = String::from("post-restrict 分解实验:\n");
+
+            // a. 读未 handled 的路径(应不受限)。
+            match std::fs::read_to_string("/etc/hostname") {
+                Ok(_) => report.push_str("  a. read /etc/hostname = ok\n"),
+                Err(e) => report.push_str(&format!("  a. read /etc/hostname = ERR {e}\n")),
+            }
+            // b. metadata /bin/sh。
+            match std::fs::metadata("/bin/sh") {
+                Ok(m) => report.push_str(&format!("  b. metadata /bin/sh = ok len={}\n", m.len())),
+                Err(e) => report.push_str(&format!("  b. metadata /bin/sh = ERR {e}\n")),
+            }
+            // c. std::process 同步 spawn,保留全部 env。
+            match std::process::Command::new("/bin/true").status() {
+                Ok(s) => report.push_str(&format!("  c. std spawn /bin/true (env 保留) = {s:?}\n")),
+                Err(e) => report.push_str(&format!("  c. std spawn /bin/true = ERR {e}\n")),
+            }
+            // d. std spawn env_clear。
+            match std::process::Command::new("/bin/true").env_clear().status() {
+                Ok(s) => {
+                    report.push_str(&format!("  d. std spawn /bin/true (env_clear) = {s:?}\n"))
+                }
+                Err(e) => {
+                    report.push_str(&format!("  d. std spawn /bin/true (env_clear) = ERR {e}\n"))
+                }
+            }
+            // e. tokio spawn /bin/sh -c,保留 env。
+            match tokio::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg("echo probe-ok")
+                .output()
+                .await
+            {
+                Ok(o) => report.push_str(&format!(
+                    "  e. tokio spawn /bin/sh (env 保留) = {:?} out={}\n",
+                    o.status.code(),
+                    String::from_utf8_lossy(&o.stdout).trim()
+                )),
+                Err(e) => report.push_str(&format!("  e. tokio spawn /bin/sh = ERR {e}\n")),
+            }
+            // f. tokio spawn /bin/sh -c,env_clear(复现 bash 工具路径)。
+            match tokio::process::Command::new("/bin/sh")
                 .arg("-c")
                 .arg("echo probe-ok")
                 .env_clear()
                 .output()
-                .await;
-            match out {
-                Ok(o) => eprintln!(
-                    "6. post-restrict spawn /bin/sh = ok, status={:?}, stdout={}",
+                .await
+            {
+                Ok(o) => report.push_str(&format!(
+                    "  f. tokio spawn /bin/sh (env_clear) = {:?} out={}\n",
                     o.status.code(),
                     String::from_utf8_lossy(&o.stdout).trim()
-                ),
+                )),
                 Err(e) => {
-                    // libtest 连 stderr 一起捕获(pass 时吞掉)—— 失败
-                    // 情形 panic 回放必然显示,把全部诊断信息带上。
-                    panic!(
-                        "landlock probe: post-restrict spawn ERR {e} (raw={:?})",
-                        e.raw_os_error()
-                    );
+                    report.push_str(&format!("  f. tokio spawn /bin/sh (env_clear) = ERR {e}\n"))
                 }
             }
-            // 不重复 restrict:第二次会成功但无害;直接返回。
-            return;
+
+            // libtest 连 stderr 一起捕获(pass 时吞掉)—— 用 panic 回放
+            // 强制显示全部诊断信息。
+            panic!("landlock probe restrict({name}) 成功后的分解实验报告:\n{report}");
         }
     }
     eprintln!("== probe done(未走到 restrict 成功分支)==");
