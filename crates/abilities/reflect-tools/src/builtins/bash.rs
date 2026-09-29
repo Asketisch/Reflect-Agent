@@ -227,9 +227,12 @@ impl Tool for BashTool {
         command.args(&argv);
         // Linux Landlock:在 fork 后、exec 前应用规则(workspace 内放行,
         // 其余写拒)。内核不支持时降级(闭包内 Ok,不阻塞)。
+        // 注意:`pre_exec` 来自 tokio::process::Command 的固有方法,
+        // 无需(也不能)导入 std 的 CommandExt —— 否则 Linux 上
+        // `-D warnings` 会报 unused import(macOS 下该 cfg 块不编译,
+        // 本地发现不了;CI ubuntu 实测踩坑)。
         #[cfg(target_os = "linux")]
         if matches!(sandbox.status(), reflect_sandbox::OsSandboxStatus::Landlock) {
-            use std::os::unix::process::CommandExt;
             let ws_clone = workspace.clone();
             let mut pre_exec = sandbox.landlock_pre_exec(ws_clone);
             unsafe {
