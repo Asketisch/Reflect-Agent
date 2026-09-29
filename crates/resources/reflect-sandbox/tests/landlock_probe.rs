@@ -124,10 +124,14 @@ async fn probe_landlock_stages() {
                     o.status.code(),
                     String::from_utf8_lossy(&o.stdout).trim()
                 ),
-                Err(e) => eprintln!(
-                    "6. post-restrict spawn /bin/sh = ERR {e} ({:?})",
-                    e.raw_os_error()
-                ),
+                Err(e) => {
+                    // libtest 连 stderr 一起捕获(pass 时吞掉)—— 失败
+                    // 情形 panic 回放必然显示,把全部诊断信息带上。
+                    panic!(
+                        "landlock probe: post-restrict spawn ERR {e} (raw={:?})",
+                        e.raw_os_error()
+                    );
+                }
             }
             // 不重复 restrict:第二次会成功但无害;直接返回。
             return;
