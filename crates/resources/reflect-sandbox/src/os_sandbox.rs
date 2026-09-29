@@ -578,6 +578,41 @@ mod landlock {
 #[cfg(target_os = "linux")]
 use landlock::apply_landlock;
 
+/// 环境能力探测(Linux):在**调用进程内**应用 Landlock(写类 handled)
+/// 并验证之后仍能 spawn `/bin/true`。
+///
+/// 用途:embedder 的测试守卫。注意调用后当前进程已被 restrict(landlock
+/// domain 由子进程继承)—— 只应在**即将退出的短命子进程**(如测试二进制
+/// 的自重跑入口)中调用,不要在常驻 agent 进程里调用。
+///
+/// 返回 `true` = restrict 成功且 exec 可用(环境健全);`false` = 任一步
+/// 失败(内核不支持 / runner 环境异常)。两类失败对 agent 运行时都表现
+/// 为「沙箱降级 / spawn 受限」,由调用方决定策略。
+#[cfg(target_os = "linux")]
+pub fn probe_landlock_exec() -> bool {
+    // cwd 作为放行目录(探针语义,与具体 workspace 无关)。
+    let cwd = match std::env::current_dir() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    // 先 spawn 后 restrict:基线可用性。
+    if std::process::Command::new("/bin/true").status().is_err() {
+        return false;
+    }
+    // restrict:复用 apply_landlock(失败 = 环境不支持 → 视作不可用)。
+    if apply_landlock(&cwd, &[]).is_err() {
+        return false;
+    }
+    // restrict 成功后 exec 仍须可用(部分受限 runner 上会 EACCES)。
+    std::process::Command::new("/bin/true").status().is_ok()
+}
+
+#[cfg(not(target_os = "linux"))]
+/// 非 Linux 恒可用(Seatbelt 路径不在本探针范围)。
+pub fn probe_landlock_exec() -> bool {
+    true
+}
+
 // ── 向后兼容:旧的 stub 类型别名 ────────────────────────────────────
 //
 // v0 导出的 `OsSandboxStubStatus` / `wrap_command_stub` 可能在其他 crate
