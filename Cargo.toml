@@ -147,7 +147,7 @@ eventsource-stream = "0.2"
 # 工具
 walkdir = "2"
 ignore  = "0.4"
-similar = "2"
+similar = "3"
 regex   = "1"
 rankfns = "0.1"
 reflect-bm25 = { path = "crates/abilities/reflect-bm25" }
