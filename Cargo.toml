@@ -125,7 +125,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 futures            = "0.3"
 
 # MCP (v0.3+)
-rmcp               = { version = "=1.7.0", features = [
+rmcp               = { version = "=3.4.1", features = [
     "client",
     "transport-child-process",
     "transport-streamable-http-client-reqwest",
