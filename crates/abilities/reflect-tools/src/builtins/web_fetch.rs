@@ -6,27 +6,32 @@
 //!
 //! 安全要点:
 //! - 仅允许 `http` / `https` scheme,其余返回 `ToolError::InvalidArgs`。
-//! - 自定义 redirect policy:每跳重新校验 host,拦截 `127.0.0.0/8` /
-//!   `10.0.0.0/8` / `172.16.0.0/12` / `192.168.0.0/16` / `169.254.0.0/16` /
-//!   `100.64.0.0/10`(CGNAT) / `224.0.0.0/4`(multicast) / `240.0.0.0/4`(reserved)
-//!   / `::1` / `fc00::/7` / `fe80::/10` / `ff00::/8` 以及 `localhost` 字面量,
-//!   防止 agent 借公开 URL → 302 → 内网服务扫到内部数据。
-//! - 总跳转数上限 [`MAX_REDIRECTS`],防止 redirect loop / SSRF 多次试错。
-//!
-//! 已知局限(DNS rebinding):`is_blocked_host` 仅校验 host 字符串字面量。
-//! 攻击者控制 `attacker.com` 解析到 `10.0.0.5` 的攻击面需在 v1.1 引入
-//! `hickory-resolver` 做解析后 IP 比对才能闭环。当前版本依赖 `Prompt` 权限
-//! 门 + 用户人工审核兜底。
+//! - 每一跳(host 字面量 + DNS 解析结果)都过 [`is_blocked_host`] /
+//!   [`is_blocked_ip`] 黑名单:`127.0.0.0/8` / `10.0.0.0/8` /
+//!   `172.16.0.0/12` / `192.168.0.0/16` / `169.254.0.0/16` /
+//!   `100.64.0.0/10`(CGNAT) / `224.0.0.0/4`(multicast) / `240.0.0.0/4`
+//!   (reserved) / `::1` / `fc00::/7` / `fe80::/10` / `ff00::/8` 以及
+//!   `localhost` 字面量,防止 agent 借公开 URL → 302 → 内网服务扫到
+//!   内部数据。
+//! - v1.7 DNS rebinding 防护闭环:hostname 先经 `tokio::net::lookup_host`
+//!   解析,**全部**解析结果过黑名单(任一命中即拒),再用
+//!   `resolve_to_addrs` 把域名钉定到已校验地址发起连接 —— 关闭「校验时
+//!   公网、连接时被 rebinding 到私网」的 TOCTOU 窗口;解析失败按
+//!   fail-closed 拒绝。HTTPS 钉定不影响 SNI / 证书校验(仍用域名)。
+//! - 重定向手动循环处理:每一跳重新走上面的字面量 + 解析校验,
+//!   总跳数上限 [`MAX_REDIRECTS`],防 redirect loop / SSRF 多次试错。
 //!
 //! 字符截断、body 大小限制均返回 `metadata.truncated = true`,便于上层
 //! (microcompact)按需进一步降级。
 
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use reqwest::header::LOCATION;
 use reqwest::redirect::Policy;
 use serde_json::Value;
-use url::Url;
+use url::{Host, Url};
 
 use crate::builtins::url_safety::*;
 use crate::tool::{Tool, ToolContext, ToolError, ToolOutput};
@@ -46,6 +51,8 @@ const MAX_REDIRECTS: usize = 5;
 const ALLOWED_SCHEMES: &[&str] = &["http", "https"];
 
 pub struct WebFetchTool {
+    /// 基础客户端(IP 字面量 host 直接复用;hostname 走每次请求新建的
+    /// 钉定客户端,见 [`Self::pinned_client`])。
     client: reqwest::Client,
 }
 
@@ -65,36 +72,106 @@ const BROWSER_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
 
 impl WebFetchTool {
     pub fn new() -> Self {
+        // 重定向手动循环处理(见模块 doc):Policy::none 下 3xx 原样返回,
+        // 由 `execute` 逐跳校验后再跟。
         let client = reqwest::Client::builder()
             .user_agent(BROWSER_UA)
             .timeout(DEFAULT_TIMEOUT)
-            .redirect(Policy::custom(|attempt| {
-                // `previous()` 已包含初始 URL,所以 0..=MAX_REDIRECTS 累计
-                // 至多 MAX_REDIRECTS + 1 个请求,与 Policy::limited 语义对齐。
-                if attempt.previous().len() > MAX_REDIRECTS {
-                    return attempt.error("too many redirects");
-                }
-                let is_blocked = attempt
-                    .url()
-                    .host_str()
-                    .map(is_blocked_host)
-                    .unwrap_or(false);
-                if is_blocked {
-                    let host = attempt.url().host_str().unwrap_or("").to_string();
-                    return attempt
-                        .error(format!("redirect target '{host}' is in a blocked range"));
-                }
-                attempt.follow()
-            }))
+            .redirect(Policy::none())
             .build()
             .expect("reqwest client build");
         Self { client }
+    }
+
+    /// 为 hostname 请求构造钉定客户端:域名解析固定为已过黑名单的地址
+    /// 列表,连接不可能落到未校验 IP。`addrs` 为 `None`(IP 字面量)时
+    /// 不需要钉定。
+    fn pinned_client(&self, domain: &str, addrs: &[SocketAddr]) -> reqwest::Client {
+        let mut builder = reqwest::Client::builder()
+            .user_agent(BROWSER_UA)
+            .timeout(DEFAULT_TIMEOUT)
+            .redirect(Policy::none());
+        if !addrs.is_empty() {
+            builder = builder.resolve_to_addrs(domain, addrs);
+        }
+        builder.build().expect("reqwest pinned client build")
     }
 }
 
 impl Default for WebFetchTool {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// DNS 解析 + 全量黑名单校验的中间结果。
+#[derive(Debug)]
+enum ResolvedHost {
+    /// host 本身是 IP 字面量(已过黑名单)。
+    Ip,
+    /// host 是域名:解析出的全部地址(均已过黑名单),用于钉定。
+    Domain(Vec<SocketAddr>),
+}
+
+/// 解析并校验 URL host:字面量黑名单 → 域名 DNS 解析 → 全部解析结果
+/// 黑名单。任一环节命中内网/保留段即 `Err`(fail-closed;解析失败同样
+/// 拒绝 —— 无法证明目标不在内网时不应发起连接)。
+async fn resolve_and_validate_host(url: &Url) -> Result<ResolvedHost, ToolError> {
+    match url.host() {
+        Some(Host::Ipv4(ip)) => {
+            validate_ip(IpAddr::V4(ip))?;
+            Ok(ResolvedHost::Ip)
+        }
+        Some(Host::Ipv6(ip)) => {
+            validate_ip(IpAddr::V6(ip))?;
+            Ok(ResolvedHost::Ip)
+        }
+        Some(Host::Domain(domain)) => {
+            if is_blocked_host(domain) {
+                return Err(ToolError::InvalidArgs {
+                    message: format!("host '{domain}' is in a blocked range"),
+                });
+            }
+            // 端口不参与解析语义,占 0 即可。
+            let addrs = tokio::net::lookup_host((domain, 0u16))
+                .await
+                .map_err(|e| ToolError::Io(format!("DNS 解析失败 '{domain}': {e}")))?
+                .collect::<Vec<_>>();
+            validate_resolved_addrs(domain, &addrs)
+                .map_err(|m| ToolError::InvalidArgs { message: m })?;
+            Ok(ResolvedHost::Domain(addrs))
+        }
+        None => Err(ToolError::InvalidArgs {
+            message: "URL 缺少 host".into(),
+        }),
+    }
+}
+
+/// 纯函数:校验全部解析地址,任一命中黑名单即拒。单独抽出便于对
+/// 合成地址做白盒测试(不依赖真实 DNS)。
+fn validate_resolved_addrs(domain: &str, addrs: &[SocketAddr]) -> Result<(), String> {
+    if addrs.is_empty() {
+        return Err(format!("DNS 解析 '{domain}' 结果为空,拒绝连接"));
+    }
+    for addr in addrs {
+        if is_blocked_ip(&addr.ip()) {
+            return Err(format!(
+                "host '{domain}' 解析到被封锁地址 {}(DNS rebinding 防护)",
+                addr.ip()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// IP 黑名单的 `ToolError` 薄封装。
+fn validate_ip(ip: IpAddr) -> Result<(), ToolError> {
+    if is_blocked_ip(&ip) {
+        Err(ToolError::InvalidArgs {
+            message: format!("host '{ip}' is in a blocked range"),
+        })
+    } else {
+        Ok(())
     }
 }
 
@@ -156,10 +233,6 @@ impl Tool for WebFetchTool {
             });
         }
 
-        if let Some(host) = url.host_str() {
-            reject_private_hosts(host)?;
-        }
-
         // 用户可在 args 里覆盖 timeout,但不能超过 120 秒,也不能超过 ctx.timeout。
         let timeout = args
             .get("timeout")
@@ -173,12 +246,56 @@ impl Tool for WebFetchTool {
                 ctx.timeout
             });
 
-        let resp = tokio::time::timeout(timeout, self.client.get(url.clone()).send())
-            .await
-            .map_err(|_| ToolError::Timeout {
-                elapsed_ms: timeout.as_millis() as u64,
-            })?
-            .map_err(|e| ToolError::Io(format!("request failed: {e}")))?;
+        // v1.7:手动重定向循环 —— 每一跳都重新做「字面量黑名单 + DNS 解析
+        // 全量校验 + 地址钉定」,重定向目标同样受 DNS rebinding 防护约束。
+        let mut current = url.clone();
+        let mut resp = None;
+        for _hop in 0..=MAX_REDIRECTS {
+            let resolved = resolve_and_validate_host(&current).await?;
+            let client = match &resolved {
+                ResolvedHost::Ip => self.client.clone(),
+                ResolvedHost::Domain(addrs) => {
+                    let domain = match current.host() {
+                        Some(Host::Domain(d)) => d.to_string(),
+                        _ => unreachable!("ResolvedHost::Domain 必然对应 Domain host"),
+                    };
+                    self.pinned_client(&domain, addrs)
+                }
+            };
+            let send = tokio::time::timeout(timeout, client.get(current.clone()).send())
+                .await
+                .map_err(|_| ToolError::Timeout {
+                    elapsed_ms: timeout.as_millis() as u64,
+                })?
+                .map_err(|e| ToolError::Io(format!("request failed: {e}")))?;
+
+            if send.status().is_redirection() {
+                let loc = send
+                    .headers()
+                    .get(LOCATION)
+                    .ok_or_else(|| ToolError::Io("redirect without Location header".into()))?
+                    .to_str()
+                    .map_err(|_| ToolError::Io("Location header 非 ASCII".into()))?
+                    .to_string();
+                let next = current
+                    .join(&loc)
+                    .map_err(|e| ToolError::Io(format!("redirect Location 解析失败: {e}")))?;
+                if !ALLOWED_SCHEMES.contains(&next.scheme()) {
+                    return Err(ToolError::InvalidArgs {
+                        message: format!(
+                            "redirect scheme '{}' not allowed (use http/https)",
+                            next.scheme()
+                        ),
+                    });
+                }
+                current = next;
+                continue;
+            }
+            resp = Some(send);
+            break;
+        }
+        let mut resp =
+            resp.ok_or_else(|| ToolError::Io(format!("too many redirects (> {MAX_REDIRECTS})")))?;
 
         // 记录最终 host / status 到 span 字段,便于事后安全取证。
         let final_url = resp.url().clone();
@@ -201,7 +318,6 @@ impl Tool for WebFetchTool {
         // bytes_with_limit,故手动用 chunk() 累加)。
         let mut bytes = Vec::new();
         let mut truncated_body = false;
-        let mut resp = resp;
         while let Some(chunk) = resp
             .chunk()
             .await
@@ -249,19 +365,6 @@ impl Tool for WebFetchTool {
             }),
             elapsed_ms: 0,
         })
-    }
-}
-
-/// 把 `is_blocked_host` 包成 `ToolError::InvalidArgs` 的薄封装 —— `url_safety`
-/// 子模块保持纯函数依赖,不反向依赖 `tool::ToolError`,所以本层 wrapper
-/// 留在 web_fetch.rs。
-fn reject_private_hosts(host: &str) -> Result<(), ToolError> {
-    if is_blocked_host(host) {
-        Err(ToolError::InvalidArgs {
-            message: format!("host '{host}' is in a blocked range"),
-        })
-    } else {
-        Ok(())
     }
 }
 
@@ -451,6 +554,67 @@ mod tests {
             .await
             .expect_err("invalid url should error");
         assert!(matches!(err, ToolError::InvalidArgs { .. }));
+    }
+
+    // ── v1.7 DNS rebinding 防护(解析后全量校验) ─────────────────────
+
+    /// 纯函数:全部解析地址过黑名单 —— 任一私网/CGNAT/多播地址即拒。
+    #[test]
+    fn validate_resolved_addrs_blocks_private_and_mixed() {
+        use std::net::SocketAddr;
+        let sa = |ip: &str| SocketAddr::new(ip.parse().unwrap(), 443);
+        // 纯公网 → 放行。
+        assert!(validate_resolved_addrs("ok.com", &[sa("93.184.216.34")]).is_ok());
+        assert!(
+            validate_resolved_addrs("ok.com", &[sa("2606:2800:220:1::1")]).is_ok(),
+            "公网 IPv6 应放行"
+        );
+        // 私网 → 拒。
+        for bad in [
+            "10.0.0.5",
+            "172.16.0.9",
+            "192.168.1.10",
+            "127.0.0.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "224.0.0.1",
+            "fd00::1",
+        ] {
+            assert!(
+                validate_resolved_addrs("evil.com", &[sa(bad)]).is_err(),
+                "{bad} 应被拒"
+            );
+        }
+        // 混合记录(先公网后私网)→ 拒(不能只看第一条)。
+        let mixed = [sa("93.184.216.34"), sa("10.0.0.5")];
+        assert!(
+            validate_resolved_addrs("rebind.com", &mixed).is_err(),
+            "混合记录应整批拒绝"
+        );
+        // 空解析结果 → fail-closed 拒绝。
+        assert!(validate_resolved_addrs("empty.com", &[]).is_err());
+    }
+
+    /// `localhost` 走 Domain 分支:字符串黑名单先拒,不触发真实解析。
+    /// (防御深度:即使黑名单漏掉,解析校验仍会拦 127.0.0.1。)
+    #[tokio::test]
+    async fn domain_branch_rejects_localhost_before_dns() {
+        let url = Url::parse("http://localhost:8080/").unwrap();
+        assert!(matches!(url.host(), Some(Host::Domain(_))));
+        let err = resolve_and_validate_host(&url)
+            .await
+            .expect_err("localhost 应被拒");
+        assert!(matches!(err, ToolError::InvalidArgs { .. }), "got: {err:?}");
+    }
+
+    /// IP 字面量走 Ip 分支校验(loopback 拒 / 公网放行),不触发 DNS。
+    #[tokio::test]
+    async fn ip_branch_validates_literal() {
+        let bad = Url::parse("http://127.0.0.1:9/").unwrap();
+        assert!(resolve_and_validate_host(&bad).await.is_err());
+        // 公网字面量只做校验,不发起连接(本函数只解析,不请求)。
+        let ok = Url::parse("http://93.184.216.34/").unwrap();
+        assert!(resolve_and_validate_host(&ok).await.is_ok());
     }
 
     // ── 纯函数白盒测试(is_blocked_host / sanitize_url_for_metadata) ──

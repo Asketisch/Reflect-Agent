@@ -425,7 +425,7 @@ fn default_tool_registry() -> ToolRegistry {
     use reflect_tools::builtins;
     let r = ToolRegistry::default();
     r.register(Arc::new(builtins::EchoTool));
-    r.register(Arc::new(builtins::BashTool));
+    r.register(Arc::new(builtins::BashTool::default()));
     r.register(Arc::new(builtins::ReadTool));
     r.register(Arc::new(builtins::WriteTool));
     r.register(Arc::new(builtins::EditTool));

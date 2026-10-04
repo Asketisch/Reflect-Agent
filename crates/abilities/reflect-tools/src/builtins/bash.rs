@@ -8,11 +8,27 @@
 //! 实现已下沉到 `reflect-hooks::bash_classify`(因 `PlanModeGate` 需复用,
 //! 而依赖方向为 reflect-tools → reflect-hooks),此处 re-export 保持对外
 //! API 不变。
+//!
+//! v1.7 持久 shell 状态:同一 [`BashTool`] 实例(= 同一 session 的
+//! registry)跨调用保留工作目录 —— 用户命令被包进 `{ ...; }` 组,组后用
+//! sentinel 行回报 `$?` 与 `$PWD`(同时打到 stdout 与 stderr:单一流被
+//! 输出上限截断时另一条仍存活),工具解析后存入 `workspace → cwd` 映射;
+//! 下次调用前置 `cd` 恢复。目录丢失时回落 workspace 根并提示。
+//! `run_in_background` 的命令同样前置 `cd`,但不更新持久状态(后台进程
+//! 不代表前台 shell 的去向)。命令被超时/取消杀死时拿不到 sentinel,
+//! 保持旧状态。sentinel 行对模型不可见(解析后从两条流中剥除;剥除后
+//! 恢复一个尾部换行,保持与未包裹时字节语义一致)。输出超过
+//! [`OUTPUT_LIMIT`] 截断时,把已捕获的完整输出落盘到临时文件并在输出
+//! 末尾给出路径,供模型用 read 工具取回。
 
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use parking_lot::Mutex;
 use serde_json::Value;
 use tokio::process::Command;
 use tracing::warn;
@@ -28,7 +44,85 @@ const OUTPUT_LIMIT: usize = 100 * 1024;
 
 const ENV_WHITELIST: &[&str] = &["PATH", "HOME", "LANG", "LC_ALL", "USER", "SHELL", "TMPDIR"];
 
-pub struct BashTool;
+/// v1.7 持久 cwd:sentinel 行前缀。命令组结束后由 `printf` 打到 stdout
+/// 的一行,格式 `__REFLECT_STATE__ rc=<n> cwd=<path>`(cwd 可含空格,
+/// 取行内 `cwd=` 之后的全部内容)。刻意冷门化,避免与真实输出撞行。
+const SENTINEL_PREFIX: &str = "__REFLECT_STATE__ ";
+
+/// 持久 shell 状态的工作目录。`BashTool` 实例按注册周期存活
+/// (builder / headless 每个 session 构造一个 registry),实例字段即
+/// session 级状态:workspace 路径 → 该 workspace 下最近一次命令结束时的
+/// `$PWD`。`enter_worktree` 热切换 workspace 后自然分键,互不串扰。
+#[derive(Default)]
+pub struct BashTool {
+    shell_cwd: Arc<Mutex<HashMap<PathBuf, PathBuf>>>,
+}
+
+impl BashTool {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// 单引号 shell 转义(`'` → `'\''`),用于 `cd -- '<path>'` 前缀。
+fn shell_quote(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', r"'\''"))
+}
+
+/// v1.7:从 stdout 字节中定位并解析 sentinel 行。
+///
+/// 返回 `(解析结果, 剥除 sentinel 后的输出)`。解析结果:
+/// `Some((rc, cwd))` 当最后一行形如 `__REFLECT_STATE__ rc=<n> cwd=<path>`;
+/// 找不到 / 格式不符时 `None`(输出原样返回)。
+///
+/// 剥除规则:sentinel 由 `printf '\n__REFLECT_STATE__ ...'` 追加,永远
+/// 独占一行且前面多一个 `\n`;剥除该行后把输出尾部多出的一个 `\n`
+/// 去掉,字节语义与未包裹版本对齐。
+fn extract_shell_state(out: &[u8]) -> (Option<(i32, String)>, Vec<u8>) {
+    let prefix = SENTINEL_PREFIX.as_bytes();
+    // 从后往前找「行首 + 前缀」的最后一次出现(用户输出也可能包含该
+    // 字面串,取最后一行保证命中的是我们追加的那个)。
+    let mut start = None;
+    for i in (0..out.len()).rev() {
+        if (i == 0 || out[i - 1] == b'\n') && out[i..].starts_with(prefix) {
+            start = Some(i);
+            break;
+        }
+    }
+    let Some(start) = start else {
+        return (None, out.to_vec());
+    };
+    let line_end = out[start..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map(|p| start + p)
+        .unwrap_or(out.len());
+    let line = String::from_utf8_lossy(&out[start..line_end]);
+    let rest = &line[SENTINEL_PREFIX.len()..];
+    let parsed = parse_state_fields(rest);
+    // 剥除 sentinel 行(含行尾换行),再补回被 printf 前置 `\n` 多出的
+    // 一个换行,恢复原始输出形态。
+    let mut cleaned: Vec<u8> = Vec::with_capacity(out.len());
+    cleaned.extend_from_slice(&out[..start]);
+    if line_end < out.len() {
+        cleaned.extend_from_slice(&out[line_end + 1..]);
+    }
+    if parsed.is_some() && cleaned.last() == Some(&b'\n') {
+        cleaned.pop();
+    }
+    (parsed, cleaned)
+}
+
+/// 解析 sentinel 行的 `rc=<n> cwd=<path>` 字段。cwd 取 `cwd=` 之后的
+/// 整段(允许含空格);rc 或 cwd 缺失 / rc 非整数 → `None`。
+fn parse_state_fields(rest: &str) -> Option<(i32, String)> {
+    let rc = rest
+        .split_whitespace()
+        .find_map(|t| t.strip_prefix("rc="))
+        .and_then(|v| v.parse::<i32>().ok())?;
+    let cwd = rest.split_once("cwd=")?.1.trim_end().to_string();
+    Some((rc, cwd))
+}
 
 /// v1.4 A3:收割单个输出流(stdout / stderr)。
 ///
@@ -62,15 +156,35 @@ async fn drain_pipe<R: tokio::io::AsyncRead + Unpin>(
             use tokio::io::AsyncBufReadExt;
             let mut reader = tokio::io::BufReader::new(limited);
             let mut line: Vec<u8> = Vec::new();
+            // v1.7:sentinel 行不进增量流。sentinel 由 `printf '\n__REFLECT…'`
+            // 追加,前面恒有一个空 "\n" 行 —— 用「延迟一行」缓冲:当前行
+            // 先扣住,看到下一行再发;若下一行是 sentinel,则把扣住的空行
+            // 一并吞掉,保证增量视图与最终剥除后的输出完全一致(否则 TUI
+            // 会闪现协议行 / 多余空行)。
+            let mut pending: Option<Vec<u8>> = None;
             loop {
                 line.clear();
                 match reader.read_until(b'\n', &mut line).await {
                     Ok(0) | Err(_) => break,
                     Ok(_) => {
-                        sink.emit(is_stderr, &String::from_utf8_lossy(&line));
+                        if line.starts_with(SENTINEL_PREFIX.as_bytes()) {
+                            if pending.as_deref() == Some(b"\n".as_slice()) {
+                                pending = None;
+                            }
+                            continue;
+                        }
+                        if let Some(p) = pending.take() {
+                            sink.emit(is_stderr, &String::from_utf8_lossy(&p));
+                        }
+                        // 捕获缓冲不落后于发射(sentinel 行也入缓冲,由 execute
+                        // 统一解析剥除;这里只过滤「给模型看的增量」)。
                         buf.extend_from_slice(&line);
+                        pending = Some(line.clone());
                     }
                 }
+            }
+            if let Some(p) = pending.take() {
+                sink.emit(is_stderr, &String::from_utf8_lossy(&p));
             }
             drain_after_cap(reader.get_mut()).await;
         }
@@ -147,10 +261,32 @@ impl Tool for BashTool {
             .unwrap_or(120_000);
         let timeout = Duration::from_millis(timeout_ms);
 
+        let workspace = ctx.workspace_path();
+
+        // v1.7 持久 shell 状态:取本 workspace 记录的上次 `$PWD`。目录已
+        // 不存在(被删 / worktree 已清理)→ 清除记录,回落 workspace 根。
+        let saved_cwd = {
+            let mut map = self.shell_cwd.lock();
+            match map.get(&workspace).cloned() {
+                Some(c) if c.as_path().exists() => Some(c),
+                Some(_) => {
+                    map.remove(&workspace);
+                    None
+                }
+                None => None,
+            }
+        };
+        // 命令执行前的有效 cwd(用于判断本次命令是否移动了目录)。
+        let effective_prev = saved_cwd
+            .clone()
+            .or_else(|| std::fs::canonicalize(&workspace).ok());
+
         // v1.5 R2:后台执行 —— 立即返回任务 id,输出经队列在下一回合
         // 边界注入(或 background_status 查询)。宿主未接后台生成器时
         // 明确报错,不静默降级为前台执行。OS 沙箱覆盖随调用透传,由
         // 宿主侧与前台同等执行(严格模式 fail-closed)。
+        // 后台命令同样从持久 cwd 起跑(前置 `cd`),但**不**写回状态:
+        // 后台进程的去向不代表前台 shell。
         if args.get("run_in_background").and_then(|v| v.as_bool()) == Some(true) {
             let spawner = ctx
                 .background
@@ -158,7 +294,11 @@ impl Tool for BashTool {
                 .ok_or_else(|| ToolError::InvalidArgs {
                     message: "run_in_background: 本线程未接入后台任务生成器".into(),
                 })?;
-            let task_id = spawner.spawn_bash(&cmd, &ctx.workspace_path(), ctx.os_sandbox)?;
+            let bg_cmd = match &saved_cwd {
+                Some(c) => format!("cd -- {} 2>/dev/null; {cmd}", shell_quote(c)),
+                None => cmd.clone(),
+            };
+            let task_id = spawner.spawn_bash(&bg_cmd, &ctx.workspace_path(), ctx.os_sandbox)?;
             return Ok(ToolOutput {
                 content: vec![reflect_protocol::ContentBlock::text(format!(
                     "[background task {task_id} started] 命令已在后台执行;完成结果将在下一个回合边界自动注入,也可用 background_status 查询。"
@@ -171,6 +311,22 @@ impl Tool for BashTool {
                 elapsed_ms: 0,
             });
         }
+
+        // v1.7:把用户命令包进 `{ ...; }` 组,组后由 sentinel 行回报退出码
+        // 与 `$PWD`(parse 失败 / shell 提前退出时无 sentinel,退出码与错误
+        // 信息语义与未包裹版本一致)。前置 `cd` 恢复持久 cwd,恢复失败仅
+        // 提示 stderr、不阻断执行。
+        let mut script = String::new();
+        if let Some(c) = &saved_cwd {
+            script.push_str(&format!(
+                "cd -- {q} >/dev/null 2>&1 || printf '%s\\n' \"reflect: 持久工作目录 {d} 已不存在,回落到 workspace 根\" >&2\n",
+                q = shell_quote(c),
+                d = c.display()
+            ));
+        }
+        script.push_str(&format!(
+            "{{ {cmd}\n}} ; __reflect_rc=$? ; printf '\\n{SENTINEL_PREFIX}rc=%s cwd=%s' \"$__reflect_rc\" \"$PWD\" ; printf '\\n{SENTINEL_PREFIX}rc=%s cwd=%s' \"$__reflect_rc\" \"$PWD\" >&2\n"
+        ));
 
         // v1.3:OS 沙箱。`OsSandbox::default()` v1.3 起 enabled + strict,
         // `enforce_or_fail()` 集中决定 fail-closed 行为:
@@ -185,7 +341,6 @@ impl Tool for BashTool {
             Some(on) => reflect_sandbox::OsSandbox::with_enabled(on),
             None => reflect_sandbox::OsSandbox::from_env(),
         };
-        let workspace = ctx.workspace_path();
         // 严格模式 fail-closed:后端 / 初始化失败 → 直接报错,不裸执行。
         if let Err(reason) = sandbox.enforce_or_fail() {
             warn!(error = %reason, "sandbox fail-closed; refusing bare exec");
@@ -199,7 +354,7 @@ impl Tool for BashTool {
             sandbox.status(),
             reflect_sandbox::OsSandboxStatus::Seatbelt
         ) {
-            match sandbox.seatbelt_argv(&workspace, &cmd) {
+            match sandbox.seatbelt_argv(&workspace, &script) {
                 Ok(pair) => pair,
                 Err(e) => {
                     if sandbox.strict {
@@ -209,11 +364,11 @@ impl Tool for BashTool {
                         return Err(ToolError::SandboxUnavailable { reason });
                     }
                     warn!(error = %e, "sandbox profile generation failed; falling back to unsandboxed exec");
-                    ("sh".to_string(), vec!["-c".to_string(), cmd.clone()])
+                    ("sh".to_string(), vec!["-c".to_string(), script.clone()])
                 }
             }
         } else {
-            ("sh".to_string(), vec!["-c".to_string(), cmd.clone()])
+            ("sh".to_string(), vec!["-c".to_string(), script.clone()])
         };
         // Seatbelt 模式下 argv[1] 是临时 .sb profile 路径;文件名按调用唯一
         // (见 seatbelt_argv),命令结束后由本工具负责删除,避免临时目录泄漏。
@@ -364,8 +519,30 @@ impl Tool for BashTool {
         // 若 timeout 触发,上面 `Err(_)` 分支已 return;若 child_handle 仍在
         // (理论上不会,drain+wait 在块内完成),靠 `kill_on_drop` 兜底。
 
-        let stdout_str = String::from_utf8_lossy(&out_bytes).to_string();
-        let stderr_str = String::from_utf8_lossy(&err_bytes).to_string();
+        // v1.7:解析 sentinel(退出码 + 最终 `$PWD`),并把该行从两条流的
+        // 输出中剥除(sentinel 同时打到 stdout 与 stderr —— 单一流被
+        // OUTPUT_LIMIT 截断时另一条仍存活)。两处都缺失(shell 被 exit/
+        // 杀死 / 解析错误提前终止)→ 沿用进程退出码,持久状态不动。
+        // `sh -c` 的进程退出码此时是 `printf` 的 0,必须以 sentinel rc 为准。
+        let (state_out, cleaned_out) = extract_shell_state(&out_bytes);
+        let (state_err, cleaned_err) = extract_shell_state(&err_bytes);
+        let shell_state = state_out.or(state_err);
+        let exit_code = shell_state.as_ref().map_or(exit_code, |(rc, _)| *rc);
+
+        // v1.7:最终 cwd 写回持久状态(仅接受绝对路径;`$PWD` 为空或相对
+        // 视为异常,保持旧值)。
+        let final_cwd: Option<String> = shell_state
+            .as_ref()
+            .map(|(_, c)| c.clone())
+            .filter(|c| c.starts_with('/'));
+        if let Some(cwd) = &final_cwd {
+            self.shell_cwd
+                .lock()
+                .insert(workspace.clone(), PathBuf::from(cwd));
+        }
+
+        let stdout_str = String::from_utf8_lossy(&cleaned_out).to_string();
+        let stderr_str = String::from_utf8_lossy(&cleaned_err).to_string();
 
         let mut text = stdout_str;
         if !stderr_str.is_empty() {
@@ -374,9 +551,34 @@ impl Tool for BashTool {
             }
             text.push_str(&stderr_str);
         }
+        // v1.7:命令移动了工作目录 → 在输出末尾追加一行提示,让模型在
+        // 不额外调用 pwd 的情况下感知后续命令的起始位置。
+        if let Some(cwd) = &final_cwd {
+            let moved = effective_prev.as_deref() != Some(Path::new(cwd));
+            if moved {
+                text.push_str(&format!("\n[cwd: {cwd}]"));
+            }
+        }
         if text.len() > OUTPUT_LIMIT {
+            // v1.7 截断落盘:已捕获的完整输出(stdout/stderr 分段)写临时
+            // 文件,供模型用 read 工具取回;写失败维持纯截断(尽力而为)。
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let spill_path = std::env::temp_dir()
+                .join(format!("reflect-bash-{}-{nanos}.log", std::process::id()));
+            let mut spill = cleaned_out.clone();
+            if !cleaned_err.is_empty() {
+                spill.extend_from_slice(b"\n\n--- stderr ---\n");
+                spill.extend_from_slice(&cleaned_err);
+            }
+            let spilled = std::fs::write(&spill_path, &spill).is_ok();
             text.truncate(OUTPUT_LIMIT);
             text.push_str("\n... [truncated]");
+            if spilled {
+                text.push_str(&format!("\n[完整输出已落盘: {}]", spill_path.display()));
+            }
         }
 
         // M3:exit_code 进 metadata,TUI reducer 据此渲染 `ExecResult` 单元格;
@@ -390,6 +592,7 @@ impl Tool for BashTool {
                 "stdout_bytes": out_bytes.len(),
                 "stderr_bytes": err_bytes.len(),
                 "exit_code": exit_code,
+                "cwd": final_cwd.clone().or_else(|| effective_prev.map(|p| p.to_string_lossy().into_owned())),
             }),
             elapsed_ms: 0,
         })
@@ -405,7 +608,7 @@ mod tests {
 
     #[tokio::test]
     async fn echo_runs_and_captures_stdout() {
-        let t = BashTool;
+        let t = BashTool::default();
         let ctx = ToolContext::for_workspace(".");
         let out = t
             .execute(ctx, serde_json::json!({"cmd": "echo hello"}))
@@ -448,7 +651,7 @@ mod tests {
                     .push((is_stderr, delta.to_string()));
             },
         )));
-        let out = BashTool
+        let out = BashTool::default()
             .execute(
                 ctx,
                 serde_json::json!({"cmd": "echo line1; echo err1 1>&2; echo line2"}),
@@ -499,7 +702,7 @@ mod tests {
             std::env::set_var("REFLECT_SANDBOX_OS_LEVEL", "0");
             std::env::set_var("REFLECT_SANDBOX_STRICT", "0");
         }
-        let out = BashTool
+        let out = BashTool::default()
             .execute(
                 ToolContext::for_workspace("/tmp"),
                 serde_json::json!({"cmd": "echo plain-path"}),
@@ -537,7 +740,7 @@ mod tests {
             std::env::set_var("REFLECT_SANDBOX_STRICT", "0");
         }
         let started = std::time::Instant::now();
-        let out = BashTool
+        let out = BashTool::default()
             .execute(
                 ToolContext::for_workspace("/tmp"),
                 serde_json::json!({"cmd": "seq 1 30000", "timeout_ms": 30000}),
@@ -564,7 +767,7 @@ mod tests {
     async fn bash_captures_exit_code_and_marks_failure() {
         // M3:成功命令 exit_code=0 + is_error=false;失败命令 exit_code=非0 + is_error=true。
         // metadata.exit_code 应被填充,供 TUI reducer 渲染 ExecResult 单元格。
-        let t = BashTool;
+        let t = BashTool::default();
         // 成功命令。
         let ok = t
             .execute(
@@ -597,7 +800,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_missing_cmd() {
-        let t = BashTool;
+        let t = BashTool::default();
         let err = t
             .execute(ToolContext::default(), serde_json::json!({}))
             .await
@@ -610,7 +813,7 @@ mod tests {
     #[tokio::test]
     async fn bash_accepts_command_alias() {
         // 模型误用 `command` 而非 schema 声明的 `cmd`;归一化后应能执行。
-        let t = BashTool;
+        let t = BashTool::default();
         let out = t
             .execute(
                 ToolContext::for_workspace("."),
@@ -630,7 +833,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_empty_cmd() {
         // `{"cmd": ""}` / `{"cmd": "   "}` 视同缺失 —— trim 后为空。
-        let t = BashTool;
+        let t = BashTool::default();
         let err = t
             .execute(ToolContext::default(), serde_json::json!({"cmd": "   "}))
             .await
@@ -641,7 +844,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_null_args() {
         // 模拟流式 JSON 解析失败退化为 Value::Null 的场景。
-        let t = BashTool;
+        let t = BashTool::default();
         let err = t
             .execute(ToolContext::default(), serde_json::Value::Null)
             .await
@@ -653,7 +856,7 @@ mod tests {
     async fn bash_cmd_still_primary_over_command() {
         // 当 cmd 与 command 同时存在,必须用 schema 的 cmd,绝不被 command 污染
         // (防止别名归一化引入「命令注入/覆盖」回归)。
-        let t = BashTool;
+        let t = BashTool::default();
         let out = t
             .execute(
                 ToolContext::for_workspace("."),
@@ -709,7 +912,7 @@ mod tests {
         let marker = "/usr/local/.reflect-bash-sandbox-test";
         let cmd =
             format!("touch {marker} 2>/dev/null; test -f {marker} && echo WROTE || echo BLOCKED");
-        let t = BashTool;
+        let t = BashTool::default();
         let ctx = ToolContext::for_workspace("/tmp");
         let out = t
             .execute(ctx, serde_json::json!({"cmd": cmd, "timeout_ms": 15000}))
@@ -751,7 +954,7 @@ mod tests {
             std::env::set_var("REFLECT_SANDBOX_OS_LEVEL", "0");
             std::env::set_var("REFLECT_SANDBOX_STRICT", "0");
         }
-        let t = BashTool;
+        let t = BashTool::default();
         let ctx = ToolContext::for_workspace("/tmp");
         let out = t
             .execute(ctx, serde_json::json!({"cmd": "echo unsandboxed-ok"}))
@@ -796,7 +999,7 @@ mod tests {
             std::env::set_var("REFLECT_SANDBOX_OS_LEVEL", "1");
             std::env::set_var("REFLECT_SANDBOX_STRICT", "1");
         }
-        let t = BashTool;
+        let t = BashTool::default();
         let ctx = ToolContext::for_workspace("/tmp");
         let out = t
             .execute(ctx, serde_json::json!({"cmd": "echo should-not-run"}))
@@ -830,5 +1033,212 @@ mod tests {
                 panic!("strict 模式下后端不可用应返回 SandboxUnavailable,得到: {other:?}")
             }
         }
+    }
+
+    // ── v1.7 持久 shell 状态(cwd 跨调用保留 + sentinel 剥除 + 截断落盘) ──
+
+    /// 提取 sentinel 行的纯函数测试:rc 与含空格的 cwd 都能解析,输出
+    /// 剥除后保留 `printf` 前置空行之前的原始内容。
+    #[test]
+    fn extract_state_parses_rc_and_cwd_with_spaces() {
+        let out = b"abc\n\n__REFLECT_STATE__ rc=2 cwd=/tmp/a b/c\n";
+        let (state, cleaned) = extract_shell_state(out);
+        let (rc, cwd) = state.expect("sentinel 应可解析");
+        assert_eq!(rc, 2);
+        assert_eq!(cwd, "/tmp/a b/c");
+        assert_eq!(cleaned, b"abc\n");
+    }
+
+    /// 无 sentinel(进程被杀 / `exit` 提前退出)→ 输出原样返回。
+    #[test]
+    fn extract_state_absent_leaves_output_untouched() {
+        let (state, cleaned) = extract_shell_state(b"plain output");
+        assert!(state.is_none());
+        assert_eq!(cleaned, b"plain output");
+    }
+
+    /// 用户输出里伪造 sentinel 行:取**最后一行**命中,真实 sentinel 被
+    /// 剥除,伪造行保留在输出里(不影响 rc 解析)。
+    #[test]
+    fn extract_state_takes_last_sentinel_line() {
+        let out = b"echo __REFLECT_STATE__ rc=99 cwd=/fake\n__REFLECT_STATE__ rc=0 cwd=/real\n";
+        let (state, cleaned) = extract_shell_state(out);
+        let (rc, cwd) = state.expect("应解析到真实 sentinel");
+        assert_eq!(rc, 0);
+        assert_eq!(cwd, "/real");
+        assert!(
+            String::from_utf8_lossy(&cleaned).contains("rc=99"),
+            "伪造行应保留: {}",
+            String::from_utf8_lossy(&cleaned)
+        );
+    }
+
+    /// cwd 跨调用持久:第一次 `cd` 进子目录(metadata.cwd 更新 + 输出带
+    /// `[cwd: ...]` 提示),第二次 `pwd` 直接落在该目录且不再重复提示。
+    #[tokio::test]
+    async fn cwd_persists_across_calls() {
+        let dir = std::env::temp_dir().join(format!("reflect-bash-cwd-{}-p", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let tool = BashTool::default();
+        let ctx = ToolContext::for_workspace("/tmp");
+        let out1 = tool
+            .execute(
+                ctx.clone(),
+                serde_json::json!({"cmd": format!("cd -- {}", shell_quote(&dir))}),
+            )
+            .await
+            .unwrap();
+        assert!(!out1.is_error, "cd 应成功: {:?}", out1.content[0]);
+        assert_eq!(
+            out1.metadata.get("cwd"),
+            Some(&serde_json::json!(dir.to_string_lossy().into_owned())),
+            "metadata.cwd 应反映新目录"
+        );
+        let text1 = match &out1.content[0] {
+            reflect_protocol::ContentBlock::Text { text } => text.clone(),
+            _ => panic!("expected text"),
+        };
+        assert!(
+            text1.contains(&format!("[cwd: {}]", dir.display())),
+            "移动目录后应追加提示: {text1:?}"
+        );
+
+        let out2 = tool
+            .execute(ctx, serde_json::json!({"cmd": "pwd"}))
+            .await
+            .unwrap();
+        let text2 = match &out2.content[0] {
+            reflect_protocol::ContentBlock::Text { text } => text.clone(),
+            _ => panic!("expected text"),
+        };
+        assert!(
+            text2.contains(dir.to_string_lossy().as_ref()),
+            "pwd 应落在持久目录: {text2:?}"
+        );
+        assert!(
+            !text2.contains("[cwd:"),
+            "目录未变时不应重复提示: {text2:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// sentinel 行剥除:最终输出不泄漏协议行,且无尾部换行的输出(如
+    /// `printf hello`)保持字节语义不变。
+    #[tokio::test]
+    async fn sentinel_line_stripped_and_byte_semantics_kept() {
+        let t = BashTool::default();
+        let out = t
+            .execute(
+                ToolContext::for_workspace("/tmp"),
+                serde_json::json!({"cmd": "printf hello"}),
+            )
+            .await
+            .unwrap();
+        let text = match &out.content[0] {
+            reflect_protocol::ContentBlock::Text { text } => text.clone(),
+            _ => panic!("expected text"),
+        };
+        assert!(
+            !text.contains("__REFLECT_STATE__"),
+            "sentinel 不应出现在输出中: {text:?}"
+        );
+        assert_eq!(text, "hello", "无尾部换行的输出应原样保留");
+    }
+
+    /// `exit N` 提前终止 shell → 无 sentinel,进程退出码兜底(= N),
+    /// 持久 cwd 保持旧值不变。
+    #[tokio::test]
+    async fn early_exit_uses_process_exit_code() {
+        let t = BashTool::default();
+        let out = t
+            .execute(
+                ToolContext::for_workspace("/tmp"),
+                serde_json::json!({"cmd": "exit 7"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.metadata.get("exit_code"), Some(&serde_json::json!(7)));
+        assert!(out.is_error, "非零退出码应标记 error");
+    }
+
+    /// 持久目录被删 → 状态清除、回落 workspace 根,命令正常执行不报错。
+    #[tokio::test]
+    async fn stale_cwd_falls_back_to_workspace() {
+        let dir = std::env::temp_dir().join(format!("reflect-bash-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let tool = BashTool::default();
+        let ctx = ToolContext::for_workspace("/tmp");
+        tool.execute(
+            ctx.clone(),
+            serde_json::json!({"cmd": format!("cd -- {}", shell_quote(&dir))}),
+        )
+        .await
+        .unwrap();
+        std::fs::remove_dir(&dir).unwrap();
+        let out = tool
+            .execute(ctx, serde_json::json!({"cmd": "pwd"}))
+            .await
+            .unwrap();
+        assert!(!out.is_error, "回落路径应正常执行: {:?}", out.content[0]);
+        let text = match &out.content[0] {
+            reflect_protocol::ContentBlock::Text { text } => text.clone(),
+            _ => panic!("expected text"),
+        };
+        assert!(text.contains("tmp"), "应回落到 workspace 根: {text:?}");
+    }
+
+    /// 输出超过 OUTPUT_LIMIT → 截断 + 完整捕获输出落盘,输出末尾给出路径。
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn oversized_output_spilled_to_disk() {
+        let _g = SANDBOX_ENV_LOCK.lock().unwrap();
+        let prior_on = std::env::var("REFLECT_SANDBOX_OS_LEVEL").ok();
+        let prior_strict = std::env::var("REFLECT_SANDBOX_STRICT").ok();
+        unsafe {
+            std::env::set_var("REFLECT_SANDBOX_OS_LEVEL", "0");
+            std::env::set_var("REFLECT_SANDBOX_STRICT", "0");
+        }
+        let out = BashTool::default()
+            .execute(
+                ToolContext::for_workspace("/tmp"),
+                // stdout 与 stderr 双流超限:确保合并文本必然超过
+                // OUTPUT_LIMIT(stdout 单流恰好在 cap 上不会触发截断)。
+                serde_json::json!({"cmd": "seq 1 30000; seq 1 1000 1>&2", "timeout_ms": 30000}),
+            )
+            .await;
+        match prior_on {
+            Some(p) => unsafe { std::env::set_var("REFLECT_SANDBOX_OS_LEVEL", p) },
+            None => unsafe { std::env::remove_var("REFLECT_SANDBOX_OS_LEVEL") },
+        }
+        match prior_strict {
+            Some(p) => unsafe { std::env::set_var("REFLECT_SANDBOX_STRICT", p) },
+            None => unsafe { std::env::remove_var("REFLECT_SANDBOX_STRICT") },
+        }
+        let out = out.unwrap();
+        let text = match &out.content[0] {
+            reflect_protocol::ContentBlock::Text { text } => text.clone(),
+            _ => panic!("expected text"),
+        };
+        assert!(text.contains("... [truncated]"), "应截断");
+        let marker = "[完整输出已落盘: ";
+        let path_str = text
+            .split(marker)
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .expect("截断输出应带落盘路径");
+        let bytes = std::fs::read(path_str).expect("落盘文件应存在");
+        assert!(
+            bytes.len() > OUTPUT_LIMIT,
+            "落盘应包含完整捕获输出(>{} bytes),实际 {}",
+            OUTPUT_LIMIT,
+            bytes.len()
+        );
+        assert!(
+            !String::from_utf8_lossy(&bytes).contains("__REFLECT_STATE__"),
+            "落盘内容不应包含 sentinel 行"
+        );
+        let _ = std::fs::remove_file(path_str);
     }
 }

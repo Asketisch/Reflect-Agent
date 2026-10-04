@@ -63,10 +63,11 @@ mod tests {
         let web_fetch = WebFetchTool::default();
         let web_search = WebSearchTool::new();
         let ask_uq = AskUserQuestionTool::default();
+        let bash = BashTool::default();
         let descriptions = [
             AskUserTool.description(),
             ask_uq.description(),
-            BashTool.description(),
+            bash.description(),
             BriefTool.description(),
             GetContextRemainingTool.description(),
             DeleteTool.description(),

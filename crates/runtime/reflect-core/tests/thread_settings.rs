@@ -121,7 +121,7 @@ fn build_thread(client: Arc<ScriptedClient>) -> AgentThread {
         },
     );
     let tools = Arc::new(ToolRegistry::default());
-    tools.register(Arc::new(reflect_tools::builtins::BashTool));
+    tools.register(Arc::new(reflect_tools::builtins::BashTool::default()));
     // 会话级审批保持关闭:验证 overrides 自身的强制语义。
     let cfg = AgentConfig::new("scripted/m1", Path::new("."));
     AgentThread::new(cfg, registry, tools, None, None)

@@ -97,6 +97,12 @@ pub struct ExecArgs {
     /// 目录)作为工作区。默认关;与 `reflect tui --auto-root` 对齐。
     #[arg(long, default_value_t = false)]
     pub auto_root: bool,
+    /// v1.7:图片附件(可多次传入)。每个文件读为 `UserInputItem::Image`
+    /// block,与 prompt 一并提交 —— 打通协议层已支持的多模态输入(此前
+    /// 只有 `image_view` 工具能产生 Image block,CLI 无入口)。支持
+    /// png/jpeg/gif/webp/bmp,单张 ≤10MiB。与 `--resume`/`-c`/`-r` 互斥。
+    #[arg(long = "image", value_name = "PATH")]
+    pub images: Vec<String>,
 }
 
 /// 入口函数:既被独立 `reflect-exec` 二进制调用,也被顶层 CLI router 的
@@ -111,6 +117,13 @@ pub fn run(args: ExecArgs) -> anyhow::Result<()> {
 async fn async_main(args: ExecArgs) -> anyhow::Result<()> {
     // v1.3 SDK:装配段已抽到 `headless` 模块(与 `reflect serve` 共享),
     // exec 只保留"resume 三选一 → 提交单条 prompt → 流式输出"的编排。
+    // v1.7:图片附件走多模态 UserInput,与 resume 语义互斥(历史回放 +
+    // 合成续跑 prompt 的路径不支持附加 item)。
+    if !args.images.is_empty()
+        && (args.resume.is_some() || args.continue_last || args.resume_by.is_some())
+    {
+        anyhow::bail!("--image 不能与 --resume/-c/-r 同时使用");
+    }
     let hargs = HeadlessArgs {
         agent: args.agent.clone(),
         ephemeral_tasks: args.ephemeral_tasks,
@@ -145,13 +158,27 @@ async fn async_main(args: ExecArgs) -> anyhow::Result<()> {
     }
 
     // ── 普通分支:单条 prompt → JSONL 流 ──
-    let prompt = args
-        .prompt
-        .ok_or_else(|| anyhow::anyhow!("usage: reflect exec <prompt>"))?;
+    if args.prompt.is_none() && args.images.is_empty() {
+        anyhow::bail!("usage: reflect exec <prompt>");
+    }
+    let prompt = args.prompt.clone().unwrap_or_default();
     let session = headless::bootstrap_normal(common, &hargs).await?;
-    // 插件 slash 命令展开:`/demo:hello world` → 命令 md 正文;未命中
-    // 任何命令时原样提交。展开失败(命令文件不可读)直接报错退出。
-    let sub = headless::expand_plugin_command(&session.plugin_runtime, prompt).await?;
+    // v1.7:图片附件 → 多模态 UserInput(items = [Image.., Text?]),不经
+    // 插件 slash 展开(命令展开是纯文本路径)。
+    let sub = if args.images.is_empty() {
+        // 插件 slash 命令展开:`/demo:hello world` → 命令 md 正文;未命中
+        // 任何命令时原样提交。展开失败(命令文件不可读)直接报错退出。
+        headless::expand_plugin_command(&session.plugin_runtime, prompt).await?
+    } else {
+        let mut items = Vec::new();
+        for path in &args.images {
+            items.push(headless::load_image_item(path)?);
+        }
+        if !prompt.trim().is_empty() {
+            items.push(reflect_protocol::UserInputItem::Text { text: prompt });
+        }
+        reflect_protocol::Submission::user_input_items(items)
+    };
     let mut handle = session.thread.submit(sub).await;
     while let Some(event) = handle.next().await {
         let mut w = JsonlWriter::new(std::io::stdout().lock());

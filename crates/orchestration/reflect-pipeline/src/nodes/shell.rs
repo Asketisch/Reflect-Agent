@@ -117,7 +117,7 @@ impl NodeRunner for ShellNodeRunner {
         tool_ctx.timeout = self.timeout;
         tool_ctx.cancel = ctx.cancel.clone();
         let started = std::time::Instant::now();
-        let output = reflect_tools::builtins::BashTool
+        let output = reflect_tools::builtins::BashTool::default()
             .execute(tool_ctx, serde_json::json!({ "cmd": command }))
             .await;
         let elapsed_ms = started.elapsed().as_millis() as u64;

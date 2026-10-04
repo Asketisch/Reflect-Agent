@@ -161,7 +161,7 @@ pub async fn bootstrap_common(args: &HeadlessArgs) -> anyhow::Result<HeadlessCom
     // 2. 工具注册表(builtin 全量注册,与 exec 历史行为一致)。
     let tools = Arc::new(ToolRegistry::default());
     tools.register(Arc::new(reflect_tools::builtins::EchoTool));
-    tools.register(Arc::new(reflect_tools::builtins::BashTool));
+    tools.register(Arc::new(reflect_tools::builtins::BashTool::default()));
     // 核心文件工具:与 lib facade(`reflect::builder::default_tool_registry`)对齐。
     // 此前缺失导致 CLI headless/serve 下模型调用 read/write/edit/grep/glob 报
     // "tool not found",而 ALWAYS_ON_TOOLS prompt 仍向模型宣告这些工具可用。
@@ -785,6 +785,137 @@ pub async fn expand_plugin_command(
                 .unwrap_or("")
                 .trim_start_matches('/');
             Err(anyhow::anyhow!("插件命令 `{name}` 展开失败: {e}"))
+        }
+    }
+}
+
+// ── v1.7:CLI 图片输入(`--image`)────────────────────────────────
+
+/// 单张图片读取上限(10 MiB),与 `image_view` 工具的限额一致 ——
+/// 防止超大图片撑爆请求体 / token 预算。
+pub const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+
+/// 按扩展名推断图片 MIME(仅支持常见栅格格式)。返回 `None` 表示
+/// 不支持的格式。
+pub fn image_mime_for_path(path: &str) -> Option<&'static str> {
+    let ext = path.rsplit('.').next()?.to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "bmp" => Some("image/bmp"),
+        _ => None,
+    }
+}
+
+/// 读取本地图片文件为 `UserInputItem::Image`(数据内联,core 已接线到
+/// LLM Image block)。扩展名不支持 / 文件不可读 / 超过
+/// [`MAX_IMAGE_BYTES`] → `Err`(exec 报错退出)。
+pub fn load_image_item(path: &str) -> anyhow::Result<reflect_protocol::UserInputItem> {
+    let mime = image_mime_for_path(path)
+        .ok_or_else(|| anyhow::anyhow!("不支持的图片格式(仅 png/jpeg/gif/webp/bmp): {path}"))?;
+    let data = std::fs::read(path).map_err(|e| anyhow::anyhow!("读取图片失败 {path}: {e}"))?;
+    if data.len() > MAX_IMAGE_BYTES {
+        anyhow::bail!(
+            "图片超过大小上限({} bytes > {}): {path}",
+            data.len(),
+            MAX_IMAGE_BYTES
+        );
+    }
+    Ok(reflect_protocol::UserInputItem::Image {
+        data,
+        mime_type: mime.to_string(),
+    })
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+
+    /// 1×1 透明 PNG(最小合法文件,89 字节)。
+    const TINY_PNG: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    #[test]
+    fn mime_detection_by_extension() {
+        assert_eq!(image_mime_for_path("a.png"), Some("image/png"));
+        assert_eq!(image_mime_for_path("B.PNG"), Some("image/png"));
+        assert_eq!(image_mime_for_path("c.jpg"), Some("image/jpeg"));
+        assert_eq!(image_mime_for_path("d.jpeg"), Some("image/jpeg"));
+        assert_eq!(image_mime_for_path("e.gif"), Some("image/gif"));
+        assert_eq!(image_mime_for_path("f.webp"), Some("image/webp"));
+        assert_eq!(image_mime_for_path("g.bmp"), Some("image/bmp"));
+        assert_eq!(image_mime_for_path("h.txt"), None);
+        assert_eq!(image_mime_for_path("noext"), None);
+        assert_eq!(image_mime_for_path("i.svg"), None, "svg 不在内联白名单");
+    }
+
+    #[test]
+    fn loads_png_into_image_item() {
+        let dir = std::env::temp_dir().join(format!("reflect-exec-img-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("t.png");
+        std::fs::write(&p, TINY_PNG).unwrap();
+        let item = load_image_item(p.to_str().unwrap()).unwrap();
+        match item {
+            reflect_protocol::UserInputItem::Image { data, mime_type } => {
+                assert_eq!(data, TINY_PNG);
+                assert_eq!(mime_type, "image/png");
+            }
+            other => panic!("应为 Image item,得到 {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rejects_unsupported_and_missing() {
+        assert!(load_image_item("/nonexistent/x.txt").is_err());
+        let dir = std::env::temp_dir().join(format!("reflect-exec-img2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("t.txt");
+        std::fs::write(&p, b"hello").unwrap();
+        assert!(load_image_item(p.to_str().unwrap()).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rejects_oversized_image() {
+        // 构造一个"扩展名合法但超限"的场景:用 png 扩展名写 11MiB 数据。
+        let dir = std::env::temp_dir().join(format!("reflect-exec-img3-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("big.png");
+        std::fs::write(&p, vec![0u8; MAX_IMAGE_BYTES + 1]).unwrap();
+        let err = load_image_item(p.to_str().unwrap()).unwrap_err();
+        assert!(err.to_string().contains("超过大小上限"), "got: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn user_input_items_submission_carries_images() {
+        let sub = reflect_protocol::Submission::user_input_items(vec![
+            reflect_protocol::UserInputItem::Image {
+                data: TINY_PNG.to_vec(),
+                mime_type: "image/png".into(),
+            },
+            reflect_protocol::UserInputItem::Text {
+                text: "看这张图".into(),
+            },
+        ]);
+        match &sub.op {
+            reflect_protocol::Op::UserInput { items, .. } => {
+                assert_eq!(items.len(), 2);
+                assert!(matches!(
+                    items[0],
+                    reflect_protocol::UserInputItem::Image { .. }
+                ));
+            }
+            other => panic!("应为 UserInput op,得到 {other:?}"),
         }
     }
 }

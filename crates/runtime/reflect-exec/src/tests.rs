@@ -54,6 +54,7 @@ fn ephemeral_tasks_field_is_bool_with_default_false() {
         agent: Some("default".into()),
         plan_mode: false,
         auto_root: false,
+        images: Vec::new(),
     };
     assert!(assert_field(&on));
     // 默认 false 命中 FileTaskStore 持久化分支

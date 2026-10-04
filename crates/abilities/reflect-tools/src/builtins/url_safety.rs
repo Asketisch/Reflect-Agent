@@ -7,9 +7,6 @@
 //!   `is_blocked_v6` / `is_cgnat_v4` / `is_multicast_v4` /
 //!   `is_reserved_v4` 与 `sanitize_url_for_metadata` 集中到本模块,
 //!   避免在每个 builtin 里重复实现,产生多份不同步的 URL 校验/消毒逻辑。
-//! - 顶层 `web_fetch.rs` 保留一个 `reject_private_hosts(host) ->
-//!   Result<(), ToolError>` 薄封装,把纯函数包成 `ToolError::InvalidArgs`,
-//!   这样本模块不会反向依赖 `tool::ToolError`,保持可移植。
 //!
 //! 黑名单覆盖范围(参考 web_fetch 模块 doc):
 //! - IPv4:loopback / RFC1918 / link-local / unspecified / broadcast /
@@ -18,14 +15,15 @@
 //!   multicast(ff00::/8)。
 //! - 字面量:`localhost` / `ip6-localhost` / `ip6-loopback`。
 //!
-//! 已知局限(DNS rebinding):`is_blocked_host` 仅校验 host 字符串字面量,
-//! 真实 hostname → 私网 IP 解析后比对留 v1.1 引入 `hickory-resolver`。
+//! v1.7:hostname → 私网 IP 的解析后比对已由 `web_fetch` 的
+//! `resolve_and_validate_host` 闭环(本模块提供 `is_blocked_ip` 纯函数);
+//! 本模块仍只做字符串/字面量层面的判定,保持无副作用。
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use url::Url;
 
-/// SSRF 防护 v1:对 host 字符串做白名单/黑名单校验。
+/// SSRF 防护:对 host 字符串做白名单/黑名单校验。
 ///
 /// 返回 `true` 当 host 命中任意内网/loopback/multicast/reserved 范围。
 ///
@@ -33,7 +31,8 @@ use url::Url;
 /// `"[::1]"`、`"[fe80::1%eth0]"`),需要先剥方括号;IPv6 zone-id
 /// (`fe80::1%eth0`)还要再剥 `%eth0` 后缀才能 parse 成 `Ipv6Addr`。
 ///
-/// DNS rebinding 防护(hostname → 私网 IP 解析后比对)留作 v1.1。
+/// host 是域名(非 IP 字面量)时恒返回 `false` —— 解析后比对由
+/// `web_fetch::resolve_and_validate_host` 负责。
 pub fn is_blocked_host(host: &str) -> bool {
     let lower = host.to_ascii_lowercase();
     if matches!(
@@ -55,7 +54,7 @@ pub fn is_blocked_host(host: &str) -> bool {
     if let Ok(ip) = host_no_zone.parse::<IpAddr>() {
         return is_blocked_ip(&ip);
     }
-    // host 是 hostname(不是 IP 字面量):留给 v1.1 DNS 解析后比对。
+    // host 是 hostname(不是 IP 字面量):解析后比对见 web_fetch::resolve_and_validate_host。
     false
 }
 

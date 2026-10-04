@@ -144,7 +144,7 @@ async fn background_bash_full_link() {
         },
     );
     let tools = Arc::new(ToolRegistry::default());
-    tools.register(Arc::new(BashTool));
+    tools.register(Arc::new(BashTool::default()));
     // background_status:与 bash 同批注册(Runtime 源,LLM 可见)。
     tools.register_with_source(
         ToolSource::Runtime,

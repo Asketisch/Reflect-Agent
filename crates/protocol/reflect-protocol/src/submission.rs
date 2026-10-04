@@ -46,6 +46,22 @@ impl Submission {
         }
     }
 
+    /// v1.7:多模态 UserInput 便捷构造器(文本 + 图片等 item 组合)。
+    /// CLI `--image` / TUI 粘贴图片等入口共用。
+    pub fn user_input_items(items: Vec<crate::item::UserInputItem>) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            op: crate::op::Op::UserInput {
+                items,
+                thread_settings: crate::item::ThreadSettingsOverrides::default(),
+            },
+            client_user_message_id: None,
+            trace: None,
+            workspace: None,
+            source_command: None,
+        }
+    }
+
     /// 构造任意 Submission 并预置 id。
     pub fn with_id(id: impl Into<String>, op: Op) -> Self {
         Self {

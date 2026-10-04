@@ -895,7 +895,7 @@ async fn full_link_tool_output_delta_on_wire() {
         },
     );
     let tools = Arc::new(ToolRegistry::default());
-    tools.register(Arc::new(reflect_tools::builtins::BashTool));
+    tools.register(Arc::new(reflect_tools::builtins::BashTool::default()));
     let thread = AgentThread::new(
         AgentConfig::new("scripted/m1", Path::new(".")),
         registry,

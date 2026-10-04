@@ -14,7 +14,7 @@ Plan mode 是只读规划阶段。在 Plan mode 下：
 Ask the user one to four structured questions (each with 2-4 options). Use this when you need to clarify intent, gather preferences, or get a decision before proceeding. The user can also pick "Other" to provide a custom answer. Blocks the turn until the user responds or cancels.
 
 ## tool.bash
-Execute a shell command in the workspace. Side-effecting.
+Execute a shell command in the workspace. Side-effecting. The working directory persists across calls: `cd` in one call carries into the next (metadata.cwd reports it; a `[cwd: ...]` note is appended whenever a command moves it). If output exceeds the size limit it is truncated, and the full captured output is written to a temp file whose path is appended so you can Read it back.
 
 ## tool.brief
 Summarize attachments or long context into a concise briefing block. Accepts `title` and `content` (or `paths` list stub).
