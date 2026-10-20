@@ -87,6 +87,18 @@ impl PyReflectBuilder {
         }
     }
 
+    #[pyo3(signature = (dir))]
+    /// v1.6:额外提示词目录(按模型匹配的外置提示词库)。
+    ///
+    /// 目录下 `*.md` 文件按文件名分层:`default.md` / `<厂商>.md` /
+    /// `<精确模型名>.md`,每个文件用 `## key` 分节。同名层以本目录
+    /// 优先于 `~/.reflect/prompts/`。
+    fn prompts_dir(&self, dir: String) -> Self {
+        Self {
+            inner: self.inner.clone().with_prompts_dir(dir),
+        }
+    }
+
     /// 返回当前 builder 配置快照(不触发 LLM / 网络)。
     fn describe(&self) -> (String, String, bool, bool) {
         (

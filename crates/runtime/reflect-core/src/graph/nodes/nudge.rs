@@ -8,6 +8,14 @@ use reflect_llm::ChatMessage;
 
 use crate::graph::state::AgentState;
 
+/// v1.6:从注入文案库取 nudge section 并用 minijinja 渲染 `{{ var }}`。
+/// 缺失 key 时用 `fallback` 兜底;渲染失败也回落原始模板值。
+fn render_nudge(key: &str, fallback: &str, vars: &serde_json::Value) -> String {
+    let set = reflect_prompt::library().resolve("");
+    let template = set.get_or(key, fallback);
+    reflect_prompt::render(template, vars).unwrap_or_else(|_| fallback.to_string())
+}
+
 /// loop-guard:同一规范化调用签名连续命中多少次后注入提醒。
 pub(crate) const REPEAT_LOOP_THRESHOLD: u32 = 3;
 
@@ -45,12 +53,17 @@ pub(crate) fn canonical_call_signature(calls: &[reflect_tools::ToolCallRequest])
 
 /// 注入一条 system-reminder,提示模型停止重复调用工具、基于已有结果作答。
 pub(crate) fn inject_loop_nudge(state: &mut AgentState) {
-    let nudge = format!(
+    // v1.6:文案外置为 `runtime.nudge-loop` section,按库内当前(空
+    // spec → default 层)解析;`FINAL ANSWER` 模板仍由常量注入保持契约。
+    let nudge = render_nudge(
+        "runtime.nudge-loop",
         "You are repeating the same tool call with identical arguments \
          without making progress. Stop calling tools. Review the results \
          you already have and give your final answer now using the \
-         template: {}.",
-        reflect_prompt::FINAL_ANSWER_TEMPLATE
+         template: {{ final_answer_template }}.",
+        &serde_json::json!({
+            "final_answer_template": reflect_prompt::FINAL_ANSWER_TEMPLATE,
+        }),
     );
     state
         .messages
@@ -92,14 +105,18 @@ pub fn maybe_inject_progress_nudge(state: &mut AgentState, max_iterations: u32) 
     // 故不再因 web_fetch_history 为空而提前 return)。
     let remaining = max_iterations.saturating_sub(state.iteration);
     if remaining <= MAX_ITERATIONS_REMAINING_THRESHOLD && max_iterations > 0 {
-        nudge_lines.push(format!(
-            "You are on iteration {}/{} and are about to run out of turns. \
+        // v1.6:文案外置为 `runtime.nudge-final` section。
+        nudge_lines.push(render_nudge(
+            "runtime.nudge-final",
+            "You are on iteration {{ iteration }}/{{ max_iterations }} and are about to run out of turns. \
              Stop calling tools NOW. Give your final answer immediately using the \
-             template: {}. Base it on the information you \
+             template: {{ final_answer_template }}. Base it on the information you \
              already have — do not attempt any further tool calls.",
-            state.iteration,
-            max_iterations,
-            reflect_prompt::FINAL_ANSWER_TEMPLATE,
+            &serde_json::json!({
+                "iteration": state.iteration,
+                "max_iterations": max_iterations,
+                "final_answer_template": reflect_prompt::FINAL_ANSWER_TEMPLATE,
+            }),
         ));
     }
 
@@ -107,9 +124,11 @@ pub fn maybe_inject_progress_nudge(state: &mut AgentState, max_iterations: u32) 
     if !state.web_fetch_history.is_empty() {
         let n = state.web_fetch_history.len();
         if n >= WEB_HISTORY_NUDGE_THRESHOLD {
-            nudge_lines.push(format!(
-                "You have fetched {} web pages so far. Facts collected (URL → excerpt):",
-                n
+            // v1.6:标题行外置为 `runtime.nudge-web-fetched` section。
+            nudge_lines.push(render_nudge(
+                "runtime.nudge-web-fetched",
+                "You have fetched {{ count }} web pages so far. Facts collected (URL → excerpt):",
+                &serde_json::json!({ "count": n }),
             ));
             for (i, e) in state.web_fetch_history.iter().enumerate() {
                 let domain = url_host(&e.url).unwrap_or_else(|| "?".into());
@@ -121,10 +140,14 @@ pub fn maybe_inject_progress_nudge(state: &mut AgentState, max_iterations: u32) 
                     .replace('\n', " ");
                 nudge_lines.push(format!("  [{}] {} — {}…", i + 1, domain, snippet));
             }
-            nudge_lines.push(format!(
+            // v1.6:收尾行外置为 `runtime.nudge-web-review` section。
+            nudge_lines.push(render_nudge(
+                "runtime.nudge-web-review",
                 "Review these facts. If you have enough to answer, stop calling tools \
-                 and respond with: {}. Do NOT keep searching.",
-                reflect_prompt::FINAL_ANSWER_TEMPLATE
+                 and respond with: {{ final_answer_template }}. Do NOT keep searching.",
+                &serde_json::json!({
+                    "final_answer_template": reflect_prompt::FINAL_ANSWER_TEMPLATE,
+                }),
             ));
         }
 
@@ -140,10 +163,16 @@ pub fn maybe_inject_progress_nudge(state: &mut AgentState, max_iterations: u32) 
                 .map(|(d, c)| format!("{}×{}", d, c))
                 .collect::<Vec<_>>()
                 .join(", ");
-            nudge_lines.push(format!(
-                "You have already fetched from the same domain(s) multiple times ({list}). \
-                 You almost certainly have enough information — respond with {} now.",
-                reflect_prompt::FINAL_ANSWER_TEMPLATE
+            // v1.6:文案外置为 `runtime.nudge-domain-repeat` section。
+            nudge_lines.push(render_nudge(
+                "runtime.nudge-domain-repeat",
+                "You have already fetched from the same domain(s) multiple times ({{ domains }}). \
+                 You almost certainly have enough information — respond with \
+                 {{ final_answer_template }} now.",
+                &serde_json::json!({
+                    "domains": list,
+                    "final_answer_template": reflect_prompt::FINAL_ANSWER_TEMPLATE,
+                }),
             ));
         }
     }

@@ -37,6 +37,10 @@ pub struct M4Deps {
     /// 写,`pre_loop` 读 + 渲染为 `[已完成的子代理调用记录]` 防止 LLM
     /// 重复 spawn。FIFO cap=32,跨 turn 共享在 `M4Deps` 上。
     pub subagent_registry: Arc<SubagentRegistry>,
+    /// v1.6.1:提示词库目录序(home 在前、workspace 在后,`/prompt`
+    /// 重扫按此序装配)。默认空 —— 仅内嵌默认;bootstrap / Builder
+    /// 装配时记录,`Op::PromptCommand` 的 Switch 动作用它重扫。
+    pub prompt_dirs: Vec<std::path::PathBuf>,
 }
 
 impl std::fmt::Debug for M4Deps {
@@ -116,5 +120,6 @@ pub fn default_m4_deps(agent_name: &str) -> M4Deps {
         note_store,
         file_recovery,
         subagent_registry,
+        prompt_dirs: Vec::new(),
     }
 }

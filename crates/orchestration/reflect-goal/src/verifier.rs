@@ -48,7 +48,7 @@ pub async fn verify(
             blocks: vec![ContentBlock::Text { text: prompt }],
         })],
         system: SystemBlocks(vec![SystemBlock {
-            text: VERIFIER_SYSTEM_PROMPT.to_string(),
+            text: verifier_system_prompt(),
             cache_control: None,
             ephemeral: false,
         }]),
@@ -177,17 +177,29 @@ pub async fn run_verify_command(cmd: &str) -> bool {
 
 /// verifier 的 system prompt —— 强制 evidence-based, requirement-by-requirement。
 /// 采用严格措辞。
+///
+/// v1.6:文案外置为提示词库 `goal.verifier` section(可经
+/// `.reflect/prompts/*.md` 按模型覆盖);本常量保留作缺失回落。
 const VERIFIER_SYSTEM_PROMPT: &str = "\
 You are a strict goal-completion verifier. You judge whether a coding goal \
 has been FULLY achieved based on the work performed.\n\n\
-CRITICAL RULES:\n\
+CRITICAL RULES:\
 1. Only mark the goal `met` when EVERY requirement has current, direct evidence \
-of completion. Inspect the actual work output, not the agent's claims.\n\
+of completion. Inspect the actual work output, not the agent's claims.\
 2. If evidence is incomplete, weak, indirect, merely consistent with completion, \
-or leaves ANY requirement missing/incomplete/unverified → mark `unmet`.\n\
+or leaves ANY requirement missing/incomplete/unverified → mark `unmet`.\
 3. Mark `blocked` ONLY for external blockers (missing permissions, unavailable \
-dependencies, environment issues) — NOT for hard work you think is too difficult.\n\
+dependencies, environment issues) — NOT for hard work you think is too difficult.\
 4. Respond as STRICT JSON, no prose outside the JSON object.";
+
+/// v1.6:按库解析 verifier prompt(空 spec → default 层;goal 模式的
+/// 子代理若指定了模型,由调用方传入该 spec)。
+fn verifier_system_prompt() -> String {
+    reflect_prompt::library()
+        .resolve("")
+        .get_or("goal.verifier", VERIFIER_SYSTEM_PROMPT)
+        .to_string()
+}
 
 /// 构造 user prompt,要求结构化 JSON 输出。
 fn build_verification_prompt(goal: &str, work_context: &str) -> String {

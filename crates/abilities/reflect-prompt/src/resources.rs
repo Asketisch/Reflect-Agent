@@ -1,14 +1,18 @@
-//! 轻量 Markdown 文案资源。
+//! 轻量 Markdown 文案资源(default 层)。
 //!
 //! 默认值内嵌在二进制中。启动后首次访问时会从 `REFLECT_HOME` 或
-//! `$HOME/.reflect` 加载可选的 `prompts.md`,且只替换该文件中出现的
-//! section。所得 map 在进程余下生命周期内不可变。
+//! `$HOME/.reflect` 加载可选的旧版 `prompts.md`,且只替换该文件中
+//! 出现的 section。所得 map 在进程余下生命周期内不可变。
+//!
+//! 按模型匹配的能力已迁至 [`crate::library`];本模块保留 `copy()`
+//! 语义(default 层)供内置工具 description 使用,调用点零改动。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-const DEFAULT_PROMPTS: &str = include_str!("../prompts.md");
+use crate::library::EMBEDDED_DEFAULT_PROMPTS;
+
 static PROMPTS: OnceLock<PromptResources> = OnceLock::new();
 
 /// 内嵌默认值 + 启动时用户覆盖的组合。
@@ -32,20 +36,38 @@ impl PromptResources {
         self.sections.get(key).map(String::as_str)
     }
 
+    #[allow(dead_code)]
     fn load_from_home() -> Self {
         let override_path = reflect_home().map(|home| home.join("prompts.md"));
         Self::load_from_path(override_path.as_deref())
     }
 
+    #[allow(dead_code)]
     fn load_from_path(path: Option<&Path>) -> Self {
         let overrides = path.and_then(|path| std::fs::read_to_string(path).ok());
-        Self::from_markdown(DEFAULT_PROMPTS, overrides.as_deref())
+        Self::from_markdown(EMBEDDED_DEFAULT_PROMPTS, overrides.as_deref())
     }
 }
 
 /// 进程级 prompt 资源。文件系统至多读取一次。
+///
+/// 语义已并入模型层:`~/.reflect/prompts.md` 的覆盖经 [`init_library`]
+/// 的 `legacy_prompts_md` 参数注册(入口调用方负责传入);这里返回的
+/// map 只保证 default 层级(不含任何模型层)。新代码应使用
+/// [`crate::library::resolve`]。
+///
+/// **注意**:本函数初始化**绝不能**触碰进程级 LIBRARY —— 它在首次
+/// `copy()`(工具注册 / spec 组装)时惰性执行,晚于入口的
+/// `init_library(&[dirs..])`;若在此重置库会把已扫描的用户模型层整体
+/// 丢弃(实测 Bug:工具调用回环后 system.main 回退内嵌默认)。
 pub fn prompts() -> &'static PromptResources {
-    PROMPTS.get_or_init(PromptResources::load_from_home)
+    PROMPTS.get_or_init(|| {
+        PromptResources::load_from_path(
+            reflect_home()
+                .map(|home| home.join("prompts.md"))
+                .as_deref(),
+        )
+    })
 }
 
 /// 返回必需的文案 section;仅在内嵌资源损坏或调用方请求未知 key 时
@@ -62,7 +84,8 @@ fn reflect_home() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".reflect")))
 }
 
-fn parse_sections(markdown: &str) -> HashMap<String, String> {
+/// 解析 `## key` 分节的 Markdown 为有序表。库内多个模块共用。
+pub(crate) fn parse_sections(markdown: &str) -> HashMap<String, String> {
     let mut sections = HashMap::new();
     let mut current_key: Option<&str> = None;
     let mut current_body = String::new();
@@ -98,7 +121,7 @@ mod tests {
 
     #[test]
     fn embedded_resource_contains_system_and_all_builtin_tool_sections() {
-        let resources = PromptResources::from_markdown(DEFAULT_PROMPTS, None);
+        let resources = PromptResources::from_markdown(EMBEDDED_DEFAULT_PROMPTS, None);
         assert!(resources.get("system.plan-mode").is_some());
         let tool_count = resources
             .sections

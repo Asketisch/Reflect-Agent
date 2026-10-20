@@ -159,11 +159,25 @@ impl LlmSummarizer {
     }
 }
 
+/// v1.6:按库解析单条摘要 prompt section(`compact.full` /
+/// `compact.recent` / `compact.memory-extract`),缺失时回落编译期
+/// 常量。空 spec → default 层;若需按 compact 子代理的模型覆盖,
+/// 由库的用户层文件即可(子代理继承会话模型)。
+fn resolve_prompt_section(key: &str, fallback: &str) -> String {
+    reflect_prompt::library()
+        .resolve("")
+        .get_or(key, fallback)
+        .to_string()
+}
+
 #[async_trait]
 impl Summarizer for LlmSummarizer {
     async fn summarize_full(&self, msgs: &[ChatMessage]) -> Result<String, SummarizerError> {
         let conversation = serialize_messages(msgs);
-        let prompt = SUMMARIZE_PROMPT_FULL.replace("{{ conversation }}", &conversation);
+        // v1.6:prompt 从提示词库解析(`compact.full`),`{{ conversation }}`
+        // 占位符语义不变(库文件与常量同源)。
+        let template = resolve_prompt_section("compact.full", SUMMARIZE_PROMPT_FULL);
+        let prompt = template.replace("{{ conversation }}", &conversation);
         call_summarizer(self, &prompt, None).await
     }
 
@@ -173,13 +187,15 @@ impl Summarizer for LlmSummarizer {
         previous_summary: Option<&str>,
     ) -> Result<String, SummarizerError> {
         let recent = serialize_messages(msgs);
+        let recent_template = resolve_prompt_section("compact.recent", SUMMARIZE_PROMPT_RECENT);
+        let full_template = resolve_prompt_section("compact.full", SUMMARIZE_PROMPT_FULL);
         let prompt = match previous_summary {
-            Some(prev) if !prev.is_empty() => SUMMARIZE_PROMPT_RECENT
+            Some(prev) if !prev.is_empty() => recent_template
                 .replace("{{ previous_summary }}", prev)
                 .replace("{{ recent_conversation }}", &recent),
             _ => {
                 // 无先前摘要 → 行为等同 full。
-                let full = SUMMARIZE_PROMPT_FULL.replace("{{ conversation }}", &recent);
+                let full = full_template.replace("{{ conversation }}", &recent);
                 return call_summarizer(self, &full, None).await;
             }
         };
@@ -188,7 +204,8 @@ impl Summarizer for LlmSummarizer {
 
     async fn extract_memories(&self, msgs: &[ChatMessage]) -> Result<Vec<String>, SummarizerError> {
         let conversation = serialize_messages(msgs);
-        let prompt = MEMORY_EXTRACT_PROMPT.replace("{{ conversation }}", &conversation);
+        let template = resolve_prompt_section("compact.memory-extract", MEMORY_EXTRACT_PROMPT);
+        let prompt = template.replace("{{ conversation }}", &conversation);
         let text = call_summarizer(self, &prompt, None).await?;
         Ok(text
             .lines()

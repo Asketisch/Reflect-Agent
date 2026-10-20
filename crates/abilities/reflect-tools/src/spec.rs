@@ -39,3 +39,19 @@ impl ToolSpec {
         }
     }
 }
+
+// v1.6:按模型匹配的 description 覆盖。trait 定义在 reflect-prompt,
+// impl 放本 crate —— reflect-tools 已依赖 reflect-prompt,反向 impl
+// 会成环,孤儿规则也要求 trait 或类型在本 crate。
+impl reflect_prompt::DescriptionSource for ToolSpec {
+    fn name(&self) -> &str {
+        ToolSpec::name(self)
+    }
+    fn set_description(&mut self, description: String) {
+        // 单变体 enum,直接解构(若未来加变体需补 match 臂)。
+        let ToolSpec::Function {
+            description: slot, ..
+        } = self;
+        *slot = description;
+    }
+}

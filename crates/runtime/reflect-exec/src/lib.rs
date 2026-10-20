@@ -206,9 +206,14 @@ async fn async_main(args: ExecArgs) -> anyhow::Result<()> {
     // v1.7:图片附件 → 多模态 UserInput(items = [Image.., Text?]),不经
     // 插件 slash 展开(命令展开是纯文本路径)。
     let sub = if args.images.is_empty() {
-        // 插件 slash 命令展开:`/demo:hello world` → 命令 md 正文;未命中
-        // 任何命令时原样提交。展开失败(命令文件不可读)直接报错退出。
-        headless::expand_plugin_command(&session.plugin_runtime, prompt).await?
+        // v1.6.1:内置 `/prompt` slash 优先于插件展开(引擎级命令)。
+        if let Some(prompt_sub) = headless::expand_prompt_slash(&prompt) {
+            prompt_sub
+        } else {
+            // 插件 slash 命令展开:`/demo:hello world` → 命令 md 正文;未命中
+            // 任何命令时原样提交。展开失败(命令文件不可读)直接报错退出。
+            headless::expand_plugin_command(&session.plugin_runtime, prompt).await?
+        }
     } else {
         let mut items = Vec::new();
         for path in &args.images {

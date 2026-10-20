@@ -211,9 +211,14 @@ impl Tool for TeamCreateTool {
             name: "team-lead".into(),
             role: "team-lead".into(),
             model: None,
-            system_prompt:
-                "You are the team lead. Coordinate team members and own the team-level task list."
-                    .into(),
+            // v1.6:文案外置为提示词库 `team.lead` section,可按模型覆盖。
+            system_prompt: reflect_prompt::library()
+                .resolve("")
+                .get_or(
+                    "team.lead",
+                    "You are the team lead. Coordinate team members and own the team-level task list.",
+                )
+                .into(),
             // Phase 4 才追加完整 allowed_tools(coordinator 模式);
             // Phase 2 留空 —— SubAgentFactory 后续走默认工具集。
             allowed_tools: vec![],

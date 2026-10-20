@@ -171,6 +171,7 @@ fn make_m4() -> M4Deps {
         note_store,
         file_recovery,
         subagent_registry,
+        prompt_dirs: Vec::new(),
     }
 }
 

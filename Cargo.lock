@@ -2429,6 +2429,7 @@ dependencies = [
  "parking_lot",
  "reflect-llm",
  "reflect-memory",
+ "reflect-prompt",
  "reflect-protocol",
  "reflect-telemetry",
  "serde",
@@ -2511,6 +2512,7 @@ dependencies = [
  "reflect-config",
  "reflect-core",
  "reflect-llm",
+ "reflect-prompt",
  "reflect-protocol",
  "reflect-subagent",
  "reflect-tools",
@@ -2581,6 +2583,7 @@ dependencies = [
  "futures",
  "parking_lot",
  "reflect-llm",
+ "reflect-prompt",
  "reflect-protocol",
  "reflect-telemetry",
  "serde",
@@ -2798,7 +2801,9 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1",
+ "tempfile",
  "thiserror 1.0.69",
+ "tracing",
 ]
 
 [[package]]

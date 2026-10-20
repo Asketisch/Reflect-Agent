@@ -1186,6 +1186,57 @@ pub async fn submission_loop(
                 }
                 tracing::info!("goal mode exited");
             }
+            // v1.6.1:`/prompt` slash 的引擎端。List 查询可用层 + 当前生效
+            // 层;Switch 按 bootstrap 记录的目录序重扫提示词库(用户改了
+            // `.reflect/prompts/*.md` 后即时生效,下一请求自动使用)。
+            // 两个动作都不开 turn —— 应答事件经 per-submission 通道 +
+            // 会话扇出双路送达(与 SubagentStatus 同款),再靠
+            // `SubmissionClosed` 收尾。
+            reflect_protocol::Op::PromptCommand { action } => {
+                use reflect_protocol::{PromptAction, PromptListEvent, PromptSwitchedEvent};
+                match action {
+                    PromptAction::List => {
+                        let lib = reflect_prompt::library();
+                        let set = lib.resolve(&cfg.current_model());
+                        let ev = Event::new(
+                            sub.id.clone(),
+                            EventMsg::PromptList(PromptListEvent {
+                                available: lib.available_layers(),
+                                current_spec: cfg.current_model(),
+                                active_layers: set.layers.clone(),
+                            }),
+                        );
+                        let _ = turn_tx.send(ev.clone()).await;
+                        fan_out_session(&session_subs, &ev);
+                    }
+                    PromptAction::Switch { layer } => {
+                        // layer 槽位当前固定走全量重扫;预留未来聚焦切换。
+                        let dirs = cfg
+                            .m4
+                            .as_ref()
+                            .map(|m| m.prompt_dirs.clone())
+                            .unwrap_or_default();
+                        let dir_refs: Vec<&std::path::Path> =
+                            dirs.iter().map(|p| p.as_path()).collect();
+                        reflect_prompt::init_library(&dir_refs, None);
+                        let set = reflect_prompt::library().resolve(&cfg.current_model());
+                        tracing::info!(
+                            dirs = dirs.len(),
+                            layers = ?set.layers,
+                            "/prompt: prompt library rescanned"
+                        );
+                        let ev = Event::new(
+                            sub.id.clone(),
+                            EventMsg::PromptSwitched(PromptSwitchedEvent {
+                                action: layer.clone().unwrap_or_else(|| "reload".into()),
+                                active_layers: set.layers.clone(),
+                            }),
+                        );
+                        let _ = turn_tx.send(ev.clone()).await;
+                        fan_out_session(&session_subs, &ev);
+                    }
+                }
+            }
             // v1.3 SDK:`RegisterTools` / `ToolExecutionResponse` 是 serve
             // 模式的**进程内控制 Op**,由 `reflect serve` 的 stdin 循环就
             // 地处理,正常不进 submission_loop。误入时(如 exec 转发 /

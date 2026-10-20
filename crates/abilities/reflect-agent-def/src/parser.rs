@@ -16,6 +16,9 @@ pub fn parse_agent_str(input: &str) -> Result<AgentDefinition, AgentDefError> {
         serde_yaml::from_str(front)?
     };
     def.system_prompt = body.trim().to_string();
+    // 文件来源 = 用户显式提供;即使 body 为空也保持 Custom(尊重用户
+    // 「我要一个空 prompt」的极端用法,不落回内置默认)。
+    def.source = crate::model::SystemPromptSource::Custom;
     validate(&def)?;
     Ok(def)
 }

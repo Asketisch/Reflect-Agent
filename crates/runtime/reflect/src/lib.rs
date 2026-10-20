@@ -52,11 +52,11 @@ pub use reflect_llm::{
 pub use reflect_protocol::{
     AbortReason, AgentMessage, AgentMessageDelta, ApprovalKind, ApprovalPolicy,
     ApprovalRequestEvent, ContentBlock, ContextCompactedEvent, ContextCompactedStrategy,
-    ErrorEvent, Event, EventMsg, MessageRole, NullRecorder, Op, ProtocolError, ReviewDecision,
-    RiskLevel, RolloutRecord, RolloutRecorder, SandboxPolicy, SessionConfiguredEvent, SessionInfo,
-    StreamErrorEvent, Submission, ThreadId, TokenCountEvent, TokenUsage, ToolCallBeginEvent,
-    ToolCallEndEvent, ToolOutput, TurnAbortedEvent, TurnCompleteEvent, TurnId, TurnStartedEvent,
-    TurnStatus, UserInputItem,
+    ErrorEvent, Event, EventMsg, MessageRole, NullRecorder, Op, PromptAction, PromptListEvent,
+    PromptSwitchedEvent, ProtocolError, ReviewDecision, RiskLevel, RolloutRecord, RolloutRecorder,
+    SandboxPolicy, SessionConfiguredEvent, SessionInfo, StreamErrorEvent, Submission, ThreadId,
+    TokenCountEvent, TokenUsage, ToolCallBeginEvent, ToolCallEndEvent, ToolOutput,
+    TurnAbortedEvent, TurnCompleteEvent, TurnId, TurnStartedEvent, TurnStatus, UserInputItem,
 };
 
 // ── Tools ──────────────────────────────────────────────────────────────────
@@ -79,6 +79,11 @@ pub use reflect_skills::SkillsCatalog;
 
 // ── Agent definitions(新暴露)──────────────────────────────────────────────
 pub use reflect_agent_def::AgentDefinition;
+
+// ── Prompts(按模型匹配的外置提示词库,v1.6)──────────────────────────────
+// TUI / GUI 下游经此消费:.reflect/prompts/*.md 的发现、加载、按模型
+// 三级回退(default → 厂商 → 精确模型名)与进程级初始化。
+pub use reflect_prompt::{PromptLibrary, PromptSet, init_library, library, split_spec};
 
 // ── Compact(新暴露)─────────────────────────────────────────────────────────
 pub use reflect_compact::Compactor;

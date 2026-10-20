@@ -6,6 +6,7 @@ use crate::item::{
     PlanApprovalChoice, ReasoningEffortMirror, ReviewDecision, ThreadSettingsOverrides, ToolOutput,
     UserInputItem,
 };
+use crate::op_prompt::PromptAction;
 use crate::question::AskUserAnswer;
 
 /// 用户或系统发起的操作。
@@ -131,6 +132,15 @@ pub enum Op {
     /// `NodeContext.goal`,停止自动续作。
     ExitGoalMode,
 
+    /// v1.6.1:提示词层管理(`/prompt` slash,TUI/GUI 选择提示词)。
+    ///
+    /// `action = List` 查询当前可用层与生效层,应答为
+    /// `EventMsg::PromptList`;`action = Switch` 运行中重扫提示词库
+    /// (用户改了 `.reflect/prompts/*.md` 后让改动即时生效),应答为
+    /// `EventMsg::PromptSwitched`。两者都只动进程级提示词库,不改
+    /// model spec —— 提示词按模型自动匹配,刷新的是「层文件集」。
+    PromptCommand { action: PromptAction },
+
     /// v1.3 SDK:客户端(serve 模式)注册跨语言自定义工具。
     ///
     /// 工具的**实现留在客户端进程**(Python / TS 函数):core 侧为每个
@@ -211,6 +221,7 @@ impl Op {
             Op::CyclePermissionMode => "cycle_permission_mode",
             Op::EnterGoalMode { .. } => "enter_goal_mode",
             Op::ExitGoalMode => "exit_goal_mode",
+            Op::PromptCommand { .. } => "prompt_command",
             Op::RegisterTools { .. } => "register_tools",
             Op::ToolExecutionResponse { .. } => "tool_execution_response",
             Op::Steer { .. } => "steer",
@@ -347,6 +358,26 @@ mod tests {
                 _ => panic!("wrong variant"),
             }
             assert_eq!(op.discriminant(), "set_effort");
+        }
+    }
+
+    #[test]
+    fn serde_roundtrip_prompt_command() {
+        // v1.6.1:Op::PromptCommand { action } —— `/prompt` slash 的协议
+        // 载体。List 与 Switch 两个变体都要覆盖。
+        for (action, tag) in [
+            (crate::op_prompt::PromptAction::List, "list"),
+            (
+                crate::op_prompt::PromptAction::Switch { layer: None },
+                "switch",
+            ),
+        ] {
+            let op = Op::PromptCommand { action };
+            let json = serde_json::to_string(&op).unwrap();
+            assert!(json.contains(r#""type":"prompt_command""#), "got: {json}");
+            assert!(json.contains(tag), "got: {json}");
+            let back: Op = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.discriminant(), "prompt_command");
         }
     }
 

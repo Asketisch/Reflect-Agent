@@ -293,6 +293,10 @@ struct PromptForInner {
 /// ```
 ///
 /// snapshot 为空时省略 history 段(避免空行噪音)。
+///
+/// v1.6:外层格式外置为提示词库 `discussion.participant` section,
+/// minijinja 渲染(`topic` / `agent` / `round` / `history` 变量);
+/// 缺失时回落原硬编码格式。
 fn render_user_prompt(
     topic: &str,
     agent: &AgentId,
@@ -308,30 +312,58 @@ fn render_user_prompt(
             .collect::<Vec<_>>()
             .join("\n")
     };
-    format!(
-        "Topic: {topic}\nYou are: {agent}\nRound: {round}\n\n\
-         Visible transcript so far:\n{history}\n\n\
+    let fallback = "Topic: {{ topic }}\nYou are: {{ agent }}\nRound: {{ round }}\n\n\
+         Visible transcript so far:\n{{ history }}\n\n\
          Use send_message to broadcast your reply.\n\
          Use read_messages to drain your inbox.\n\
-         Use finish_discussion when consensus is reached.",
+         Use finish_discussion when consensus is reached.";
+    let set = reflect_prompt::library().resolve("");
+    let template = set.get_or("discussion.participant", fallback);
+    reflect_prompt::render(
+        template,
+        &serde_json::json!({
+            "topic": topic,
+            "agent": agent.0,
+            "round": round,
+            "history": history,
+        }),
     )
+    .unwrap_or_else(|_| {
+        // 模板渲染失败兜底:直接用 fallback 原文替换变量。
+        fallback
+            .replace("{{ topic }}", topic)
+            .replace("{{ agent }}", &agent.0)
+            .replace("{{ round }}", &round.to_string())
+            .replace("{{ history }}", &history)
+    })
 }
 
 // ── v1.4 C3:LLM 裁判 ───────────────────────────────────────────
 
 /// 裁判子代理的 system prompt —— 强调证据导向 + 严格 JSON 输出。
+///
+/// v1.6:文案外置为提示词库 `discussion.judge` section(可按模型覆盖);
+/// 本常量保留作缺失回落。
 const JUDGE_SYSTEM_PROMPT: &str = "\
 You are a strict discussion judge. You read the full transcript of a \
 multi-agent discussion and decide whether the participants have reached a \
 genuine consensus.\n\n\
-RULES:\n\
+RULES:\
 1. Consensus requires substantive agreement on the core question — mere \
 politeness, repeated self-declarations without engagement, or residual \
-disagreement on key points means NOT agreed.\n\
-2. If agreed, `summary` must faithfully state what was agreed upon.\n\
+disagreement on key points means NOT agreed.\
+2. If agreed, `summary` must faithfully state what was agreed upon.\
 3. If not agreed, `summary` states the current focus of disagreement and \
-`blockers` lists the concrete unresolved points (each a short sentence).\n\
+`blockers` lists the concrete unresolved points (each a short sentence).\
 4. Respond with STRICT JSON only, no prose outside the object.";
+
+/// v1.6:按库解析 judge prompt(空 spec → default 层)。
+fn judge_system_prompt() -> String {
+    reflect_prompt::library()
+        .resolve("")
+        .get_or("discussion.judge", JUDGE_SYSTEM_PROMPT)
+        .to_string()
+}
 
 /// 构造 LLM 裁判闭包:每轮 spawn 一个独立 judge 子代理(禁用全部工具,
 /// `max_turns = 1`),让它通读全量 transcript 后输出结构化 JSON 裁决,
@@ -365,7 +397,7 @@ pub fn make_judge_closure(factory: Arc<SubAgentFactory>) -> Arc<crate::models::J
                 name: "Judge".into(),
                 role: "judge".into(),
                 model: None, // 继承工厂默认模型(通常配为便宜模型)
-                system_prompt: JUDGE_SYSTEM_PROMPT.into(),
+                system_prompt: judge_system_prompt(),
                 allowed_tools: vec![], // 裁判不需要工具,纯文本裁决
                 data_transfer: DataTransferConfig::default(),
                 max_turns: Some(1),

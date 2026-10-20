@@ -33,7 +33,7 @@ pub use collab::{CollabFinishedEvent, CollabMessageEvent, CollabStartedEvent};
 pub use compaction::{
     ContextCompactedEvent, ContextCompactedStrategy, ErrorEvent, StreamErrorEvent, TriedCredential,
 };
-pub use config::ConfigReloadedEvent;
+pub use config::{ConfigReloadedEvent, PromptListEvent, PromptSwitchedEvent};
 pub use lsp::{LspServerFailedEvent, LspServerStartedEvent};
 pub use mcp::{
     McpServerFailedEvent, McpServerStartedEvent, McpToolInvokedEvent, McpTransportMirror,
@@ -220,6 +220,13 @@ pub enum EventMsg {
     /// v1.x 功能 7:某 credential 的 token plan 配额耗尽,已对该 credential
     /// 触发 cooldown 并切到下一个 plan。TUI 据此显示切换提示。
     QuotaExhausted(QuotaExhaustedEvent),
+
+    // 提示词层(2;v1.6.1)—— `/prompt` slash 的查询与重扫应答
+    /// `Op::PromptCommand { action: List }` 的应答:可用层 + 生效层。
+    /// TUI/GUI 的提示词选择 overlay 据此渲染。
+    PromptList(PromptListEvent),
+    /// `Op::PromptCommand { action: Switch }` 的应答:提示词库已重扫。
+    PromptSwitched(PromptSwitchedEvent),
 }
 
 impl EventMsg {
@@ -269,6 +276,8 @@ impl EventMsg {
             EventMsg::PluginLoaded(_) => "plugin_loaded",
             EventMsg::Routing(_) => "routing",
             EventMsg::QuotaExhausted(_) => "quota_exhausted",
+            EventMsg::PromptList(_) => "prompt_list",
+            EventMsg::PromptSwitched(_) => "prompt_switched",
         }
     }
 }

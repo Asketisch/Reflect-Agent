@@ -765,6 +765,40 @@ pub fn resolve_resume_thread_id(
     Ok(None)
 }
 
+/// 内置 `/prompt` slash 分流(v1.6.1,提示词层管理)。
+///
+/// - `/prompt` 或 `/prompt list` → `Op::PromptCommand { List }`,引擎回
+///   `EventMsg::PromptList`(可用层 + 生效层);
+/// - `/prompt reload`(或 `/prompt rescan`)→ `Switch { layer: None }`,
+///   引擎按启动目录序重扫提示词库,回 `EventMsg::PromptSwitched`;
+/// - `/prompt <其他词>` → 同 Switch,词作为 action 名透传(预留聚焦切换);
+/// - 不以 `/prompt` 开头(含 `/prompts` 等相近词)→ 返回 `None`,调用方
+///   继续走插件展开 / 普通 prompt。
+///
+/// 与插件命令的关系:本命令是引擎内置(协议级),优先于插件展开;
+/// TUI/GUI 也可不经 slash 直接构造 `Op::PromptCommand` 提交。
+pub fn expand_prompt_slash(prompt: &str) -> Option<Submission> {
+    let rest = prompt.trim().strip_prefix("/prompt")?;
+    if !(rest.is_empty() || rest.starts_with(char::is_whitespace)) {
+        return None;
+    }
+    let arg = rest.split_whitespace().next().unwrap_or("list");
+    let action = match arg {
+        "list" | "" => reflect_protocol::PromptAction::List,
+        "reload" | "rescan" => reflect_protocol::PromptAction::Switch { layer: None },
+        other => reflect_protocol::PromptAction::Switch {
+            layer: Some(other.to_string()),
+        },
+    };
+    Some(
+        Submission::with_id(
+            uuid::Uuid::new_v4().to_string(),
+            reflect_protocol::Op::PromptCommand { action },
+        )
+        .with_source_command("prompt"),
+    )
+}
+
 /// 给 `bootstrap_resumed` 用的合成 prompt(与 exec 历史行为一致)。
 pub fn resumed_prompt(thread_id: &str, prior_messages: usize) -> String {
     format!(
@@ -938,6 +972,47 @@ mod image_tests {
                 ));
             }
             other => panic!("应为 UserInput op,得到 {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod prompt_slash_tests {
+    use super::*;
+
+    /// `/prompt` 分流:List / reload / 透传词 / 非 /prompt 前缀不命中。
+    #[test]
+    fn expand_prompt_slash_parses_actions() {
+        // 裸 `/prompt` 与 `/prompt list` → List。
+        for input in ["/prompt", "/prompt  ", "/prompt list"] {
+            let sub = expand_prompt_slash(input).expect("should match");
+            assert_eq!(sub.source_command.as_deref(), Some("prompt"));
+            match sub.op {
+                reflect_protocol::Op::PromptCommand {
+                    action: reflect_protocol::PromptAction::List,
+                } => {}
+                other => panic!("expected List, got {other:?}"),
+            }
+        }
+        // `/prompt reload` → Switch { layer: None }。
+        let sub = expand_prompt_slash("/prompt reload").expect("should match");
+        match sub.op {
+            reflect_protocol::Op::PromptCommand {
+                action: reflect_protocol::PromptAction::Switch { layer: None },
+            } => {}
+            other => panic!("expected Switch(None), got {other:?}"),
+        }
+        // `/prompt <其他词>` → Switch 透传词(预留聚焦切换)。
+        let sub = expand_prompt_slash("/prompt my-layer").expect("should match");
+        match sub.op {
+            reflect_protocol::Op::PromptCommand {
+                action: reflect_protocol::PromptAction::Switch { layer: Some(l) },
+            } => assert_eq!(l, "my-layer"),
+            other => panic!("expected Switch(Some), got {other:?}"),
+        }
+        // 相近前缀不命中(留给插件 / 普通 prompt)。
+        for input in ["/prompts", "/promptx", "plain text", "/plan only"] {
+            assert!(expand_prompt_slash(input).is_none(), "{input} 不应命中");
         }
     }
 }

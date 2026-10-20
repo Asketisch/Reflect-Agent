@@ -260,10 +260,22 @@ pub async fn pre_loop(state: &mut AgentState, ctx: &NodeContext) -> Option<Graph
     // 自己正处于 Plan mode,而不是只在 prompt 里记得「Plan mode 是什么」。
     // 这是修复「plan mode 下调研后不出 plan」的关键 —— 没这段时 LLM
     // 只知道 Plan mode 规则,不知道自己当前是不是已经在 Plan mode 里。
-    let mut core = reflect_prompt::LayeredPrompt::compose_core(
-        &m4.active_agent_def.system_prompt,
-        &memory_text,
-    );
+    //
+    // v1.6:按模型匹配的主 prompt。当前 turn 的 model spec 在节点入口
+    // 即可拿到(`ctx.model` 热切换在此刻生效);agent 定义来源为
+    // `BuiltinDefault` 时用提示词库解析 `system.main`,用户自定义
+    // (`.reflect/agents/*.md`)则原文不动。
+    let model_spec = ctx.model.read().clone();
+    let prompt_set = reflect_prompt::library().resolve(&model_spec);
+    let agent_prompt = match m4.active_agent_def.source {
+        reflect_agent_def::SystemPromptSource::Custom => &m4.active_agent_def.system_prompt,
+        reflect_agent_def::SystemPromptSource::BuiltinDefault => prompt_set.get_or(
+            "system.main",
+            // 提示词库异常缺失时兜底,保证 turn 不因空 prompt 失败。
+            "你是一名编码助手。",
+        ),
+    };
+    let mut core = reflect_prompt::LayeredPrompt::compose_core(agent_prompt, &memory_text);
     let current_mode = ctx.cfg.permission_mode();
     reflect_prompt::append_active_mode_section(&mut core, current_mode);
     let ephemeral_skills = m4.skills.render_for_system_prompt();
@@ -302,7 +314,7 @@ pub async fn pre_loop(state: &mut AgentState, ctx: &NodeContext) -> Option<Graph
     if def.readonly {
         effective.retain(|t| !reflect_tools::READONLY_DENYLIST.contains(&t.as_str()));
     }
-    let tool_specs: Vec<reflect_llm::ToolSpec> = ctx
+    let mut tool_specs: Vec<reflect_llm::ToolSpec> = ctx
         .tools_queue
         .registry()
         .list_specs()
@@ -326,6 +338,9 @@ pub async fn pre_loop(state: &mut AgentState, ctx: &NodeContext) -> Option<Graph
             }
         })
         .collect();
+    // v1.6:模型层工具描述覆盖 —— `tool.<name>` section 存在时替换
+    // description(落点在 spec 组装处,Tool trait 与外部工具不受影响)。
+    reflect_prompt::apply_model_overrides(&mut tool_specs, &prompt_set);
     let mut ephemeral = reflect_prompt::LayeredPrompt::compose_ephemeral_with_mode(
         &tool_specs,
         &ephemeral_skills,

@@ -28,7 +28,7 @@ use reflect_tools::{ToolRegistry, ToolSource};
 
 use crate::headless::{
     HeadlessArgs, bootstrap_common, bootstrap_normal, bootstrap_resumed, expand_plugin_command,
-    resolve_resume_thread_id,
+    expand_prompt_slash, resolve_resume_thread_id,
 };
 
 /// 单次远程工具执行等待回执的默认上限。
@@ -255,6 +255,37 @@ where
                 break;
             }
             _ => {
+                // v1.6.1:内置 `/prompt` slash 优先于插件展开 —— 命中时改投
+                // `Op::PromptCommand`(引擎应答 PromptList / PromptSwitched,
+                // 由转发 task 经 per-submission 通道送回客户端)。
+                let prompt_text = match &sub.op {
+                    Op::UserInput { items, .. } if items.len() == 1 => match &items[0] {
+                        UserInputItem::Text { text } => Some(text.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(text) = prompt_text {
+                    if let Some(prompt_sub) = expand_prompt_slash(&text) {
+                        let sub_id = sub.id.clone();
+                        let mut handle = thread.submit(prompt_sub).await;
+                        let sink5 = sink.clone();
+                        tokio::spawn(async move {
+                            while let Some(ev) = handle.next().await {
+                                if matches!(ev.msg, EventMsg::SessionConfigured(_)) {
+                                    continue;
+                                }
+                                if sink5.send(ev).await.is_err() {
+                                    break;
+                                }
+                            }
+                            let _ = sink5
+                                .send(Event::new(sub_id, EventMsg::SubmissionClosed))
+                                .await;
+                        });
+                        continue;
+                    }
+                }
                 // 普通 Submission:插件命令展开后转发 core;turn 事件由后台
                 // reader 汇入 sink(允许上一 turn 未结束时提交下一 turn,
                 // engine 侧串行排队)。

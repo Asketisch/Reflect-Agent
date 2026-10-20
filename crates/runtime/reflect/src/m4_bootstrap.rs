@@ -45,9 +45,32 @@ pub fn build_default_m4(
     registry: &reflect_llm::SharedModelRegistry,
     thread_id: ThreadId,
 ) -> anyhow::Result<M4Deps> {
+    build_default_m4_with_prompts(workspace, agent_name, model, registry, thread_id, &[])
+}
+
+/// [`build_default_m4`] 的扩展版:额外扫描 `extra_prompt_dirs` 下的
+/// `*.md` 模型层(v1.6,TUI / GUI 经 `ReflectBuilder::with_prompts_dir`
+/// 传入)。目录顺序即优先级:后扫者覆盖同名层;固定顺序为
+/// `<workspace>/.reflect/prompts` → `~/.reflect/prompts` → 额外目录。
+pub fn build_default_m4_with_prompts(
+    workspace: &std::path::Path,
+    agent_name: &str,
+    model: &str,
+    registry: &reflect_llm::SharedModelRegistry,
+    thread_id: ThreadId,
+    extra_prompt_dirs: &[std::path::PathBuf],
+) -> anyhow::Result<M4Deps> {
+    let _ = model; // model spec 由 model_call 每请求解析,此处不再消费
     let home = std::env::var("HOME").unwrap_or_default();
     let home_path = std::path::Path::new(&home);
 
+    // ── 提示词库(按模型匹配,v1.6)──────────────────────────
+    let ws_prompts = workspace.join(".reflect").join("prompts");
+    let home_prompts = home_path.join(".reflect").join("prompts");
+    let mut prompt_dirs: Vec<std::path::PathBuf> = vec![home_prompts, ws_prompts];
+    prompt_dirs.extend(extra_prompt_dirs.iter().cloned());
+    let prompt_dir_refs: Vec<&std::path::Path> = prompt_dirs.iter().map(|p| p.as_path()).collect();
+    reflect_prompt::init_library(&prompt_dir_refs, None);
     // ── Agent 定义 ────────────────────────────────────────────
     let ws_agents = workspace.join(".reflect").join("agents");
     let home_agents = home_path.join(".reflect").join("agents");
@@ -59,7 +82,10 @@ pub fn build_default_m4(
         .unwrap_or_else(|| AgentDefinition {
             name: agent_name.to_string(),
             description: "default agent".into(),
-            system_prompt: DEFAULT_FACADE_SYSTEM_PROMPT.into(),
+            // v1.6:默认 agent 不再携带固定文案 —— 标记为内置默认,
+            // pre_loop 按当前模型 spec 从提示词库解析 `system.main`。
+            system_prompt: String::new(),
+            source: reflect_agent_def::SystemPromptSource::BuiltinDefault,
             ..Default::default()
         });
     let active_def = Arc::new(active_def);
@@ -135,6 +161,7 @@ pub fn build_default_m4(
         note_store,
         file_recovery,
         subagent_registry,
+        prompt_dirs,
     })
 }
 
@@ -176,13 +203,9 @@ impl Summarizer for NoopSummarizer {
     }
 }
 
-/// 库门面默认 agent system prompt —— 短编码助手 5 条约束。
-/// 与 `reflect-exec` bootstrap 用的 `DEFAULT_SYSTEM_PROMPT` 语义一致,
-/// 但更短(facade 用户通常做最小集成,不需要冗长行为约束)。
-const DEFAULT_FACADE_SYSTEM_PROMPT: &str = "你是一名编码助手。遵循以下约定:\
-1. 先读后改;2. 不做过度设计;3. 注释只解释「为什么」;\
-4. 破坏性操作前确认;5. 用与用户相同的语言回答。";
-
+/// 库门面默认 agent system prompt 已外置(v1.6):短编码助手 5 条约束
+/// 迁入提示词库 `system.facade-main` section(内嵌 `prompts/default.md`),
+/// 运行时按当前模型 spec 解析 —— 可被 `.reflect/prompts/*.md` 覆盖。
 // ── 单元测试 ────────────────────────────────────────────────
 #[cfg(test)]
 mod tests {

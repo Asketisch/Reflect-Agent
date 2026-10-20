@@ -395,6 +395,7 @@ fn make_m4(recorder: Option<Arc<dyn RolloutRecorder>>, compactor: Arc<Compactor>
         note_store: Arc::new(reflect_notes::InMemoryNoteStore::new()),
         file_recovery: Arc::new(reflect_recovery::ActiveFileRecovery::new(Arc::from(tmp))),
         subagent_registry: reflect_recovery::SubagentRegistry::shared(),
+        prompt_dirs: Vec::new(),
     }
 }
 

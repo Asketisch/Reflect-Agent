@@ -15,6 +15,7 @@ tokenizer = ["dep:tiktoken-rs"]
 tiktoken-rs = { workspace = true, optional = true }
 reflect-protocol = { workspace = true }
 reflect-llm      = { workspace = true }
+reflect-prompt   = { workspace = true }
 reflect-memory   = { workspace = true }
 reflect-telemetry = { workspace = true }
 serde              = { workspace = true }

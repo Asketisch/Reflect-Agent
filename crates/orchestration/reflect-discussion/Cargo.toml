@@ -10,6 +10,7 @@ reflect-protocol  = { workspace = true }
 reflect-llm       = { workspace = true }
 reflect-tools     = { workspace = true }
 reflect-core      = { workspace = true }
+reflect-prompt    = { workspace = true }
 reflect-subagent  = { workspace = true }
 reflect-config    = { workspace = true }
 async-trait         = { workspace = true }

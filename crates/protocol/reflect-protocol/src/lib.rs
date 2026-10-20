@@ -24,6 +24,7 @@ pub mod event;
 pub mod event_msg;
 pub mod item;
 pub mod op;
+pub mod op_prompt;
 pub mod question;
 pub mod recorder;
 pub mod submission;
@@ -39,12 +40,12 @@ pub use event_msg::{
     LspServerFailedEvent, LspServerStartedEvent, McpServerFailedEvent, McpServerStartedEvent,
     McpToolInvokedEvent, McpTransportMirror, PermissionBubbleEvent, PermissionModeChangedEvent,
     PlanApprovedEvent, PlanDraftUpdatedEvent, PlanReadyEvent, PlanRejectedEvent, PlanRequestEvent,
-    PlanStepEvent, PlanStepStatus, PluginLoadedEvent, QuotaExhaustedEvent, RoutingEvent,
-    RoutingEventKind, StreamErrorEvent, SubagentProgressEvent, SubagentProgressKind,
-    SubagentRunStateMirror, SubagentStatusEvent, SubagentStatusSnapshot, ThinkingDelta,
-    TokenCountEvent, TokenUsage, ToolCallBeginEvent, ToolCallEndEvent, ToolCallOutputDeltaEvent,
-    ToolExecutionRequestEvent, TriedCredential, TurnAbortedEvent, TurnCompleteEvent,
-    TurnRewoundEvent, TurnStartedEvent, TurnStatus,
+    PlanStepEvent, PlanStepStatus, PluginLoadedEvent, PromptListEvent, PromptSwitchedEvent,
+    QuotaExhaustedEvent, RoutingEvent, RoutingEventKind, StreamErrorEvent, SubagentProgressEvent,
+    SubagentProgressKind, SubagentRunStateMirror, SubagentStatusEvent, SubagentStatusSnapshot,
+    ThinkingDelta, TokenCountEvent, TokenUsage, ToolCallBeginEvent, ToolCallEndEvent,
+    ToolCallOutputDeltaEvent, ToolExecutionRequestEvent, TriedCredential, TurnAbortedEvent,
+    TurnCompleteEvent, TurnRewoundEvent, TurnStartedEvent, TurnStatus,
 };
 pub use item::{
     ApprovalPolicy, ContentBlock, PermissionMode, PlanApprovalChoice, PlanId,
@@ -53,6 +54,7 @@ pub use item::{
     UserInputItem, is_edit_tool_name,
 };
 pub use op::{Op, RemoteToolSpec};
+pub use op_prompt::PromptAction;
 pub use question::{
     Answer, AskUserAnswer, AskUserQuestionEvent, MAX_HEADER_CHARS, MAX_OPTIONS, MAX_QUESTIONS,
     MIN_OPTIONS, Question, QuestionError, QuestionOption,

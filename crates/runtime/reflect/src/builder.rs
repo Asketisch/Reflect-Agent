@@ -45,6 +45,10 @@ pub struct ReflectBuilder {
     /// `~/.reflect/config.toml` 的 `[plugins].enabled_plugins`。
     /// 仅 [`ReflectBuilder::build_async`] 消费(挂载是异步操作)。
     plugins: Option<Vec<String>>,
+    /// 额外提示词目录(v1.6)。`None` = 只用内嵌默认 + `~/.reflect/prompts/`;
+    /// `Some(dir)` = 额外扫描该目录下的 `*.md` 模型层(优先级最高,
+    /// 覆盖同名层)。TUI / GUI 用它把自带提示词包挂进运行时。
+    prompts_dir: Option<PathBuf>,
 }
 
 impl ReflectBuilder {
@@ -60,6 +64,7 @@ impl ReflectBuilder {
             plan_mode: false,
             cancel: None,
             plugins: None,
+            prompts_dir: None,
         }
     }
 
@@ -104,6 +109,17 @@ impl ReflectBuilder {
     /// 不阻塞启动。
     pub fn with_plugins(mut self, enabled: Option<Vec<String>>) -> Self {
         self.plugins = enabled;
+        self
+    }
+
+    /// v1.6:额外提示词目录(按模型匹配的外置提示词库)。
+    ///
+    /// 传入的目录在 `~/.reflect/prompts/` 之后扫描,同名层以本目录
+    /// 优先 —— TUI / GUI 由此把自带提示词包挂进运行时。目录约定:
+    /// `default.md` / `<厂商>.md` / `<精确模型名>.md`,每个文件用
+    /// `## key` 分节,缺失 key 落回内嵌默认。
+    pub fn with_prompts_dir(mut self, dir: impl AsRef<Path>) -> Self {
+        self.prompts_dir = Some(dir.as_ref().to_path_buf());
         self
     }
 
@@ -154,13 +170,14 @@ impl ReflectBuilder {
         let thread_id = ThreadId::new();
         // 默认构造完整 M4 依赖 —— compactor / memory / skills / agent def
         // / recorder / note store / file recovery / subagent registry。
-        // 失败 → 透传(不静默)。
-        let m4 = m4_bootstrap::build_default_m4(
+        // 失败 → 透传(不静默)。`with_prompts_dir` 的额外目录一并传入。
+        let m4 = m4_bootstrap::build_default_m4_with_prompts(
             &self.workspace,
             "default",
             &self.model,
             &registry,
             thread_id,
+            self.prompts_dir.as_slice(),
         )?;
         let mut cfg =
             AgentConfig::new(self.model, self.workspace.clone()).with_approvals(self.approvals);
@@ -191,12 +208,13 @@ impl ReflectBuilder {
         let tools = Arc::new(default_tool_registry());
         let cancel = self.cancel.unwrap_or_default();
         let thread_id = ThreadId::new();
-        let m4 = m4_bootstrap::build_default_m4(
+        let m4 = m4_bootstrap::build_default_m4_with_prompts(
             &self.workspace,
             "default",
             &self.model,
             &registry,
             thread_id,
+            self.prompts_dir.as_slice(),
         )?;
         let skills_for_plugins = m4.skills.clone();
 

@@ -85,7 +85,7 @@ pub async fn model_call(state: &mut AgentState, ctx: &NodeContext) -> Option<Gra
         }));
     }
     messages.extend(recovery_meta_to_messages(&state.recovery_meta));
-    let tools: Vec<reflect_llm::ToolSpec> = if state.force_final_answer {
+    let mut tools: Vec<reflect_llm::ToolSpec> = if state.force_final_answer {
         Vec::new()
     } else if !state.effective_tools.is_empty() {
         state.effective_tools.clone()
@@ -108,6 +108,10 @@ pub async fn model_call(state: &mut AgentState, ctx: &NodeContext) -> Option<Gra
             })
             .collect()
     };
+    // v1.6:兜底路径(pre_loop 未写入 effective_tools)也应用模型层
+    // 工具描述覆盖;正常路径已在 pre_loop 应用过,这里是防御性对齐。
+    // resolved_spec 已含 provider/model 拆分,直接复用。
+    reflect_prompt::apply_model_overrides(&mut tools, &reflect_prompt::library().resolve(&spec));
     let mut request = ChatRequest {
         model: spec
             .split_once('/')
