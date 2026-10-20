@@ -736,6 +736,14 @@ impl Drop for SpawnedChild {
         if let Some(arc) = self.in_flight.take() {
             // `fetch_sub` 自然下溢到 0 是合法的 u8 —— 但若有代码 bug 让
             // 计数器减到 0 以下会静默 wrap,这里 saturating 防御。
+            //
+            // 新版 stable 起 `fetch_update` 被弃用(改名 `try_update`),
+            // 但 `try_update` 不存在于 MSRV 1.85(实测 1.85.0 报 E0599),
+            // 直接改名会破坏声明的 MSRV。保留旧名 + 定点 allow,三者
+            // 兼顾:1.85 / 本地 stable / CI 最新 stable。stdlib 的弃用
+            // 不等于移除(参照 `compare_and_swap`:1.50 弃用至今仍在),
+            // MSRV 提升后可改名 `try_update` 并移除本属性。
+            #[allow(deprecated)]
             let prev = arc.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |cur| {
                 Some(cur.saturating_sub(1))
             });
