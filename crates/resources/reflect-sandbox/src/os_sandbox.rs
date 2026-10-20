@@ -475,6 +475,7 @@ fn extra_writable_from_env() -> Vec<PathBuf> {
 mod landlock {
     use std::ffi::CString;
     use std::io;
+    use std::os::raw::{c_char, c_int};
     use std::path::{Path, PathBuf};
 
     // Landlock syscall 号(x86_64 / aarch64 一致)。
@@ -486,19 +487,23 @@ mod landlock {
     // Landlock ABI v1 的 access right 位定义(`linux/landlock.h`)。
     // 逐个命名,避免再把位集合口算成一个十六进制字面量 —— 此前
     // `0xffe` 就是口算错误的产物(见下方编译期断言)。
-    const ACCESS_FS_EXECUTE: u64 = 1 << 0;
-    const ACCESS_FS_WRITE_FILE: u64 = 1 << 1;
-    const ACCESS_FS_READ_FILE: u64 = 1 << 2;
-    const ACCESS_FS_READ_DIR: u64 = 1 << 3;
-    const ACCESS_FS_REMOVE_DIR: u64 = 1 << 4;
-    const ACCESS_FS_REMOVE_FILE: u64 = 1 << 5;
-    const ACCESS_FS_MAKE_CHAR: u64 = 1 << 6;
-    const ACCESS_FS_MAKE_DIR: u64 = 1 << 7;
-    const ACCESS_FS_MAKE_REG: u64 = 1 << 8;
-    const ACCESS_FS_MAKE_SOCK: u64 = 1 << 9;
-    const ACCESS_FS_MAKE_FIFO: u64 = 1 << 10;
-    const ACCESS_FS_MAKE_BLOCK: u64 = 1 << 11;
-    const ACCESS_FS_MAKE_SYM: u64 = 1 << 12;
+    //
+    // `pub(super)`:位集合的回归测试(本文件末尾 mod tests)在 Linux 上
+    // 直接引用这些常量做断言;私有项会 E0603(macOS 不编译本模块,
+    // 本地发现不了,CI ubuntu --all-targets 才暴露)。
+    pub(super) const ACCESS_FS_EXECUTE: u64 = 1 << 0;
+    pub(super) const ACCESS_FS_WRITE_FILE: u64 = 1 << 1;
+    pub(super) const ACCESS_FS_READ_FILE: u64 = 1 << 2;
+    pub(super) const ACCESS_FS_READ_DIR: u64 = 1 << 3;
+    pub(super) const ACCESS_FS_REMOVE_DIR: u64 = 1 << 4;
+    pub(super) const ACCESS_FS_REMOVE_FILE: u64 = 1 << 5;
+    pub(super) const ACCESS_FS_MAKE_CHAR: u64 = 1 << 6;
+    pub(super) const ACCESS_FS_MAKE_DIR: u64 = 1 << 7;
+    pub(super) const ACCESS_FS_MAKE_REG: u64 = 1 << 8;
+    pub(super) const ACCESS_FS_MAKE_SOCK: u64 = 1 << 9;
+    pub(super) const ACCESS_FS_MAKE_FIFO: u64 = 1 << 10;
+    pub(super) const ACCESS_FS_MAKE_BLOCK: u64 = 1 << 11;
+    pub(super) const ACCESS_FS_MAKE_SYM: u64 = 1 << 12;
 
     // handled access 位:只限制**写类**操作(写文件/删/建),执行与读
     // 完全不受限 —— 设计注释「限制写是核心安全边界;读 / exec 不受限」
@@ -511,7 +516,7 @@ mod landlock {
     // workspace 外的读被内核拒,execve 时动态链接器读不到 /usr/lib,
     // 表现为 spawn EACCES),又漏掉了 `MAKE_SYM`(0x1000)(于是 workspace
     // 外的符号链接创建完全不受限)。正确的纯写类位集合是 `0x1ff2`。
-    const ACCESS_FS_WRITE_ONLY: u64 = ACCESS_FS_WRITE_FILE
+    pub(super) const ACCESS_FS_WRITE_ONLY: u64 = ACCESS_FS_WRITE_FILE
         | ACCESS_FS_REMOVE_DIR
         | ACCESS_FS_REMOVE_FILE
         | ACCESS_FS_MAKE_CHAR
@@ -555,12 +560,17 @@ mod landlock {
 
     // Rust 2024 edition 要求 extern 块显式标注 unsafe(CI ubuntu 实测
     // 编译失败点:extern blocks must be unsafe)。
+    //
+    // 签名一律用 `std::os::raw` 的 c_char / c_int,不写死 i8 / i32:
+    // `c_char` 的有无符号性随架构变化(aarch64 linux 为 u8,x86_64
+    // 为 i8),写死 i8 会让 `open(CString::as_ptr(), ..)` 在 aarch64
+    // 上 E0308;`CString::as_ptr()` 的返回类型就是 `*const c_char`。
     unsafe extern "C" {
         fn syscall(num: i64, ...) -> i64;
-        fn open(path: *const i8, flags: i32, ...) -> i32;
-        fn close(fd: i32) -> i32;
-        fn __errno_location() -> *mut i32;
-        fn prctl(option: i32, ...) -> i32;
+        fn open(path: *const c_char, flags: c_int, ...) -> c_int;
+        fn close(fd: c_int) -> c_int;
+        fn __errno_location() -> *mut c_int;
+        fn prctl(option: c_int, ...) -> c_int;
     }
 
     /// `PR_SET_NO_NEW_PRIVS`(linux/prctl.h)。Landlock 的
@@ -602,7 +612,10 @@ mod landlock {
             return !(e == 38 || e == 95);
         }
         // 探测用 ruleset 立即关闭,不留 fd 泄漏。
-        unsafe { close(fd) };
+        // `syscall` 返回 i64 而 `close` 取 i32 —— 显式收窄(与
+        // `apply_landlock` 中 ruleset_fd 的处理一致)。
+        let ruleset_fd = fd as i32;
+        unsafe { close(ruleset_fd) };
         true
     }
 
