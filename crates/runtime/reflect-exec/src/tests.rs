@@ -538,3 +538,87 @@ async fn handle_reload_applies_coordinator_section() {
     assert!(tools.get("WriteNote").is_none());
     assert!(tools.get("ReadNotes").is_none());
 }
+
+// ── 0.5 回归:Plan mode exit code 122 ──────────────────────────────
+
+/// 构造一个只带指定 `EventMsg` 的 Event(测试用)。
+fn event_with(msg: EventMsg) -> Event {
+    Event {
+        id: "evt-test".to_string(),
+        msg,
+    }
+}
+
+/// 回归(0.5):`PlanReady` 必须被识别为"计划已产出"。
+/// core 在 `ExitPlanMode` 工具成功时派发它(见
+/// `reflect-core/src/graph/nodes/tool_exec.rs` 的 `ExitPlanMode` 分支)。
+#[test]
+fn plan_ready_event_counts_as_plan_produced() {
+    let pid = reflect_protocol::PlanId::new();
+    assert!(is_plan_ready_event(&event_with(EventMsg::PlanReady(
+        reflect_protocol::PlanReadyEvent {
+            plan_id: pid,
+            markdown: "# plan".into(),
+            path: None,
+        }
+    ))));
+    assert!(is_plan_ready_event(&event_with(EventMsg::PlanApproved(
+        reflect_protocol::PlanApprovedEvent { plan_id: pid }
+    ))));
+}
+
+/// 回归(0.5):非计划事件不得被误判为"计划已产出"。
+#[test]
+fn non_plan_events_do_not_count_as_plan_produced() {
+    assert!(!is_plan_ready_event(&event_with(EventMsg::AgentMessage(
+        reflect_protocol::AgentMessage {
+            text: "hello".into(),
+        }
+    ))));
+    // PlanRejected 明确是"计划没成",不能算产出。
+    assert!(!is_plan_ready_event(&event_with(EventMsg::PlanRejected(
+        reflect_protocol::PlanRejectedEvent {
+            plan_id: reflect_protocol::PlanId::new(),
+            reason: Some("tool failed".into()),
+        }
+    ))));
+}
+
+/// 回归(0.5):`finish_plan_mode` 的 Ok 路径。
+///
+/// 未请求 Plan mode → 恒 Ok(不影响普通 headless 调用);
+/// 请求了且产出过计划 → Ok。
+#[test]
+fn finish_plan_mode_ok_paths() {
+    // 未请求 plan mode:无论有没有产出都不该改退出码。
+    assert!(finish_plan_mode(false, false).is_ok());
+    assert!(finish_plan_mode(false, true).is_ok());
+    // 请求了且产出过计划。
+    assert!(finish_plan_mode(true, true).is_ok());
+}
+
+/// 回归(0.5):请求了 Plan mode 但没产出计划 → 进程以 122 退出。
+///
+/// 通过把测试二进制以 `--exact` 自重跑一个只做这件事的测试来验证退出码
+/// (直接调 `finish_plan_mode(true, false)` 会把当前测试进程一起 exit 掉)。
+#[test]
+fn finish_plan_mode_exits_122_when_no_plan() {
+    // 环境变量防递归:子进程里才真正触发 exit。
+    if std::env::var_os("REFLECT_TEST_PLAN_EXIT_CHILD").is_some() {
+        let r = finish_plan_mode(true, false);
+        // 到不了这里;finish_plan_mode 已 exit(122)。
+        panic!("finish_plan_mode(true,false) 不应返回,得到 {r:?}");
+    }
+    let exe = std::env::current_exe().expect("current_exe");
+    let out = std::process::Command::new(exe)
+        .args(["--exact", "tests::finish_plan_mode_exits_122_when_no_plan"])
+        .env("REFLECT_TEST_PLAN_EXIT_CHILD", "1")
+        .output()
+        .expect("spawn child test process");
+    assert_eq!(
+        out.status.code(),
+        Some(PLAN_MODE_EXIT_CODE),
+        "plan_mode 未产出计划时应 exit 122;stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

@@ -15,6 +15,20 @@
 //! matcher:仅对携带工具名的事件(`PreToolUse` / `PostToolUse`)生效,
 //! 支持 `*` / `?` 通配与精确名(大小写不敏感);不匹配 → 直接 Allow,
 //! 不启动子进程。
+//!
+//! ## 0.12 环境变量卫生
+//!
+//! 插件 hooks.json 的每条命令都变成 `sh -c <command>` 并在**每次工具调用
+//! 时**执行,而 `reflect-plugin` 的 `install_local` 没有签名 / hash 固定
+//! —— 装插件等同于授权任意本地代码执行。原实现把**完整父环境**透传给
+//! hook 子进程,于是 `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / 各类
+//! `*_TOKEN` 对插件代码完全可见(对比 `BashTool` 是 `env_clear()` + 7 项
+//! 白名单)。
+//!
+//! 现在默认剔除名称命中 secret 模式的环境变量(见 [`SECRET_ENV_PATTERNS`]);
+//! 确有需要的 hook 可在 `hooks.json` 里用 `env` 显式列名放行(白名单优先
+//! 于剔除)。这不是安全边界(装插件本身就等于授权执行),只是把"顺手泄露
+//! 凭据"这个默认行为关掉。
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -29,6 +43,31 @@ use crate::hook::HookError;
 /// 默认命令超时(与 Claude Code 的 60s 对齐)。
 pub const DEFAULT_SHELL_HOOK_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// 环境变量名里出现这些子串(大写比较)即视为敏感,默认不传给 hook 子进程。
+///
+/// 0.12:覆盖常见 provider key / token / 凭据命名。故意用"包含"而非精确
+/// 匹配 —— `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GITHUB_TOKEN` /
+/// `AWS_SECRET_ACCESS_KEY` / `REFLECT_API_KEY` 都能被同一条规则挡住。
+pub const SECRET_ENV_PATTERNS: &[&str] = &[
+    "API_KEY",
+    "APIKEY",
+    "TOKEN",
+    "SECRET",
+    "PASSWORD",
+    "PASSWD",
+    "CREDENTIAL",
+    "PRIVATE_KEY",
+    "ACCESS_KEY",
+    "SESSION_KEY",
+    "AUTH",
+];
+
+/// 判断环境变量名是否应被默认剔除。
+pub fn is_secret_env_name(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    SECRET_ENV_PATTERNS.iter().any(|p| upper.contains(p))
+}
+
 /// 外部命令式 hook。
 #[derive(Debug, Clone)]
 pub struct ShellHook {
@@ -37,6 +76,8 @@ pub struct ShellHook {
     matcher: Option<String>,
     command: String,
     timeout: Duration,
+    /// 0.12:显式放行的环境变量名(优先于 secret 剔除)。
+    env_allowlist: Vec<String>,
 }
 
 impl ShellHook {
@@ -53,7 +94,30 @@ impl ShellHook {
             matcher,
             command: command.into(),
             timeout,
+            env_allowlist: Vec::new(),
         }
+    }
+
+    /// 0.12:设置显式放行的环境变量名(来自 hooks.json 的 `env` 段)。
+    ///
+    /// 白名单**优先于** secret 剔除 —— hook 作者明确要求某个变量时尊重
+    /// 其意图(例如一个把结果发到内部网关的 hook 需要 `INTERNAL_API_KEY`)。
+    pub fn with_env_allowlist(mut self, names: Vec<String>) -> Self {
+        self.env_allowlist = names;
+        self
+    }
+
+    /// 0.12:为子进程挑选要继承的环境变量。
+    ///
+    /// 默认剔除名称命中 [`SECRET_ENV_PATTERNS`] 的变量;`env_allowlist`
+    /// 里的名字豁免。其余( PATH / HOME / LANG / TMPDIR 等 hook 正常干活
+    /// 需要的)全部保留 —— 这里不做 `BashTool` 式的正向白名单,因为 hook
+    /// 的用途太杂(git / node / python 工具链都可能被调),全砍会让合法
+    /// hook 大面积失效。
+    fn sanitized_env(&self) -> Vec<(String, String)> {
+        std::env::vars()
+            .filter(|(k, _)| self.env_allowlist.iter().any(|a| a == k) || !is_secret_env_name(k))
+            .collect()
     }
 
     /// 从 hooks.json 的事件名字符串解析事件种类(大小写不敏感)。
@@ -97,6 +161,12 @@ impl ShellHook {
             .stderr(Stdio::piped())
             .stdin(Stdio::piped())
             .kill_on_drop(true);
+        // 0.12:先清空再按需注入 —— 只 `env_remove` 不够(无法覆盖未来
+        // 新增的敏感变量名),`env_clear` + 正向注入才是闭合的。
+        command.env_clear();
+        for (k, v) in self.sanitized_env() {
+            command.env(k, v);
+        }
 
         let mut child = match command.spawn() {
             Ok(c) => c,
@@ -451,5 +521,113 @@ mod tests {
             Some(HookEventKind::SessionEnd)
         );
         assert_eq!(ShellHook::parse_kind("Nonsense"), None);
+    }
+    // ── 0.12 回归:环境变量卫生 ─────────────────────────────────────
+
+    #[test]
+    fn secret_env_names_detected() {
+        for n in [
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "GITHUB_TOKEN",
+            "AWS_SECRET_ACCESS_KEY",
+            "DB_PASSWORD",
+            "REFLECT_API_KEY",
+            "MY_PRIVATE_KEY",
+            "SERVICE_CREDENTIALS",
+            "AUTH_HEADER",
+        ] {
+            assert!(is_secret_env_name(n), "{n} 应被判为敏感");
+        }
+    }
+
+    #[test]
+    fn benign_env_names_kept() {
+        for n in [
+            "PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "USER", "SHELL", "TERM",
+        ] {
+            assert!(!is_secret_env_name(n), "{n} 不应被判为敏感");
+        }
+    }
+
+    /// 核心回归(0.12):secret 变量默认不得传给 hook 子进程。
+    /// 修复前 ShellHook 透传完整父环境,插件 hook 能直接读到
+    /// `ANTHROPIC_API_KEY` 等(对比 BashTool 是 env_clear + 白名单)。
+    #[test]
+    fn sanitized_env_strips_secrets() {
+        let hook = ShellHook::new(
+            "t",
+            HookEventKind::PreToolUse,
+            None,
+            "true",
+            Duration::from_secs(1),
+        );
+        // 直接构造一个带 secret 的环境快照来验证过滤逻辑。
+        let snapshot = [
+            ("PATH".to_string(), "/usr/bin".to_string()),
+            ("ANTHROPIC_API_KEY".to_string(), "sk-ant-secret".to_string()),
+            ("HOME".to_string(), "/home/u".to_string()),
+            ("GITHUB_TOKEN".to_string(), "ghp_secret".to_string()),
+        ];
+        let allow: Vec<String> = Vec::new();
+        let kept: Vec<&String> = snapshot
+            .iter()
+            .map(|(k, _)| k)
+            .filter(|k| allow.iter().any(|a| a == *k) || !is_secret_env_name(k))
+            .collect();
+        assert!(kept.iter().any(|k| k.as_str() == "PATH"));
+        assert!(kept.iter().any(|k| k.as_str() == "HOME"));
+        assert!(
+            !kept.iter().any(|k| k.as_str() == "ANTHROPIC_API_KEY"),
+            "secret 必须被剔除"
+        );
+        assert!(!kept.iter().any(|k| k.as_str() == "GITHUB_TOKEN"));
+        // hook 本体可正常构造(编译期连通性检查)。
+        let _ = hook;
+    }
+
+    /// 回归(0.12):`env` 白名单优先于 secret 剔除。
+    #[test]
+    fn env_allowlist_overrides_secret_stripping() {
+        let hook = ShellHook::new(
+            "t",
+            HookEventKind::PreToolUse,
+            None,
+            "true",
+            Duration::from_secs(1),
+        )
+        .with_env_allowlist(vec!["INTERNAL_API_KEY".into()]);
+        let allow = ["INTERNAL_API_KEY".to_string()];
+        let kept = |k: &str| allow.iter().any(|a| a == k) || !is_secret_env_name(k);
+        assert!(kept("INTERNAL_API_KEY"), "白名单变量应保留");
+        assert!(!kept("ANTHROPIC_API_KEY"), "未列入白名单的 secret 仍剔除");
+        let _ = hook;
+    }
+
+    /// 回归(0.12):端到端 —— hook 子进程里读不到被剔除的变量。
+    /// 这条直接 spawn 一个真的 shell hook,验证 `env_clear` + 注入生效
+    /// (而不是只在过滤函数层面正确)。
+    #[tokio::test]
+    async fn hook_subprocess_cannot_see_secret_env() {
+        // 设置一个 secret 变量,让 hook 打印它。
+        unsafe { std::env::set_var("REFLECT_TEST_HOOK_SECRET", "sk-leak-me") };
+        // shell 命令:把该变量原样打到 stdout。若环境未净化,stdout 会含
+        // sk-leak-me,并被 Deny reason / SystemMessage 摘要带回来。
+        let cmd = r#"printf '%s' "$REFLECT_TEST_HOOK_SECRET""#;
+        let hook = ShellHook::new(
+            "t",
+            HookEventKind::PreToolUse,
+            None,
+            cmd,
+            Duration::from_secs(10),
+        );
+        let decision = hook.handle(&pre_tool_event("bash")).await;
+        // 允许 / 拒绝都可能(取决于退出码),但 stdout 绝不包含 secret 值。
+        let rendered = format!("{decision:?}");
+        assert!(
+            !rendered.contains("sk-leak-me"),
+            "hook 子进程读到了应被剔除的 secret: {rendered}"
+        );
+        unsafe { std::env::remove_var("REFLECT_TEST_HOOK_SECRET") };
     }
 }

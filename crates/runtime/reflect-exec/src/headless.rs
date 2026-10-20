@@ -673,6 +673,16 @@ pub async fn bootstrap_resumed(
     // 与 normal 分支同权:权限三层装配(config > project > user)+ YOLO
     // 分类器。此前 resume 分支漏装,resume 会话会绕过权限规则。
     let cfg = apply_permission_layers(cfg, &initial_cfg, &workspace).await;
+    // 0.5:resume 分支此前完全忽略 `--plan-mode` —— 既不设
+    // `PermissionMode::Plan` 也不注册 `PlanModeGate`,于是
+    // `reflect exec --plan-mode --resume <id>` 直接是 Auto 模式 + 无
+    // Plan gate,写工具全开。始终传 `--plan-mode` 的脚本调用方只要同时
+    // resume 就静默拿到完整写权限。与 normal 分支对齐。
+    let cfg = if args.plan_mode {
+        cfg.with_initial_permission_mode(reflect_protocol::PermissionMode::Plan)
+    } else {
+        cfg
+    };
     let cfg_for_reload = cfg.clone();
     let thread = Arc::new(AgentThread::new(
         cfg,
@@ -681,6 +691,18 @@ pub async fn bootstrap_resumed(
         Some(sanitizer.clone()),
         Some(hook_engine.clone()),
     ));
+    // 0.5:Plan mode 的执行机制是 hook,不是 permission mode。normal 分支
+    // 注册的 PlanModeGate / read_before_edit 在 resume 分支也要有。
+    if args.plan_mode {
+        thread.register_hook(PlanModeGate::default_mode());
+        let rbe_section = initial_cfg.hooks.read_before_edit.as_ref();
+        let (_rbe_state, rbe_hook) = build_read_before_edit(
+            rbe_section.and_then(|s| s.enabled),
+            rbe_section.and_then(|s| s.mtime_drift_tolerance_ms),
+        );
+        thread.register_hook(rbe_hook);
+        tracing::info!("resume path: plan_mode=true, registered PlanModeGate + read_before_edit");
+    }
     // resume 也跑 MCP bootstrap,方便继续使用之前挂的 MCP server。
     let mcp_manager = bootstrap_m6(&initial_cfg, reload_tx.clone()).await;
     let _lsp_manager = bootstrap_lsp(&initial_cfg, reload_tx.clone(), tools.clone()).await;

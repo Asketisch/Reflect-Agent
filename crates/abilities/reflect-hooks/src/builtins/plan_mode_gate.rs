@@ -25,6 +25,7 @@
 //!   让 TUI 能看到「agent 想跑什么被拦了」,而非只有工具名。
 
 use async_trait::async_trait;
+use std::path::{Path, PathBuf};
 
 use crate::bash_classify::{BashCommandClass, classify_command};
 use crate::decision::HookDecision;
@@ -53,6 +54,63 @@ pub fn default_read_only_allowlist() -> Vec<String> {
         "ExitPlanMode".into(),
         "PlanWrite".into(),
     ]
+}
+
+/// Plan mode 下允许 `write` / `edit` 落盘的目录名(相对 workspace 根)。
+pub const PLAN_DIR_SEGMENTS: [&str; 2] = [".reflect", "plan"];
+
+/// 词法层归一化路径(解析 `.` 与 `..`,**不碰文件系统**)。
+///
+/// 返回 `None` 表示路径试图越过自己的基准(相对路径开头的 `..`,或绝对
+/// 路径根之上的 `..`)—— 这类路径无法在不访问文件系统的前提下确定目标,
+/// 调用方应按"不合规"处理。
+fn normalize_lexically(p: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::Prefix(_) | Component::RootDir => out.push(c.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    return None;
+                }
+            }
+            Component::Normal(s) => out.push(s),
+        }
+    }
+    Some(out)
+}
+
+/// 判断 `path` 是否是 Plan mode 允许写入的 plan 文件路径。
+///
+/// 0.5:原实现是 `path.contains(".reflect/plan/")` 子串判断,任何**含**该
+/// 子串的路径都能过 —— 例如 `/tmp/.reflect/plan/../../etc/passwd`,或
+/// 一个恰好含该子串的无关路径。现在改为:
+///
+/// 1. 先词法归一化(消掉 `.` / `..`);
+/// 2. 再检查归一化结果里是否存在**连续的** `.reflect` → `plan` 段,
+///    且 `plan` 之后还有至少一个 component(即指向 plan 目录内的某个
+///    文件,而不是 plan 目录本身 —— 与原实现要求尾随 `/` 的语义一致)。
+///
+/// `.reflect/plan` 可以出现在任意深度(与工具侧 `<workspace>/.reflect/plan/`
+/// 的既有行为兼容),但穿越段会被归一化掉,从而不再命中。
+///
+/// 注意本函数是 **defense-in-depth**:`write` / `edit` 工具自身也会做
+/// workspace 包含校验(见 `builtins/write.rs`),所以这里放行一个穿越路径
+/// 不会直接导致越界写。但 hook 是文档声明的 Plan 边界,不该比工具更松。
+fn is_plan_file_path(path: &str) -> bool {
+    use std::path::Component;
+    let Some(norm) = normalize_lexically(Path::new(path)) else {
+        return false;
+    };
+    let comps: Vec<Component<'_>> = norm.components().collect();
+    comps.windows(3).any(|w| {
+        matches!(
+            (w[0], w[1]),
+            (Component::Normal(a), Component::Normal(b)) if a == PLAN_DIR_SEGMENTS[0] && b == PLAN_DIR_SEGMENTS[1]
+        ) && matches!(w[2], Component::Normal(_))
+    })
 }
 
 /// PreToolUse hook:Plan mode 下 blanket-deny 白名单外工具。
@@ -139,12 +197,13 @@ impl Hook for PlanModeGate {
             // ls -la 等),一刀切禁 bash 会让 agent 无法探测环境。按 classify_command
             // 分级:Safe 放行,Risky/Dangerous 拒绝(后者仍会被审批层硬底线再拦)。
             // deny reason 带上 cmd,让 TUI 能看到「agent 想跑什么被拦了」。
+            //
+            // 0.3:必须用 `resolve_bash_command` 取命令(兼容 `cmd` /
+            // `command` / `cmdline` 三个别名),不能只读 `args["cmd"]` ——
+            // 否则模型发 `{"command": "rm -rf x"}` 时 cmd 为空串,
+            // `classify_command("")` 返回 Safe,写命令在 Plan mode 下被放行。
             if tool == "bash" {
-                let cmd = args
-                    .get("cmd")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.trim())
-                    .unwrap_or("");
+                let cmd = reflect_protocol::resolve_bash_command(args).unwrap_or("");
                 return Ok(match classify_command(cmd) {
                     BashCommandClass::Safe => HookDecision::Allow,
                     class => HookDecision::Deny {
@@ -156,9 +215,14 @@ impl Hook for PlanModeGate {
             // 目录），让 agent 能把完整 plan markdown 落盘为持久产物，再调用
             // ExitPlanMode 从文件读取。其他路径的 write/edit 仍被 deny。
             // 对齐 Claude Code 的 isSessionPlanFile 白名单机制。
+            //
+            // 0.5:`.contains(".reflect/plan/")` 是子串判断,`/tmp/.reflect/
+            // plan/../../etc/passwd` 或任何路径里**含**该子串的都能过。
+            // 改为规范化后按 plan 目录前缀匹配。write 工具自身也会做
+            // workspace 校验,这里是 defense-in-depth,不该比它更松。
             if tool == "write" || tool == "edit" {
                 let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                if path.contains(".reflect/plan/") {
+                if is_plan_file_path(path) {
                     return Ok(HookDecision::Allow);
                 }
             }
@@ -594,5 +658,84 @@ mod tests {
             HookDecision::Allow,
             "edit 到 .reflect/plan/ 应在 Plan mode 放行"
         );
+    }
+
+    // ── 0.3 回归:bash 命令别名不得绕过 Plan mode ───────────────────
+
+    /// 回归(0.3):PlanModeGate 此前只读 `args["cmd"]`,模型发
+    /// `{"command": "rm -rf x"}` 时 cmd 为空串 → `classify_command("")`
+    /// 返回 `Safe` → **写命令在 Plan mode 下被放行**。
+    #[tokio::test]
+    async fn plan_mode_bash_alias_cannot_bypass() {
+        let h = PlanModeGate::default_mode();
+        for key in ["cmd", "command", "cmdline"] {
+            let ev = HookEvent::PreToolUse {
+                tool: "bash".into(),
+                args: serde_json::json!({ key: "rm -rf /tmp/x" }),
+                ctx: ctx_with_mode(PermissionMode::Plan),
+            };
+            match h.handle(&ev).await.unwrap() {
+                HookDecision::Deny { .. } => {}
+                other => panic!("别名 {key} 的危险命令必须被 deny,得到 {other:?}"),
+            }
+        }
+    }
+
+    /// 回归(0.3):别名形式的安全命令仍应放行(防止修复过度收紧)。
+    #[tokio::test]
+    async fn plan_mode_bash_alias_safe_still_allowed() {
+        let h = PlanModeGate::default_mode();
+        for key in ["cmd", "command", "cmdline"] {
+            let ev = HookEvent::PreToolUse {
+                tool: "bash".into(),
+                args: serde_json::json!({ key: "git status" }),
+                ctx: ctx_with_mode(PermissionMode::Plan),
+            };
+            assert_eq!(
+                h.handle(&ev).await.unwrap(),
+                HookDecision::Allow,
+                "别名 {key} 的安全命令应放行"
+            );
+        }
+    }
+
+    // ── 0.5 回归:plan 路径子串判断 ────────────────────────────────
+
+    /// 回归(0.5):`.contains(".reflect/plan/")` 是子串判断,穿越路径
+    /// `/tmp/.reflect/plan/../../etc/passwd` 只因**含**该子串就被放行。
+    #[tokio::test]
+    async fn plan_mode_plan_path_traversal_rejected() {
+        let h = PlanModeGate::default_mode();
+        for p in [
+            "/tmp/.reflect/plan/../../etc/passwd",
+            "/workspace/.reflect/plan/../../../etc/shadow",
+            "/some/other/.reflect/plan/../../x.txt",
+        ] {
+            let ev = HookEvent::PreToolUse {
+                tool: "write".into(),
+                args: serde_json::json!({"path": p}),
+                ctx: ctx_with_mode(PermissionMode::Plan),
+            };
+            match h.handle(&ev).await.unwrap() {
+                HookDecision::Deny { .. } => {}
+                other => panic!("plan 路径穿越 {p} 必须被 deny,得到 {other:?}"),
+            }
+        }
+    }
+
+    /// 回归:合法 plan 路径(相对 / 绝对 / 任意深度)仍须放行。
+    #[test]
+    fn plan_file_path_accepts_legit_plan_paths() {
+        assert!(is_plan_file_path(".reflect/plan/x.md"));
+        assert!(is_plan_file_path("/workspace/.reflect/plan/x.md"));
+        assert!(is_plan_file_path("a/b/.reflect/plan/x.md"));
+        // 归一化后仍落在 plan 目录内的 `.` / `..` 组合也应放行。
+        assert!(is_plan_file_path(".reflect/plan/../plan/x.md"));
+        assert!(!is_plan_file_path(".reflect/planx.md"));
+        assert!(!is_plan_file_path(".reflect/plan"));
+        assert!(!is_plan_file_path("src/.reflect/plan.rs"));
+        assert!(!is_plan_file_path("x.reflect/plan/y.md"));
+        // 穿越到 plan 目录之外 → 归一化后不再命中。
+        assert!(!is_plan_file_path(".reflect/plan/../../etc/passwd"));
     }
 }

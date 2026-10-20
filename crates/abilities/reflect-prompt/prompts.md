@@ -59,7 +59,7 @@ List/read/edit/insert/delete cells in a Jupyter .ipynb notebook (0-based cell in
 Read a text file from the workspace. Returns content with line numbers. Concurrency-safe.
 
 ## tool.request_human_input
-Request human input with persistence semantics (stub). Blocks until the user responds via TUI; suitable for long-running workflows. NOTE: `context_id` is currently write-only and not used to resume across sessions (v1.3+ follow-up).
+Request human input with cross-process persistence. Blocks until the user responds via the TUI approval gate or the file-based answer channel (polled every 500ms); suitable for long-running workflows. The pending-answer file is cleared once the result is taken. `context_id` is sanitized to `[A-Za-z0-9_-]` for path safety.
 
 ## tool.tool_search
 Search available tools by keyword in name or description. Returns matching tool specs. Concurrency-safe.

@@ -105,6 +105,42 @@ pub struct ExecArgs {
     pub images: Vec<String>,
 }
 
+/// `--plan-mode` 下"计划生成失败"的退出码。
+///
+/// `docs/PLAN_MODE.md:50` 与 `ExecArgs::plan_mode` 的 doc 都承诺了这个
+/// 退出码,但**全仓库没有任何实现** —— `async_main` 正常路径恒返回
+/// `Ok(())`(exit 0),依赖 122 做重试判断的脚本调用方会永远看到"成功"。
+///
+/// 判定标准:Plan mode 下 agent 调研完成后调 `ExitPlanMode` 成功,core 会
+/// 派发 `EventMsg::PlanReady`(见 `graph/nodes/tool_exec.rs` 的
+/// `ExitPlanMode` 分支)。所以"流过了 `PlanReady` / `PlanApproved`"就等价于
+/// "计划已产出";turn 结束仍没见过 → 计划生成失败,需要重试。
+pub const PLAN_MODE_EXIT_CODE: i32 = 122;
+
+/// 判断一个 event 是否代表"计划已成功产出"。
+fn is_plan_ready_event(event: &reflect_protocol::Event) -> bool {
+    matches!(
+        event.msg,
+        reflect_protocol::EventMsg::PlanReady(_) | reflect_protocol::EventMsg::PlanApproved(_)
+    )
+}
+
+/// `--plan-mode` 收尾:产出过计划 → `Ok(())`;否则按文档约定 exit 122。
+///
+/// 只在显式请求了 Plan mode 时生效,普通 headless 调用不受影响。
+fn finish_plan_mode(plan_requested: bool, plan_produced: bool) -> anyhow::Result<()> {
+    if plan_requested && !plan_produced {
+        tracing::warn!(
+            exit_code = PLAN_MODE_EXIT_CODE,
+            "plan_mode: turn 结束但未产出计划(未见 PlanReady),按文档约定退出 122"
+        );
+        // 直接退出而非返回 Err:Err 会让 main 打印错误链并 exit 1,
+        // 与约定的 122 混淆。
+        std::process::exit(PLAN_MODE_EXIT_CODE);
+    }
+    Ok(())
+}
+
 /// 入口函数:既被独立 `reflect-exec` 二进制调用,也被顶层 CLI router 的
 /// `reflect exec` 子命令调用。
 pub fn run(args: ExecArgs) -> anyhow::Result<()> {
@@ -148,13 +184,17 @@ async fn async_main(args: ExecArgs) -> anyhow::Result<()> {
         let mut handle = session.thread.submit(sub).await;
         let stdout = std::io::stdout();
         let mut writer = JsonlWriter::new(stdout.lock());
+        let mut plan_produced = false;
         while let Some(event) = handle.next().await {
+            if is_plan_ready_event(&event) {
+                plan_produced = true;
+            }
             if let Err(e) = writer.write_event(&event) {
                 tracing::warn!(error = %e, "jsonl writer failed; exiting");
                 break;
             }
         }
-        return Ok(());
+        return finish_plan_mode(args.plan_mode, plan_produced);
     }
 
     // ── 普通分支:单条 prompt → JSONL 流 ──
@@ -180,7 +220,11 @@ async fn async_main(args: ExecArgs) -> anyhow::Result<()> {
         reflect_protocol::Submission::user_input_items(items)
     };
     let mut handle = session.thread.submit(sub).await;
+    let mut plan_produced = false;
     while let Some(event) = handle.next().await {
+        if is_plan_ready_event(&event) {
+            plan_produced = true;
+        }
         let mut w = JsonlWriter::new(std::io::stdout().lock());
         if let Err(e) = w.write_event(&event) {
             // broken pipe(如 | head 已关闭)—— 优雅退出
@@ -188,5 +232,5 @@ async fn async_main(args: ExecArgs) -> anyhow::Result<()> {
             break;
         }
     }
-    Ok(())
+    finish_plan_mode(args.plan_mode, plan_produced)
 }

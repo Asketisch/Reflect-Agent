@@ -436,12 +436,12 @@ impl ToolExecutionQueue {
         // `tool.required_permission()`。
         if let Some(gate_ref) = gate {
             let effective_perm = tool.action_permission(&effective_args);
+            // 0.3:必须用共享的别名解析,不能只读 `args["cmd"]` —— 否则模型
+            // 发 `{"command": "rm -rf /"}` 时 bash_class 为 None,
+            // dangerous_bash / bash_must_approve 安全基线全部静默失效。
             let bash_class = (call.name == "bash")
                 .then(|| {
-                    effective_args
-                        .get("cmd")
-                        .and_then(|v| v.as_str())
-                        .map(classify_command)
+                    crate::bash_command::resolve_bash_command(&effective_args).map(classify_command)
                 })
                 .flatten();
             let dangerous_bash = bash_class == Some(BashCommandClass::Dangerous);
@@ -594,9 +594,13 @@ impl ToolExecutionQueue {
 }
 
 /// 按工具名与参数解析审批风险等级;bash 走 [`classify_command`] 动态映射。
+///
+/// 0.3:bash 命令必须经 `resolve_bash_command` 取(兼容 `cmd` / `command` /
+/// `cmdline` 三个别名)。此前只读 `args["cmd"]`,模型用别名就能把风险
+/// 等级从 `High` 压到 `Medium`,让 `Bubble` 模式下的强制弹窗失效。
 fn tool_risk_level(tool_name: &str, args: &Value) -> RiskLevel {
     if tool_name == "bash" {
-        if let Some(cmd) = args.get("cmd").and_then(|v| v.as_str()) {
+        if let Some(cmd) = crate::bash_command::resolve_bash_command(args) {
             return classify_command(cmd).risk_level();
         }
     }

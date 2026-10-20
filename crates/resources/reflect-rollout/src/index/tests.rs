@@ -459,6 +459,62 @@ fn find_session_path_resolves_to_existing_jsonl() {
     assert!(p.is_file());
 }
 
+/// 回归(0.10):轮转副本与活跃文件同时存在时,`find_session_path` 必须
+/// 返回**活跃文件**。
+///
+/// 修复前只看 `extension() == "jsonl"` 就返回 `read_dir` 顺序里的第一个
+/// 命中,而 `<id>.1.jsonl` 的 extension 同样是 `jsonl`、首行 SessionMeta
+/// 里 session_id 也相同 —— 于是可能返回轮转副本。连带 rewind / fork /
+/// checkpoint 写全部落到副本上,对活跃会话静默失效。
+#[test]
+fn find_session_path_prefers_active_over_rotated() {
+    let (dir, ids) = prepare_n_sessions(1);
+    let id = ids[0];
+    // session 文件按日期分目录存放,先定位真正的活跃文件。
+    let active = find_session_path(dir.path(), id).expect("先定位活跃文件");
+    let parent = active.parent().unwrap().to_path_buf();
+
+    // 在同一目录造 3 个轮转副本(用真实 RolloutRecord 保证 SessionMeta
+    // 字段与解析器一致)。
+    let meta = || RolloutRecord::SessionMeta {
+        session_id: id,
+        model: "m".into(),
+        started_at: chrono::Utc.with_ymd_and_hms(2026, 6, 18, 12, 0, 0).unwrap(),
+        workspace: None,
+    };
+    for n in 1..=3 {
+        let rotated = parent.join(format!("{id}.{n}.jsonl"));
+        std::fs::write(&rotated, serde_json::to_string(&meta()).unwrap()).unwrap();
+        assert!(rotated.is_file());
+    }
+
+    let p = find_session_path(dir.path(), id).expect("should find");
+    assert_eq!(p, active, "必须优先返回活跃文件而非轮转副本,得到: {p:?}");
+}
+
+/// 回归(0.10):只有轮转副本时(活跃文件丢失)应退回副本而不是 None。
+/// 这保证崩溃 / 误删后的降级路径仍能定位到数据。
+#[test]
+fn find_session_path_falls_back_to_rotated() {
+    let (dir, ids) = prepare_n_sessions(1);
+    let id = ids[0];
+    let active = find_session_path(dir.path(), id).expect("先定位活跃文件");
+    let parent = active.parent().unwrap().to_path_buf();
+    // 删掉活跃文件,只留一个轮转副本。
+    std::fs::remove_file(&active).unwrap();
+    let rotated = parent.join(format!("{id}.2.jsonl"));
+    let meta = RolloutRecord::SessionMeta {
+        session_id: id,
+        model: "m".into(),
+        started_at: chrono::Utc.with_ymd_and_hms(2026, 6, 18, 12, 0, 0).unwrap(),
+        workspace: None,
+    };
+    std::fs::write(&rotated, serde_json::to_string(&meta).unwrap()).unwrap();
+
+    let p = find_session_path(dir.path(), id).expect("应退回轮转副本");
+    assert_eq!(p, rotated);
+}
+
 /// `find_session_path` 找不到随机 UUID → None(不 panic)。
 #[test]
 fn find_session_path_returns_none_for_unknown_id() {

@@ -31,7 +31,7 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use serde_json::Value;
 use tokio::process::Command;
-use tracing::warn;
+use tracing::{error, warn};
 
 use crate::tool::{Tool, ToolContext, ToolError, ToolOutput};
 pub use reflect_hooks::{BashCommandClass, classify_command};
@@ -246,11 +246,13 @@ impl Tool for BashTool {
         // `.filter(!is_empty)` 一并挡掉 `{"cmd": ""}` / `{"cmd": "  "}` 与
         // `Value::Null` 退化两种静默失败,统一落到 `InvalidArgs`(沿用既有错误信息,
         // 不破坏 TUI 渲染 / 快照)。
-        let cmd = ["cmd", "command", "cmdline"]
-            .iter()
-            .find_map(|k| args.get(*k).and_then(|v| v.as_str()))
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
+        //
+        // 0.3:该规范化收敛到 `crate::bash_command::resolve_bash_command`,
+        // 与 queue / approval gate / PlanModeGate 等**所有安全判定点**共用
+        // 同一实现 —— 此前这些点各自 `args.get("cmd")`,模型用 `command`
+        // 别名就能让整条风险管线静默降级(详见 bash_command.rs 模块文档)。
+        let cmd = crate::bash_command::resolve_bash_command(&args)
+            .map(|s| s.to_string())
             .ok_or_else(|| ToolError::InvalidArgs {
                 message: "missing 'cmd'".into(),
             })?;
@@ -391,11 +393,27 @@ impl Tool for BashTool {
         // 异常 —— restrict 成功后 execve 仍可能 EACCES,且**间歇出现**。
         // spawn 报权限类错误时:重建 command(不注入 pre_exec)降级重试
         // 一次,对齐「沙箱尽力而为,不阻塞工作流」的既有哲学。
+        //
+        // **0.1 收口(安全)**:该重试此前无条件生效,等于给了一个稳定的
+        // 沙箱逃逸口子 —— 只要能让 sandboxed spawn 失败一次,后续命令就
+        // 全部裸执行,且只有 stderr 一行 warn,headless JSONL 客户端完全
+        // 看不到。现在改为**仅非 strict 模式允许**;strict 模式下这条
+        // 路径直接 fail-closed 抛 `SandboxUnavailable`,与模块不变式
+        // (os_sandbox.rs:22-27「strict 绝不回退裸 sh -c」)一致。
+        // 另外 0.1 已修正 handled 位掩码(0xffe → 0x1ff2):EACCES 的
+        // 根因是 READ_FILE/READ_DIR 被误纳入 handled,导致 execve 时
+        // 动态链接器读不到 workspace 外的 .so,修好后这类失败本就不该
+        // 再出现,重试也就从"必需品"退化为"纯逃逸面"。
         #[cfg(target_os = "linux")]
         let landlock_applied =
             matches!(sandbox.status(), reflect_sandbox::OsSandboxStatus::Landlock);
         #[cfg(not(target_os = "linux"))]
         let landlock_applied = false;
+        // 非 strict 才允许降级重试(strict → fail-closed)。
+        #[cfg(target_os = "linux")]
+        let allow_degrade_retry = landlock_applied && !sandbox.strict;
+        #[cfg(not(target_os = "linux"))]
+        let allow_degrade_retry = false;
         #[cfg(target_os = "linux")]
         if landlock_applied {
             let ws_clone = workspace.clone();
@@ -420,10 +438,10 @@ impl Tool for BashTool {
 
         let mut child = match command.spawn() {
             Ok(c) => c,
-            // 权限类失败 + landlock 已注入 → 降级重试一次(不带沙箱)。
+            // 权限类失败 + landlock 已注入 + **非 strict** → 降级重试一次
+            // (不带沙箱)。strict 模式走下面的 fail-closed 分支。
             Err(e)
-                if cfg!(target_os = "linux")
-                    && landlock_applied
+                if allow_degrade_retry
                     && matches!(
                         e.raw_os_error(),
                         Some(13) | Some(1) // EACCES / EPERM(避免为此引 libc 依赖)
@@ -432,7 +450,8 @@ impl Tool for BashTool {
                 warn!(
                     cmd,
                     error = %e,
-                    "landlock sandboxed spawn failed (EACCES/EPERM); retrying without sandbox"
+                    "landlock sandboxed spawn failed (EACCES/EPERM); \
+                     retrying without sandbox (non-strict mode)"
                 );
                 let mut command = Command::new(&program);
                 command.args(&argv);
@@ -449,6 +468,27 @@ impl Tool for BashTool {
                     }
                 }
                 command.spawn().map_err(ToolError::from)?
+            }
+            // strict 模式下的权限类失败:fail-closed,绝不裸执行。
+            Err(e)
+                if landlock_applied
+                    && sandbox.strict
+                    && matches!(e.raw_os_error(), Some(13) | Some(1)) =>
+            {
+                let reason = format!(
+                    "landlock sandboxed spawn 失败({e});严格模式下拒绝降级为无沙箱执行。\
+                     若运行环境确实无法在 landlock 下 exec,请显式设置 \
+                     REFLECT_SANDBOX_STRICT=0 或 REFLECT_SANDBOX_OS_LEVEL=0。"
+                );
+                error!(
+                    cmd,
+                    error = %e,
+                    "sandbox fail-closed; refusing to retry without sandbox"
+                );
+                if let Some(p) = &seatbelt_profile_path {
+                    let _ = std::fs::remove_file(p);
+                }
+                return Err(ToolError::SandboxUnavailable { reason });
             }
             Err(e) => return Err(ToolError::from(e)),
         };
@@ -574,7 +614,9 @@ impl Tool for BashTool {
                 spill.extend_from_slice(&cleaned_err);
             }
             let spilled = std::fs::write(&spill_path, &spill).is_ok();
-            text.truncate(OUTPUT_LIMIT);
+            // 0.8:`String::truncate` 在非 char 边界会 panic(一个汉字 3 字节,
+            // 恰好切在第二 / 第三字节就炸)。改用协议层提供的安全截断。
+            reflect_protocol::truncate_string_in_place(&mut text, OUTPUT_LIMIT);
             text.push_str("\n... [truncated]");
             if spilled {
                 text.push_str(&format!("\n[完整输出已落盘: {}]", spill_path.display()));

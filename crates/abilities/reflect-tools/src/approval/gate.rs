@@ -257,10 +257,14 @@ impl ApprovalGate {
         // 1. S5a:resolver 短路。Ask / NoMatch / None → fall through。
         // 带 bash 命令上下文调 `resolve_with_context`,让 `shell_pattern`
         // 规则(如 `Bash: git *`)能命中 —— 否则该类规则静默失效。
-        // Bash 工具命令在 args["cmd"](见 builtins/bash.rs schema)。
+        //
+        // 0.3:bash 命令必须经 `resolve_bash_command` 取(兼容 `cmd` /
+        // `command` / `cmdline` 三个别名),不能只读 `args["cmd"]` ——
+        // 否则模型发 `{"command": "rm -rf /"}` 时 bash_cmd 为 None,
+        // 所有 shell_pattern 规则(含 Deny)被整体跳过。
         let mut force_modal = false;
         if let Some(resolver) = &self.permission_resolver {
-            let bash_cmd = args.get("cmd").and_then(|v| v.as_str());
+            let bash_cmd = crate::bash_command::resolve_bash_command(args);
             match resolver.resolve_with_context(tool_name, bash_cmd).await {
                 reflect_permissions::RuleMatch::Allow => {
                     return ReviewDecision::Approve;

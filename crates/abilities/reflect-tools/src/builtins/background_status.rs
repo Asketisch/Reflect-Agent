@@ -53,12 +53,16 @@ impl Tool for BackgroundStatusTool {
                     let head = format!("[{}] {}", t.id, t.status);
                     match &t.result {
                         Some(r) => format!("{head}\n{}", {
-                            let mut r = r.clone();
+                            // 0.8:`String::truncate` 在非 char 边界会 panic。
+                            // 安全截断可能因回退到字符起点而短于上限,所以
+                            // "是否截断"要按**原始长度**判断,不能按截断后的。
                             if r.len() > 2000 {
-                                r.truncate(2000);
-                                r.push_str("\n... [truncated]");
+                                let mut cut = reflect_protocol::truncate_str(r, 2000).to_string();
+                                cut.push_str("\n... [truncated]");
+                                cut
+                            } else {
+                                r.clone()
                             }
-                            r
                         }),
                         None => head,
                     }

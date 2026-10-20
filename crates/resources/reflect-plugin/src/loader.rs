@@ -227,13 +227,28 @@ pub async fn register(
             .and_then(|v| v.as_u64())
             .map(std::time::Duration::from_secs)
             .unwrap_or(reflect_hooks::DEFAULT_SHELL_HOOK_TIMEOUT);
+        // 0.12:hooks.json 可用 `env: ["NAME", ...]` 显式放行本应被剔除的
+        // 敏感环境变量(白名单优先于 secret 剔除)。未声明时 hook 拿不到
+        // ANTHROPIC_API_KEY 等 —— 装插件已等同授权任意代码执行,但没必要
+        // 顺手把凭据也递过去。
+        let env_allowlist: Vec<String> = hook
+            .command
+            .get("env")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
         let shell = reflect_hooks::ShellHook::new(
             format!("plugin:{}:{}#{}", loaded.plugin_id, hook.event, i),
             kind,
             hook.matcher.clone(),
             command,
             timeout,
-        );
+        )
+        .with_env_allowlist(env_allowlist);
         registries.hooks.register(shell);
         registered_hooks += 1;
     }

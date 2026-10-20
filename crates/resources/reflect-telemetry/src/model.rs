@@ -241,9 +241,15 @@ pub fn redact_value(v: &mut serde_json::Value) {
     match v {
         serde_json::Value::String(s) => {
             *s = redact_string(s);
+            // 0.8:`String::truncate` 在非 char 边界会 panic。trace 里存的
+            // 是完整 prompt / 工具输出,CJK 内容极常见。与 rollout
+            // `redact_value` 同一修法。
             if s.len() > MAX_FIELD_CHARS {
                 let cut = MAX_FIELD_CHARS.saturating_sub(REDACTION_MARKER.len());
-                s.truncate(cut);
+                // `truncate_str` 返回 &str(借自 s),先取长度再原地截断,
+                // 避免 `truncate(0)` + `push_str` 的双次拷贝。
+                let kept_len = reflect_protocol::truncate_str(s, cut).len();
+                s.truncate(kept_len);
                 s.push_str(REDACTION_MARKER);
             }
         }

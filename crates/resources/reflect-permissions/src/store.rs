@@ -19,10 +19,14 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+/// 临时权限文件序号:同进程内并发写时保证临时文件名唯一。
+static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 use crate::rules::PermissionRule;
 
@@ -210,13 +214,34 @@ impl FilePermissionStore {
     }
 
     /// 同步写:保证 parent dir 存在(避免 PermissionDenied on first write),
-    /// 然后 toml::to_string_pretty + write。
+    /// 然后 toml::to_string_pretty + **原子**落盘。
+    ///
+    /// 0.11:此前是裸 `std::fs::write` —— 它先截断目标再写入,进程在写入
+    /// 中途崩溃(或磁盘满)会把 `permissions.toml` 留成半截 TOML。而
+    /// `StorePermissionResolver` 对解析失败是 **fail-open**(返回 NoMatch,
+    /// 让上层按默认行为走),所以一个截断的权限文件会让**所有工具**的
+    /// 规则静默失效 —— 包括用户配的 Deny 规则。
+    ///
+    /// 改为 temp + rename:同目录保证同一文件系统,`rename` 在其上是原子的,
+    /// 读者只会看到旧内容或新内容,绝不会看到半截。与
+    /// `reflect-rollout::writer` / `reflect-notes` 的做法一致。
     fn write(&self, file: &PermissionFile) -> Result<(), PermissionsError> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let body = toml::to_string_pretty(file)?;
-        std::fs::write(&self.path, body)?;
+        // 临时文件名带 pid + 原子自增序号:并发写(多 AgentThread / 多进程)
+        // 不会互相踩踏,也不会与残留的旧 .tmp 混淆。
+        let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp = self
+            .path
+            .with_extension(format!("toml.tmp.{}.{}", std::process::id(), seq));
+        std::fs::write(&tmp, body.as_bytes())?;
+        if let Err(e) = std::fs::rename(&tmp, &self.path) {
+            // rename 失败时清掉临时文件,别在配置目录留垃圾。
+            let _ = std::fs::remove_file(&tmp);
+            return Err(PermissionsError::Io(e));
+        }
         Ok(())
     }
 }
@@ -340,6 +365,27 @@ mod tests {
         let after = s.list().await.unwrap();
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].tool, "Write");
+    }
+
+    /// 回归(0.11):原子写不得在配置目录留下 .tmp 残留。
+    #[tokio::test]
+    async fn file_store_leaves_no_temp_file_behind() {
+        let dir = tempdir().unwrap();
+        let s = FilePermissionStore::with_path(dir.path().join("perms.toml"));
+        for i in 0..5 {
+            s.add(rule(&format!("tool{i}"), PermissionAction::Allow))
+                .await
+                .unwrap();
+        }
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp."))
+            .collect();
+        assert!(leftovers.is_empty(), "不得残留临时文件: {leftovers:?}");
+        // 写进去的规则仍可读回(原子 rename 没丢数据)。
+        assert_eq!(s.list().await.unwrap().len(), 5);
     }
 
     #[tokio::test]

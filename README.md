@@ -3,7 +3,7 @@
 [简体中文](README.md) | **English**([README_EN.md](README_EN.md))
 
 > Rust 编写的 AI agent 运行时**框架**:33 crate workspace(6 层架构)、
-> 4 节点 StateGraph 引擎、23 内置工具、10 hook 事件、多 LLM provider、
+> 4 节点 StateGraph 引擎、26 内置工具、12 hook 事件、多 LLM provider、
 > MCP / LSP 集成、JSONL rollout 持久化。
 >
 > 本仓库是**纯框架层**:主接口为 `reflect` 库门面(Builder + 60+ re-exports)
@@ -140,10 +140,10 @@ flowchart LR
 |------|------|
 | 4 节点 StateGraph | PreLoop → ModelCall → ToolExec → CheckStop 自循环 |
 | OpenAI + Anthropic + Ollama | SSE 流式、prompt caching、extended thinking、本地 NDJSON |
-| 23 内置工具 | bash / read / write / edit / grep / glob / web_fetch / web_search / notebook_edit / image_view / task 工具 + Plan mode 控制面等 |
+| 26 内置工具 | bash / read / write / edit / delete_file / grep / glob / web_fetch / web_search / notebook_edit / image_view / task 工具 + Plan mode 控制面等 |
 | 工具面可裁剪 | 三层裁剪:Agent 定义 frontmatter(`tools` / `disallowed_tools` / `readonly`,`--agent` 激活)→ config.toml `[[subagents]]` 的 `allowed_tools` → 代码层 `unregister` / `register_except`;被裁工具的 schema 不进 prompt(详见 [docs/architecture.md](docs/architecture.md)) |
 | 跨语言自定义工具 | 客户端(Python / TS)注册本地函数为 LLM 工具,core 下发执行请求、回执结果 |
-| 10 Hook 事件 × 7 决策 | PreToolUse / PostToolUse / PostToolUseFailure / Stop / SessionStart / UserPromptSubmit / PreCompact + 3 个 task 生命周期事件 |
+| 12 Hook 事件 × 7 决策 | PreToolUse / PostToolUse / PostToolUseFailure / Stop / SessionStart / UserPromptSubmit / PreCompact / PostCompact / SessionEnd + 3 个 task 生命周期事件 |
 | 4 层上下文压缩 | microcompact → smart_prune → LLM summarize(escalation) |
 | 子代理 | Tool-per-Agent,并发在途 ≤ 16(父子共享计数器) |
 | 多 Agent 编排 | discussion(顺序/并发)、task / team、DAG pipeline、goal 模式 |

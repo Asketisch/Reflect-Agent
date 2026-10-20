@@ -27,9 +27,15 @@ pub(crate) fn redact_value(v: &mut serde_json::Value) {
             // 1. 密钥 pattern 脱敏(合规边界)。
             *s = redact_string(s);
             // 2. 尺寸截断。
+            // 0.8:`String::truncate` 在非 char 边界会 panic —— JSONL 里
+            // 存的是用户 prompt / 工具输出,CJK 内容极常见,16384 的固定
+            // 字节偏移很容易切在汉字中间。改用协议层的安全截断。
             if s.len() > MAX_JSONL_FIELD_CHARS {
                 let cut = MAX_JSONL_FIELD_CHARS.saturating_sub(JSONL_REDACTION_MARKER.len());
-                s.truncate(cut);
+                // `truncate_str` 返回 &str,而 `s` 正被借用 → 先算长度再
+                // 一次性重建,避免 `truncate(0)` + `push_str` 的双次拷贝。
+                let kept_len = reflect_protocol::truncate_str(s, cut).len();
+                s.truncate(kept_len);
                 s.push_str(JSONL_REDACTION_MARKER);
             }
         }
@@ -200,5 +206,40 @@ mod tests {
         let once = v.clone();
         redact_value(&mut v);
         assert_eq!(v, once);
+    }
+    /// 回归(0.8):CJK 内容超长时不得因切在汉字中间而 panic。
+    /// 修复前 `s.truncate(cut)` 在 cut 不是 char 边界时直接 panic。
+    #[test]
+    fn truncation_survives_multibyte_boundary() {
+        // 一个汉字 3 字节。构造长度远超上限的纯中文串。
+        let cjk = "中".repeat(MAX_JSONL_FIELD_CHARS * 2);
+        let mut v = serde_json::Value::String(cjk);
+        redact_value(&mut v);
+        let s = v.as_str().unwrap();
+        assert!(
+            s.len() <= MAX_JSONL_FIELD_CHARS,
+            "截断后应不超过上限,得到 {}",
+            s.len()
+        );
+        assert!(s.ends_with(JSONL_REDACTION_MARKER), "应带截断标记");
+        // 中文被正确保留(不是乱码 / 空串)。
+        assert!(s.contains('中'), "中文内容应完整保留");
+    }
+
+    /// 回归(0.8):emoji(4 字节)同样不得 panic。
+    #[test]
+    fn truncation_survives_4byte_boundary() {
+        let emoji = "\u{1F600}".repeat(MAX_JSONL_FIELD_CHARS * 2);
+        let mut v = serde_json::Value::String(emoji);
+        redact_value(&mut v);
+        assert!(v.as_str().unwrap().len() <= MAX_JSONL_FIELD_CHARS);
+    }
+
+    /// 回归:未超长的中文串必须原样保留(不被误截)。
+    #[test]
+    fn short_multibyte_untouched() {
+        let mut v = serde_json::Value::String("中文测试".into());
+        redact_value(&mut v);
+        assert_eq!(v.as_str().unwrap(), "中文测试");
     }
 }

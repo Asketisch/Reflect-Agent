@@ -32,6 +32,51 @@ pub fn resolve_sandbox_path(workspace: &Path, path: &Path) -> Result<PathBuf, To
     Ok(abs_path)
 }
 
+/// 把**目录类**路径参数(grep / glob 的 `path`)解析到 workspace 内。
+///
+/// 0.6:grep 与 glob 的 `path` 参数此前直接喂给 `WalkBuilder::new(root)`,
+/// 没有任何 workspace 包含校验 —— `{"pattern": "x", "path": "/"}` 会遍历
+/// 整个文件系统,并把匹配行内容(含绝对路径)吐给模型。`read` 虽然还会拒读
+/// 这些路径,但内容已经在工具输出里泄露了。
+///
+/// 与 [`resolve_sandbox_path`] 的差别只在错误信息:这里的调用场景是"搜索
+/// 根目录",路径不存在 / 不是目录时应给出可操作的提示,而不是裸 Io 错误。
+pub fn resolve_sandbox_dir(workspace: &Path, path: &Path) -> Result<PathBuf, ToolError> {
+    let resolved = resolve_sandbox_path(workspace, path).map_err(|e| match e {
+        ToolError::PathEscape { .. } => e,
+        // 规范化失败几乎总是"不存在",给搜索场景一句人话。
+        ToolError::Io(_) => ToolError::InvalidArgs {
+            message: format!(
+                "path 不存在或无法访问: {} (相对 workspace 或 workspace 内的绝对路径)",
+                path.display()
+            ),
+        },
+        other => other,
+    })?;
+    if !resolved.is_dir() {
+        return Err(ToolError::InvalidArgs {
+            message: format!("path 不是目录: {}", path.display()),
+        });
+    }
+    Ok(resolved)
+}
+
+/// 把 workspace 内的绝对路径转成相对 workspace 的显示路径。
+///
+/// 0.6:grep / glob 的输出此前用 `entry.path().display()`,对 workspace 根
+/// 启动的搜索会给出冗长的绝对路径(每一行都带一遍),既烧 token 又不便读。
+/// 转不成相对路径时(符号链接指向 workspace 外等)原样返回绝对路径。
+pub fn display_path_relative(path: &Path, workspace: &Path) -> String {
+    let workspace = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    let abs = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    abs.strip_prefix(&workspace)
+        .unwrap_or(&abs)
+        .to_string_lossy()
+        .into_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

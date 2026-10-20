@@ -230,6 +230,13 @@ impl ReflectBuilder {
 
         let mut cfg = AgentConfig::new(self.model.clone(), self.workspace.clone())
             .with_approvals(self.approvals);
+        // 0.5:Plan mode 必须**既设 permission mode,又注册 PlanModeGate**。
+        // 此前这里只做了前者 —— `PermissionMode::Plan` 单独存在时没有任何
+        // 强制力(它只是让审批层知道当前是 Plan 模式),写工具照样放行。
+        // 真正的执行机制是 `PlanModeGate` 这个 PreToolUse hook 把白名单外
+        // 工具 blanket-deny。此前全 workspace 只有 `reflect-exec/src/
+        // headless.rs` 注册它,导致库门面(Reflect-TUI / ReflectDesktop)与
+        // reflect-py 的 `plan_mode(true)` 拿到的是一个零强制的 Plan mode。
         if self.plan_mode {
             cfg = cfg.with_initial_permission_mode(reflect_protocol::PermissionMode::Plan);
         }
@@ -241,6 +248,16 @@ impl ReflectBuilder {
             None,
             Some(hook_engine.clone()),
         ));
+        if self.plan_mode {
+            thread.register_hook(reflect_hooks::builtins::PlanModeGate::default_mode());
+            let rbe_section = app_cfg.hooks.read_before_edit.as_ref();
+            let (_rbe_state, rbe_hook) = reflect_hooks::builtins::build_read_before_edit(
+                rbe_section.and_then(|s| s.enabled),
+                rbe_section.and_then(|s| s.mtime_drift_tolerance_ms),
+            );
+            thread.register_hook(rbe_hook);
+            tracing::info!("plan_mode=true: registered PlanModeGate + read_before_edit hooks");
+        }
 
         // 插件挂载:显式列表优先,否则读 config。HOME 缺失等场景
         // bootstrap_plugins 返回空句柄,不阻塞启动。
@@ -544,10 +561,42 @@ mod tests {
     /// builder 这边的 wiring 是 1 行 `if self.plan_mode { cfg = cfg.with_initial_permission_mode(...) }`
     /// —— 由 `default_tool_registry_has_seven_builtins_plus_plan_tools` 之类的
     /// build 路径间接覆盖。
+    ///
+    /// **0.5 补强**:permission mode 单独存在时**没有任何强制力** ——
+    /// `PermissionMode::Plan` 只是让审批层知道当前是 Plan 模式,写工具照样
+    /// 放行。真正的执行机制是 `PlanModeGate` 这个 PreToolUse hook。此前
+    /// builder 只设前者不注册后者,库门面(Reflect-TUI / ReflectDesktop)与
+    /// reflect-py 的 `plan_mode(true)` 拿到的是零强制的 Plan mode。
+    /// 下面两条断言分别守住这两个必要条件。
     #[test]
     fn builder_plan_mode_compiles() {
         // smoke test:确保 builder API 在编译期就接受 `plan_mode` 调用。
         let _b = Reflect::builder("openai/gpt-4o").plan_mode(true);
+    }
+
+    /// 回归(0.5):`plan_mode(true)` 必须让 AgentConfig 的初始 permission
+    /// mode 变成 `Plan`。
+    #[test]
+    fn builder_plan_mode_sets_plan_permission_mode() {
+        let mut cfg =
+            reflect_core::AgentConfig::new("openai/gpt-4o".to_string(), std::env::temp_dir());
+        // 与 builder.rs:233-235 的 wiring 保持一致(这里是可单测的重放)。
+        cfg = cfg.with_initial_permission_mode(reflect_protocol::PermissionMode::Plan);
+        assert_eq!(
+            *cfg.permission_mode.read(),
+            reflect_protocol::PermissionMode::Plan,
+            "plan_mode(true) 必须把 permission_mode 设为 Plan"
+        );
+    }
+
+    /// 回归(0.5):Plan mode 的强制力来自 hook,不是 permission mode。
+    /// 这条断言守住"PlanModeGate 是可达的默认构造"—— 若 hook 改名 /
+    /// 改签名,这里先编译失败,提示去同步 builder 里的注册调用。
+    #[test]
+    fn plan_mode_gate_hook_is_constructible() {
+        use reflect_hooks::hook::Hook as _;
+        let gate = reflect_hooks::builtins::PlanModeGate::default_mode();
+        assert_eq!(gate.name(), "plan_mode_gate");
     }
 
     /// `plan_mode(false)`(默认)保持 `PermissionMode::Auto`,与历史行为兼容。

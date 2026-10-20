@@ -533,23 +533,63 @@ pub fn truncate_session_after_turn(
     }
 }
 
+/// 递归查找 `id` 对应 session 的文件,**优先返回活跃文件**(文件名 stem
+/// 无 `.N` 轮转后缀),轮转副本仅作兜底。
+///
+/// 0.10:原实现只看 `extension() == "jsonl"` 就返回第一个命中,而轮转文件
+/// `<id>.1.jsonl` / `.2.jsonl` / `.3.jsonl` 的 extension 同样是 `jsonl`,
+/// 首行 `SessionMeta` 里 `session_id` 也相同 —— `read_dir` 顺序不定,
+/// 于是可能返回轮转副本。连带影响:
+/// - `truncate_session_after_turn`(rewind 的 conversation 作用域):截断
+///   轮转副本而不是活跃文件 → rewind 静默失效;
+/// - `write_fork_record` / `fork_with_history`:fork 标记写到副本,或从
+///   副本拷历史(丢掉轮转点之后的全部记录);
+/// - `write_checkpoint_record` / `write_rewind_record` / `list_checkpoints`。
+///
+/// 与 `find_file_by_session_id`(本文件上方)同一套"活跃优先"规则,两处
+/// 保持一致。
 fn find_session_path_inner(dir: &Path, id: ThreadId) -> Option<std::path::PathBuf> {
-    let entries = std::fs::read_dir(dir).ok()?;
-    for entry in entries {
-        let entry = entry.ok()?;
-        let path = entry.path();
-        if path.is_dir() {
-            if let Some(found) = find_session_path_inner(&path, id) {
-                return Some(found);
+    // (候选, 是否活跃)。扫完后优先活跃文件;没有活跃文件才退回副本。
+    let mut best: Option<(std::path::PathBuf, bool)> = None;
+    fn scan(dir: &Path, id: ThreadId, best: &mut Option<(std::path::PathBuf, bool)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                scan(&path, id, best);
+                continue;
             }
-        } else if path.extension().and_then(|s| s.to_str()) == Some("jsonl")
-            && let Some(info) = parse_first_session_meta(&path)
-            && info.session_id == id
-        {
-            return Some(path);
+            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Some(info) = parse_first_session_meta(&path) else {
+                continue;
+            };
+            if info.session_id != id {
+                continue;
+            }
+            // 活跃文件:文件名形如 `<id>.jsonl`,stem 去掉 `.jsonl` 后不含
+            //  `.`(轮转副本是 `<id>.N.jsonl`,stem 去掉后是 `<id>.N`)。
+            let active = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_suffix(".jsonl"))
+                .map(|stem| !stem.contains('.'))
+                .unwrap_or(false);
+            match best {
+                // 已拿到活跃文件 → 不需要再找。
+                Some((_, true)) => {}
+                // 新候选是活跃文件,或当前只是轮转副本 → 替换。
+                Some(slot) if active || !slot.1 => *slot = (path, active),
+                Some(_) => {}
+                None => *best = Some((path, active)),
+            }
         }
     }
-    None
+    scan(dir, id, &mut best);
+    best.map(|(p, _)| p)
 }
 
 /// 把 `id` 对应 session 改名为 `new_name`。存储到 `<base>/_names/<id>.name`

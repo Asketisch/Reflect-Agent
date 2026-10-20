@@ -220,17 +220,23 @@ pub fn spawn_command(
         // v1.6 降级重试:受限环境(GHA runner 等)的 landlock 实现异常,
         // restrict 成功后 execve 仍可能 EACCES/EPERM —— 权限类失败时
         // 重建 command(不带沙箱)重试一次,对齐「尽力而为不阻塞」哲学。
+        //
+        // **0.1 收口(安全)**:与前台 BashTool 对齐,该重试**仅非 strict
+        // 模式允许**。strict 下权限类 spawn 失败直接 fail-closed,绝不
+        // 裸执行 —— 否则 `run_in_background: true` 会变成前台收口后的
+        // 剩余逃逸通道。
+        #[cfg(target_os = "linux")]
+        let allow_degrade_retry = landlock && !sandbox.strict;
+        #[cfg(not(target_os = "linux"))]
+        let allow_degrade_retry = false;
         let child = match command.spawn() {
             Ok(c) => c,
-            Err(e)
-                if cfg!(target_os = "linux")
-                    && landlock
-                    && matches!(e.raw_os_error(), Some(13) | Some(1)) =>
-            {
+            Err(e) if allow_degrade_retry && matches!(e.raw_os_error(), Some(13) | Some(1)) => {
                 tracing::warn!(
                     %program,
                     error = %e,
-                    "landlock sandboxed background spawn failed; retrying without sandbox"
+                    "landlock sandboxed background spawn failed; \
+                     retrying without sandbox (non-strict mode)"
                 );
                 let mut command = tokio::process::Command::new(&program);
                 command
@@ -256,6 +262,27 @@ pub fn spawn_command(
                         return;
                     }
                 }
+            }
+            // strict 模式下的权限类失败:fail-closed,不降级。
+            Err(e)
+                if landlock && sandbox.strict && matches!(e.raw_os_error(), Some(13) | Some(1)) =>
+            {
+                tracing::error!(
+                    %program,
+                    error = %e,
+                    "sandbox fail-closed; refusing to retry background spawn without sandbox"
+                );
+                q.fail(
+                    &id,
+                    format!(
+                        "spawn failed: {e}(严格模式下拒绝降级为无沙箱执行;\
+                         如需降级请设置 REFLECT_SANDBOX_STRICT=0)"
+                    ),
+                );
+                if let Some(p) = seatbelt_profile {
+                    let _ = std::fs::remove_file(p);
+                }
+                return;
             }
             Err(e) => {
                 q.fail(&id, format!("spawn failed: {e}"));

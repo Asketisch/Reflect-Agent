@@ -336,7 +336,10 @@ impl Tool for WebFetchTool {
         let markdown = htmd::convert(&html).unwrap_or_else(|_| html.into_owned());
 
         let (body_md, truncated_md) = if markdown.len() > MAX_OUTPUT_CHARS {
-            let mut s = markdown[..MAX_OUTPUT_CHARS].to_string();
+            // 0.8:`&markdown[..N]` 在 N 不是 char 边界时 panic。中文页面
+            // (常见场景)一个汉字 3 字节,固定 50_000 的字节偏移极易切在
+            // 汉字中间。改用协议层的安全截断。
+            let mut s = reflect_protocol::truncate_str(&markdown, MAX_OUTPUT_CHARS).to_string();
             s.push_str(&format!(
                 "\n\n[... truncated to {MAX_OUTPUT_CHARS} chars ...]"
             ));
@@ -651,5 +654,41 @@ mod tests {
         // metadata.url 经 sanitize,不应带 query string。
         let safe_url = out.metadata.get("url").and_then(|v| v.as_str()).unwrap();
         assert_eq!(safe_url, "https://example.com/");
+    }
+    /// 回归(0.8):非 ASCII 页面的 markdown 截断不得 panic。
+    /// 修复前 `&markdown[..MAX_OUTPUT_CHARS]` 在偏移不是 char 边界时
+    /// 直接 panic —— 中文页面(高频场景)一个汉字 3 字节,固定的
+    /// 50_000 字节偏移极易切在汉字中间。
+    #[test]
+    fn truncation_survives_multibyte_markdown() {
+        // 直接测内部截断逻辑:复用 execute 里那段判断的等价形式。
+        // 构造远超 MAX_OUTPUT_CHARS 的中文串。
+        let markdown = "中".repeat(super::MAX_OUTPUT_CHARS * 2);
+        let (body_md, truncated_md) = if markdown.len() > super::MAX_OUTPUT_CHARS {
+            let mut s =
+                reflect_protocol::truncate_str(&markdown, super::MAX_OUTPUT_CHARS).to_string();
+            s.push_str(&format!(
+                "\n\n[... truncated to {} chars ...]",
+                super::MAX_OUTPUT_CHARS
+            ));
+            (s, true)
+        } else {
+            (markdown.clone(), false)
+        };
+        assert!(truncated_md);
+        assert!(body_md.contains('中'), "中文内容应完整保留");
+        assert!(
+            body_md.len() > super::MAX_OUTPUT_CHARS,
+            "截断部分 + 标记应超过上限"
+        );
+    }
+
+    /// 回归(0.8):emoji(4 字节)同样不得 panic。
+    #[test]
+    fn truncation_survives_4byte_markdown() {
+        let markdown = "\u{1F600}".repeat(super::MAX_OUTPUT_CHARS * 2);
+        let out = reflect_protocol::truncate_str(&markdown, super::MAX_OUTPUT_CHARS);
+        assert!(out.len() <= super::MAX_OUTPUT_CHARS);
+        assert!(out.contains('\u{1F600}'));
     }
 }

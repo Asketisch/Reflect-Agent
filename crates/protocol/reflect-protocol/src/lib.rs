@@ -18,6 +18,7 @@
 //! 完整规范参见 `docs/protocol.md`。
 
 pub mod ask_user_input;
+pub mod bash_command;
 pub mod error;
 pub mod event;
 pub mod event_msg;
@@ -26,7 +27,9 @@ pub mod op;
 pub mod question;
 pub mod recorder;
 pub mod submission;
+pub mod text;
 
+pub use bash_command::{BASH_COMMAND_KEYS, resolve_bash_command, split_shell_segments};
 pub use error::ProtocolError;
 pub use event::{EVENT_ID_NONE, Event};
 pub use event_msg::{
@@ -58,3 +61,4 @@ pub use recorder::{
     MessageRole, NullRecorder, RolloutRecord, RolloutRecorder, SessionInfo, derive_title,
 };
 pub use submission::{Submission, W3cTraceContext};
+pub use text::{floor_char_boundary, truncate_chars, truncate_str, truncate_string_in_place};

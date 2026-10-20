@@ -154,10 +154,10 @@ See [docs/architecture.md](docs/architecture.md) (Chinese) for the full
 |------------|----------------|
 | 4-node StateGraph | PreLoop → ModelCall → ToolExec → CheckStop self-loop |
 | OpenAI + Anthropic + Ollama | SSE streaming, prompt caching, extended thinking, local NDJSON |
-| 23 built-in tools | bash / read / write / edit / grep / glob / web_fetch / web_search / notebook_edit / image_view / task tools + Plan-mode control plane, etc. |
+| 26 built-in tools | bash / read / write / edit / delete_file / grep / glob / web_fetch / web_search / notebook_edit / image_view / task tools + Plan-mode control plane, etc. |
 | Trimmable tool surface | Three layers: agent-definition frontmatter (`tools` / `disallowed_tools` / `readonly`, activated via `--agent`) → `allowed_tools` per `[[subagents]]` in config.toml → code-level `unregister` / `register_except`; trimmed tools' schemas never reach the prompt (see [docs/architecture.md](docs/architecture.md), Chinese) |
 | Cross-language custom tools | Clients (Python / TS) register local functions as LLM tools; the core dispatches execution requests and receives results back |
-| 10 hook events × 7 decisions | PreToolUse / PostToolUse / PostToolUseFailure / Stop / SessionStart / UserPromptSubmit / PreCompact + 3 task-lifecycle events |
+| 12 hook events × 7 decisions | PreToolUse / PostToolUse / PostToolUseFailure / Stop / SessionStart / UserPromptSubmit / PreCompact / PostCompact / SessionEnd + 3 task-lifecycle events |
 | 4-tier context compaction | microcompact → smart_prune → LLM summarize (escalation) |
 | Subagents | Tool-per-Agent, concurrent in-flight ≤ 16 (shared parent/child counter) |
 | Multi-agent orchestration | discussion (sequential/concurrent), task / team, DAG pipelines, goal mode |

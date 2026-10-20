@@ -14,6 +14,11 @@
 
 pub mod approval;
 pub mod human_input;
+// 0.3:bash 命令参数别名解析下沉到 reflect-protocol(与 ToolError 同一
+// 理由:reflect-tools → reflect-hooks 是单向依赖,而该规范化函数被两边
+// 共用的安全判定点需要)。此处 re-export 保持
+// `reflect_tools::bash_command::*` 路径可用。
+pub use reflect_protocol::bash_command;
 // v1.4 D2:BM25 抽为独立叶 crate(reflect-bm25),memory 检索共用;
 // 此处整体 re-export,`crate::bm25::*` 路径与外部 `reflect_tools::bm25`
 // 使用方保持源码兼容。
@@ -34,6 +39,7 @@ pub use approval::{
     ApprovalGate, ApprovalWaiters, AskUserInputWaiters, AskUserQuestionWaiters, complete_approval,
     complete_ask_user_input, complete_ask_user_question,
 };
+pub use bash_command::{BASH_COMMAND_KEYS, resolve_bash_command};
 pub use bm25::{Bm25Hit, rank_lines, tokenize};
 pub use builtins::bash::{BashCommandClass, classify_command};
 pub use plan_approval::{PlanApprovalGate, PlanApprovalWaiters, complete_plan_approval};

@@ -19,6 +19,20 @@ const TRUNCATION_THRESHOLD: usize = 2000;
 const TRUNCATION_HEAD: usize = 1000;
 const TRUNCATION_TAIL: usize = 1000;
 
+/// 0.9:`offset` / `limit` 的 schema 上界与运行时钳制值。
+///
+/// 取 `usize::MAX / 2` 而非 `usize::MAX`:这样 `offset + limit` 即使在
+/// 钳制被绕过的情况下也**不可能**回绕(两个都 ≤ MAX/2,和 ≤ MAX),
+/// 从数值上消除 slice 越界的可能。
+const MAX_LINE_INDEX: usize = usize::MAX / 2;
+
+/// 0.9:读入内存前的文件大小上限。
+///
+/// 原实现 `fs::read_to_string` 无上限,而 `TRUNCATION_THRESHOLD` 只限制
+/// "显示多少行"、不限制"读入多少字节" —— 一个 10GB 文本文件会直接把
+/// 进程 OOM。超过上限时给出可操作错误(引导用 grep + offset 分段)。
+const MAX_READ_BYTES: u64 = 32 * 1024 * 1024;
+
 pub struct ReadTool;
 
 #[async_trait]
@@ -34,8 +48,11 @@ impl Tool for ReadTool {
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "Path relative to workspace, or absolute path under workspace."},
-                "offset": {"type": "integer", "minimum": 0, "description": "Start line (0-indexed)"},
-                "limit": {"type": "integer", "minimum": 0, "description": "Max lines to read"}
+                // 0.9:schema 补 `maximum`。原实现只有 `minimum: 0`,模型传
+                // `limit: 18446744073709551615` 时 `offset + limit` 在
+                // release 下回绕 → `start > end` → slice 索引 panic。
+                "offset": {"type": "integer", "minimum": 0, "maximum": MAX_LINE_INDEX, "description": "Start line (0-indexed)"},
+                "limit": {"type": "integer", "minimum": 0, "maximum": MAX_LINE_INDEX, "description": "Max lines to read"}
             },
             "required": ["path"],
             "additionalProperties": false
@@ -52,11 +69,19 @@ impl Tool for ReadTool {
                 .ok_or_else(|| ToolError::InvalidArgs {
                     message: "missing 'path'".into(),
                 })?;
-        let offset: usize = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        // 0.9:上限钳制 + `checked_add`。原实现是 `offset + l` 裸加,
+        // release 下回绕成 0,而 `start = offset.min(total)` 仍是 offset
+        // → `lines[offset..0]` 直接 panic("slice index starts at .. but
+        // ends at ..")。debug 下则在加法处就 overflow panic。
+        let offset: usize = args
+            .get("offset")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+            .min(MAX_LINE_INDEX as u64) as usize;
         let limit: Option<usize> = args
             .get("limit")
             .and_then(|v| v.as_u64())
-            .map(|n| n as usize);
+            .map(|n| (n.min(MAX_LINE_INDEX as u64)) as usize);
 
         let path = std::path::Path::new(path_str);
         let abs = resolve_sandbox_path(&ctx.workspace_path(), path)?;
@@ -77,12 +102,28 @@ impl Tool for ReadTool {
         }
         drop(f);
 
+        // 0.9:读入前先查文件大小,避免把超大文件整体读进内存。
+        // 原来的 `fs::read_to_string` 无上限,一个 10GB 文本文件直接 OOM;
+        // 而 TRUNCATION_THRESHOLD(2000 行)限制的是"显示",不是"读入"。
+        if let Ok(meta) = fs::metadata(&abs)
+            && meta.len() > MAX_READ_BYTES
+        {
+            return Err(ToolError::InvalidArgs {
+                message: format!(
+                    "文件过大({} 字节 > {} 字节上限):请用 grep 定位,再用 offset/limit 分段读",
+                    meta.len(),
+                    MAX_READ_BYTES
+                ),
+            });
+        }
+
         let raw =
             fs::read_to_string(&abs).map_err(|e| ToolError::Io(format!("read {path_str}: {e}")))?;
         let lines: Vec<&str> = raw.lines().collect();
         let total = lines.len();
+        // 0.9:`checked_add` 双保险 —— 即使上面的钳制被绕过也不会回绕。
         let end = match limit {
-            Some(l) => (offset + l).min(total),
+            Some(l) => offset.checked_add(l).unwrap_or(total).min(total),
             None => total,
         };
         let slice: Vec<&str> = lines[offset.min(total)..end].to_vec();
@@ -279,5 +320,71 @@ mod tests {
             .expect("metadata.mtime_ms present");
         // mtime_ms 应该是合理的 epoch 时间戳(> 1.7e12 即 2024+)
         assert!(mtime_ms > 1_700_000_000_000, "got {mtime_ms}");
+    }
+    // ── 0.9 回归:offset/limit 溢出 ─────────────────────────────────
+
+    /// 回归(0.9):`limit` 极大时不得 panic。
+    /// 修复前 `offset + l` 在 release 下回绕成 0,而
+    /// `start = offset.min(total)` 仍是 offset → `lines[offset..0]`
+    /// 触发 "slice index starts at .. but ends at .." panic。
+    #[tokio::test]
+    async fn huge_limit_does_not_panic() {
+        let ws = tmp_workspace();
+        std::fs::write(ws.join("a.txt"), "l1\nl2\nl3\n").unwrap();
+        let t = ReadTool;
+        for limit in [u64::MAX, usize::MAX as u64, 1 << 63] {
+            let out = t
+                .execute(
+                    make_ctx(&ws),
+                    serde_json::json!({"path": "a.txt", "offset": 1, "limit": limit}),
+                )
+                .await
+                .unwrap();
+            assert!(!out.is_error, "limit={limit} 应正常返回");
+        }
+    }
+
+    /// 回归(0.9):`offset` 极大时同样不得 panic(超出总行数 → 空结果)。
+    #[tokio::test]
+    async fn huge_offset_does_not_panic() {
+        let ws = tmp_workspace();
+        std::fs::write(ws.join("a.txt"), "l1\nl2\n").unwrap();
+        let t = ReadTool;
+        let out = t
+            .execute(
+                make_ctx(&ws),
+                serde_json::json!({"path": "a.txt", "offset": u64::MAX, "limit": 10}),
+            )
+            .await
+            .unwrap();
+        assert!(!out.is_error);
+    }
+
+    /// 回归(0.9):offset + limit 同时极大(回绕的最坏组合)。
+    #[tokio::test]
+    async fn huge_offset_and_limit_together_does_not_panic() {
+        let ws = tmp_workspace();
+        std::fs::write(ws.join("a.txt"), "l1\n").unwrap();
+        let t = ReadTool;
+        let out = t
+            .execute(
+                make_ctx(&ws),
+                serde_json::json!({"path": "a.txt", "offset": u64::MAX, "limit": u64::MAX}),
+            )
+            .await
+            .unwrap();
+        assert!(!out.is_error);
+    }
+
+    /// 回归:schema 必须声明 `maximum`,否则弱模型不知道有上界。
+    #[test]
+    fn schema_declares_upper_bounds() {
+        let t = ReadTool;
+        let schema = t.parameters_schema();
+        for k in ["offset", "limit"] {
+            let max = schema["properties"][k]["maximum"].as_u64();
+            assert!(max.is_some(), "{k} 必须声明 maximum");
+            assert_eq!(max, Some((MAX_LINE_INDEX) as u64));
+        }
     }
 }
