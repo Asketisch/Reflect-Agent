@@ -26,6 +26,8 @@ make test-fast                            # cargo nextest(需已安装 cargo-nex
 make test-changed                         # nextest 只跑自 HEAD 起受变更影响的测试
 cargo test -p reflect-core <test_name>    # 单个测试
 cargo test -p reflect-tools -p reflect-hooks    # 多 crate
+./tests/run_all.sh functional             # 功能覆盖门禁(能力覆盖层 + Rust 参数面 + 双 SDK 绑定层)
+./tests/run_all.sh functional-layer       # 只跑能力覆盖层(Python 打真二进制,原始 wire)
 
 # Lint / 格式(CI 强制,-D warnings)
 cargo clippy --workspace --all-targets -- -D warnings
@@ -73,6 +75,44 @@ make gc                                   # 清 target/debug 中 cargo 不 GC �
   - `ToolError` 定义在 reflect-protocol,用于打破 tools ↔ hooks 循环依赖
   - StateGraph 用 enum + match 手写转移,不引入 petgraph
   - 错误处理:库 crate 用 `thiserror`,应用层(exec/cli)用 `anyhow`
+
+## 开发流程检查表(改任何代码前必读)
+
+**新功能**或 **bug 修复**提交前,必须逐条走完:
+
+1. **能力覆盖脚本同步** —— 判断本次改动是否需要新增 / 更新能力覆盖用例:
+   - 改了 agent 能力(serve 协议 Op / EventMsg / 内置工具 / 审批 / 编排 /
+     持久化 / 重连恢复 / CLI 能力面)
+     → 必须在 `tests/functional/` 有对应用例,断言到**字段级**
+       (不接受"退出码 0"或"不抛错"作为能力断言);
+   - 已有相关用例 → 检查是否需要**更新**(断言口径变了 / 新增字段 / 语义变化);
+   - 能力覆盖用例**只写在 `tests/functional/`** —— 不要在 SDK 测试里重复写
+     协议/能力断言;`tests/rust/*.sh` 是 CLI **参数面**的老套件,新增能力
+     不往里加(能力面统一用 Python 写)。
+2. **SDK 测试脚本同步** —— 改了协议 / SDK 公开行为 / 事件形状时,**两个 SDK
+   都要看**:
+   - Python SDK:`sdks/python/tests/`(纯逻辑,mock serve)与
+     `tests/sdk-python/`(真二进制绑定层);
+   - TS SDK:`sdks/typescript/tests/`(纯逻辑,mock serve)与
+     `tests/sdk-ts/`(真二进制绑定层);
+   - 协议变更是 additive 也必须同步 —— SDK 遇到未知变体要能降级不崩。
+3. **覆盖矩阵同步** —— `tests/COVERAGE.md` 的「能力 × 覆盖层」映射表随改动
+   更新:新增能力补一行;移除能力移到「未覆盖项」并写明原因;发现的 SDK 缺陷
+   记入「已知缺陷」。
+4. **验证** —— 按下方「验证矩阵」跑对应命令,全绿再提交。
+5. **注释与提交信息** —— 注释一律中文;commit 用 `type(scope): 描述`
+   conventional 风格。
+
+## 验证矩阵(按改动范围选跑)
+
+| 改动范围 | 必跑命令 |
+|---|---|
+| 任何改动 | `cargo fmt --all` + `cargo clippy --workspace --all-targets -- -D warnings` |
+| Rust 核心 / crate | `cargo test --workspace` |
+| serve 协议 / 事件 / 持久化 / 工具 / 编排 / 重连 | `./tests/run_all.sh functional`(能力覆盖层 + Rust 参数面 + 双 SDK 绑定层) |
+| 仅 SDK 绑定逻辑 | `./tests/run_all.sh sdk-python` + `./tests/run_all.sh sdk-ts` |
+| CLI 子命令参数面 | `./tests/run_all.sh rust` |
+| 文档 / 注释 | 无需跑测试,自查链接与命令是否仍有效 |
 
 ## 约定
 
