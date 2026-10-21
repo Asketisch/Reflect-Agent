@@ -11,6 +11,9 @@
 #   7. tools_drive.sh       内置工具全量驱动(mock LLM 逐工具调一遍)
 #   8. integrations.sh      MCP/skill/notes/bubble/热重载/plugin 集成链路
 #
+# `REFLECT_SKIP_WORKSPACE=1` 时跳过第 1 步(cargo test / clippy / fmt / doc)
+# —— CI 的 `functional` 门禁入口用此模式:那部分由既有 CI job 覆盖。
+#
 # 全程离线(REFLECT_MODEL=mock)+ 隔离 HOME,不污染真实 ~/.reflect。
 # 退出码 0 = 全部通过。
 
@@ -29,11 +32,18 @@ fi
 
 TOTAL_RC=0
 
-echo
-echo "════════════════════════════════════════════════"
-echo "  1/8 workspace 测试(cargo test + lint + doc)"
-echo "════════════════════════════════════════════════"
-bash "$HERE/workspace_tests.sh" || TOTAL_RC=1
+if [ "${REFLECT_SKIP_WORKSPACE:-0}" = "1" ]; then
+    echo
+    echo "════════════════════════════════════════════════"
+    echo "  1/8 workspace 测试 —— 跳过(REFLECT_SKIP_WORKSPACE=1)"
+    echo "════════════════════════════════════════════════"
+else
+    echo
+    echo "════════════════════════════════════════════════"
+    echo "  1/8 workspace 测试(cargo test + lint + doc)"
+    echo "════════════════════════════════════════════════"
+    bash "$HERE/workspace_tests.sh" || TOTAL_RC=1
+fi
 
 echo
 echo "════════════════════════════════════════════════"
