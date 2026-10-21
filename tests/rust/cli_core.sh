@@ -80,8 +80,11 @@ cli_core_exec() {
         jq -e 'select(.msg.type=="turn_complete")' exec3.jsonl
 
     # 2d. plan-mode 旗标(mock 下文本回复,不触发写工具)
-    tcase "exec --plan-mode 退出 0" \
-        env REFLECT_MODEL=mock "$REFLECT_BIN" exec --plan-mode "计划一下"
+    #     约定:请求了 Plan mode 但 turn 结束仍**未见 PlanReady** → 计划生成
+    #     失败,按 docs/PLAN_MODE.md 以 122 退出(供调用方判断重试)。
+    #     见 crates/runtime/reflect-exec/src/lib.rs:PLAN_MODE_EXIT_CODE。
+    env REFLECT_MODEL=mock "$REFLECT_BIN" exec --plan-mode "计划一下" >/dev/null 2>&1
+    tcase "exec --plan-mode 未产出计划退出 122" test $? -eq 122
 
     # 2e. resume 三选一互斥(clap 层拒绝)
     "$REFLECT_BIN" exec --resume some-uuid -c "x" >/dev/null 2>&1
