@@ -1,22 +1,28 @@
-// reflect-agent TS SDK 端到端测试(驱动真实 `reflect serve` 二进制)。
+// TS SDK 绑定层:SDK 客户端自身的行为(不测服务端语义)。
 //
-// 与 sdks/typescript/tests/protocol.test.ts(mock serve)互补:本文件
-// spawn **真二进制**,用 mock provider(REFLECT_MODEL=mock)+ mock 脚本
-// 驱动确定性回合,覆盖:
+// 与能力覆盖层(tests/functional/,Python 原始 wire 打真二进制)互补:
+// 本文件驱动**真二进制**,但断言的是 **TS SDK 怎么反应** —— 迭代器何时
+// 收尾、handler 怎么被调、close 怎么收尾。
+//
+// 覆盖(5 条):
 //   1. spawn → session_configured 握手;
-//   2. prompt 单轮 → mock 脚本文本回流;
-//   3. 多轮 prompt 上下文保持;
-//   4. registerTool → LLM 调用 → 客户端执行 → 回执 → turn_complete;
-//   5. interrupt → turn_aborted;
-//   6. close 幂等优雅退出。
+//   2. 单轮 prompt 文本回流;
+//   3. registerTool → LLM 调用 → 客户端执行 → 回执 → turn_complete;
+//   4. 非 turn op 收尾(submit 迭代器以 submission_closed 结束);
+//   5. close 幂等 + 子进程退出码 0。
 //
-// 运行:tests/sdk-ts/run.sh(内部 `node --test`),或
-//   REFLECT_BIN=... node --test tests/sdk-ts/
+// 为什么还留这 5 条:历史证明只有「真二进制」这一层能发现协议漂移 ——
+// v1.3 之前两 SDK 迭代器在非 turn op 上永久挂起、TS approve 发
+// {type:'approve'} 导致审批永久挂起,这两个缺陷在 mock serve 层都测不出来
+// (mock 是自己写的假服务端,不会随真协议演进)。
+//
+// 运行:tests/run_all.sh sdk-ts,或
+//   REFLECT_BIN=... node --test tests/sdk-ts/real-bin.test.mjs
 
 import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { after, before, describe, it } from 'node:test';
+import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 // 直接 import 构建产物 dist(与 scripts/sdk_smoke.sh 同路径约定),
@@ -28,21 +34,14 @@ const { ReflectAgent } = await import(
 const ROOT = new URL('../../', import.meta.url).pathname;
 const REFLECT_BIN = process.env.REFLECT_BIN ?? join(ROOT, 'target/release/reflect');
 
-// 隔离 HOME:预写关闭全部内置 hook 的最小 config.toml(理由同 Python 侧)。
+/** 隔离 HOME:预写关闭全部内置 hook 的最小 config.toml(理由同 Python 侧)。 */
 const home = mkdtempSync(join(tmpdir(), 'reflect-ts-home.'));
 mkdirSync(join(home, '.reflect'), { recursive: true });
 writeFileSync(
   join(home, '.reflect', 'config.toml'),
   '# 测试用最小配置:关闭全部内置 hook\n[hooks]\nenabled = []\n'
 );
-
-before(() => {
-  process.env.HOME = home;
-});
-after(() => {
-  delete process.env.REFLECT_MODEL;
-  delete process.env.REFLECT_MOCK_SCRIPT;
-});
+process.env.HOME = home;
 
 /** 构造指向真二进制 + mock provider 的 spawn 选项;写临时 mock 脚本。 */
 function makeOptions(scriptLines) {
@@ -56,13 +55,13 @@ function makeOptions(scriptLines) {
   return { bin: REFLECT_BIN, env };
 }
 
-describe('TS SDK × 真二进制', () => {
-  it('spawn 完成 session_configured 握手', async () => {
+describe('TS SDK 绑定层 × 真二进制', () => {
+  it('K1: spawn 完成 session_configured 握手', async () => {
     const agent = await ReflectAgent.spawn(makeOptions());
     await agent.close();
   });
 
-  it('prompt 单轮:mock 脚本文本回流', async () => {
+  it('K2: 单轮 prompt 文本回流', async () => {
     const agent = await ReflectAgent.spawn(
       makeOptions(['{"type":"text","text":"ts-e2e-reply"}'])
     );
@@ -73,22 +72,7 @@ describe('TS SDK × 真二进制', () => {
     }
   });
 
-  it('多轮 prompt 上下文保持', async () => {
-    const agent = await ReflectAgent.spawn(
-      makeOptions([
-        '{"type":"text","text":"first-reply"}',
-        '{"type":"text","text":"second-reply"}',
-      ])
-    );
-    try {
-      assert.equal(await agent.prompt('第一轮'), 'first-reply');
-      assert.equal(await agent.prompt('第二轮'), 'second-reply');
-    } finally {
-      await agent.close();
-    }
-  });
-
-  it('registerTool:LLM 调用 → 客户端执行 → 回执 → turn_complete', async () => {
+  it('K3: registerTool → LLM 调用 → 客户端执行 → 回执 → turn_complete', async () => {
     const calls = [];
     const agent = await ReflectAgent.spawn(
       makeOptions([
@@ -120,52 +104,24 @@ describe('TS SDK × 真二进制', () => {
     }
   });
 
-  it('interrupt 打断远程工具等待中的 turn(turn_aborted)', async () => {
-    // wire 语义(实测):turn_aborted 挂在 interrupt 这条 submission 自己的
-    // id 上 —— 用 submit(op, {submissionId}) 提交并在其迭代器上断言;
-    // 原 turn 在回执释放后照常 turn_complete。
-    let started = false;
-    let release = null;
-    const gate = new Promise((r) => (release = r));
+  it('K4: 非 turn op 的迭代器以 submission_closed 收尾', async () => {
+    // 没有 submission_closed,SDK 迭代器会永久挂起(v1.3 起 serve 在
+    // per-turn 通道排空后发这条收尾标记)。
     const agent = await ReflectAgent.spawn(
-      makeOptions([
-        '{"type":"tool_call","name":"slow_tool","args":{}}',
-        '{"type":"text","text":"after"}',
-      ])
+      makeOptions(['{"type":"text","text":"t1"}'])
     );
     try {
-      await agent.registerTool('slow_tool', 'block until released', { type: 'object' }, async () => {
-        started = true;
-        await gate;
-        return {
-          content: [{ type: 'text', text: 'slow result' }],
-          is_error: false,
-          metadata: {},
-          elapsed_ms: 0,
-        };
-      });
-      const turnEvents = await agent.submit('调慢工具');
-      // 轮询等 handler 进入等待(turn 阻塞在远程工具上)
-      const deadline = Date.now() + 10_000;
-      while (!started && Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 50));
+      const types = [];
+      for await (const ev of await agent.submit({ type: 'set_effort', effort: 'high' })) {
+        types.push(ev.msg.type);
       }
-      if (!started) throw new Error('handler 未被调用');
-      const intrEvents = await agent.submit({ type: 'interrupt' }, { submissionId: 'intr-1' });
-      const intrTypes = [];
-      for await (const ev of intrEvents) intrTypes.push(ev.msg.type);
-      release();
-      assert.ok(intrTypes.includes('turn_aborted'), `intr=${JSON.stringify(intrTypes)}`);
-      const turnTypes = [];
-      for await (const ev of turnEvents) turnTypes.push(ev.msg.type);
-      assert.ok(turnTypes.includes('turn_complete'), `turn=${JSON.stringify(turnTypes)}`);
+      assert.deepEqual(types, ['submission_closed'], `收尾异常:${types}`);
     } finally {
-      release();
       await agent.close();
     }
   });
 
-  it('close 幂等', async () => {
+  it('K6: close 幂等 + 子进程优雅退出', async () => {
     const agent = await ReflectAgent.spawn(makeOptions());
     await agent.close();
     await agent.close();
