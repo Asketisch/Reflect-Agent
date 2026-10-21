@@ -182,7 +182,11 @@ pub fn records_to_preload(records: &[RolloutRecord]) -> Vec<ChatMessage> {
             | RolloutRecord::PlanRequest { .. }
             | RolloutRecord::PlanReady { .. }
             | RolloutRecord::PlanRejected { .. }
-            | RolloutRecord::PermissionModeChanged { .. } => {}
+            | RolloutRecord::PermissionModeChanged { .. }
+            // v1.x:MemoryAccess 是记忆读写审计轨迹,不注入对话(与
+            // TokenCount 同类 —— 记忆内容本身已随 system prompt 走
+            // telemetry 层,回放不重复)。
+            | RolloutRecord::MemoryAccess { .. } => {}
         }
     }
 

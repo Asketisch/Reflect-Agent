@@ -130,8 +130,10 @@ impl Compactor {
         &self,
         messages: Vec<ChatMessage>,
     ) -> (Vec<ChatMessage>, ContextCompactedEvent) {
-        self.compact_with_prior_and_tokens(messages, None, None)
-            .await
+        let (out, evt, _memory_write) = self
+            .compact_with_prior_and_tokens(messages, None, None)
+            .await;
+        (out, evt)
     }
 
     /// 完整入口。当 `llm_reported_input_tokens` 为 `Some(n)` 时,
@@ -144,12 +146,20 @@ impl Compactor {
     /// - 若 LLM 异常地报告 0,本地估算仍能捕获超大 prompt;
     /// - 若本地估算偏低(如尚未计入系统工具 + skills 目录),
     ///   LLM 报告的总量是权威值。
+    ///
+    /// v1.x:第三返回值是本次压缩期间发生的记忆固化写入摘要 —— `Some`
+    /// 表示有事实被 append 进 MEMORY.md(供上层落盘审计);无固化 /
+    /// 未配置 consolidation 时为 `None`。
     pub async fn compact_with_prior_and_tokens(
         &self,
         messages: Vec<ChatMessage>,
         prev_summary: Option<&str>,
         llm_reported_input_tokens: Option<u32>,
-    ) -> (Vec<ChatMessage>, ContextCompactedEvent) {
+    ) -> (
+        Vec<ChatMessage>,
+        ContextCompactedEvent,
+        Option<MemoryWriteInfo>,
+    ) {
         let local_estimate = estimate_messages(&messages);
         let before_tokens = match llm_reported_input_tokens {
             Some(n) => n.max(local_estimate),
@@ -168,6 +178,7 @@ impl Compactor {
                     before_tokens,
                     after_tokens: before_tokens,
                 },
+                None,
             );
         }
 
@@ -191,6 +202,7 @@ impl Compactor {
                     before_tokens,
                     after_tokens,
                 },
+                None,
             );
         }
 
@@ -212,6 +224,7 @@ impl Compactor {
                     before_tokens,
                     after_tokens: after_sp_tokens,
                 },
+                None,
             );
         }
 
@@ -231,10 +244,11 @@ impl Compactor {
                     // v1.4 D2:记忆固化 —— LLM 摘要成功后追加提取长期事实
                     // 并 append 进目标 scope。失败仅 warn(固化是增益,
                     // 绝不阻断压缩主路径)。
+                    let mut memory_write: Option<MemoryWriteInfo> = None;
                     if let Some(cons) = &self.consolidation {
                         match self.summarizer.extract_memories(&after_sp).await {
                             Ok(facts) if !facts.is_empty() => {
-                                append_memories(cons, &facts);
+                                memory_write = Some(append_memories(cons, &facts));
                             }
                             Ok(_) => {}
                             Err(e) => {
@@ -264,6 +278,7 @@ impl Compactor {
                             before_tokens,
                             after_tokens,
                         },
+                        memory_write,
                     );
                 }
                 Err(e) => {
@@ -281,18 +296,37 @@ impl Compactor {
                 before_tokens,
                 after_tokens: after_sp_tokens,
             },
+            None,
         )
     }
+}
+
+/// v1.x:compact 期间记忆固化的写入摘要,由 `append_memories` 产生、
+/// `compact_with_prior_and_tokens` 透出,供上层(pre_loop)落盘审计。
+#[derive(Debug, Clone)]
+pub struct MemoryWriteInfo {
+    /// 实际写入的 scope。
+    pub scope: reflect_memory::MemoryScope,
+    /// agent 类型名。
+    pub agent: String,
+    /// 固化的条目数。
+    pub facts: usize,
+    /// 追加进 MEMORY.md 的字符数(不含原有内容)。
+    pub chars: usize,
 }
 
 /// v1.4 D2:把固化的记忆条目 append 进目标 scope —— 读取现有内容,
 /// 追加带时间戳的 `##` 条目后整体保存(FileMemoryStore 的 save 是
 /// 覆盖语义,append 在此层组装)。写入失败仅 warn。
-fn append_memories(target: &ConsolidationTarget, facts: &[String]) {
+///
+/// v1.x:返回写入摘要(scope / agent / 条目数 / 追加字符数),供上层落盘
+/// `RolloutRecord::MemoryAccess` 审计记录。
+fn append_memories(target: &ConsolidationTarget, facts: &[String]) -> MemoryWriteInfo {
     let existing = target
         .store
         .load(target.scope, &target.agent)
         .unwrap_or_default();
+    let existing_len = existing.len();
     let mut body = existing;
     if !body.is_empty() && !body.ends_with('\n') {
         body.push('\n');
@@ -302,6 +336,7 @@ fn append_memories(target: &ConsolidationTarget, facts: &[String]) {
     for f in facts {
         body.push_str(&format!("- {f}\n"));
     }
+    let appended_chars = body.len().saturating_sub(existing_len);
     if let Err(e) = target.store.save(target.scope, &target.agent, &body) {
         tracing::warn!(?e, "memory consolidation write failed");
     } else {
@@ -310,6 +345,12 @@ fn append_memories(target: &ConsolidationTarget, facts: &[String]) {
             scope = ?target.scope,
             "memory consolidation written"
         );
+    }
+    MemoryWriteInfo {
+        scope: target.scope,
+        agent: target.agent.clone(),
+        facts: facts.len(),
+        chars: appended_chars,
     }
 }
 
@@ -519,6 +560,86 @@ mod tests {
         assert!(saved.contains("aarch64 linux"));
     }
 
+    /// v1.x:compact_with_prior_and_tokens 的第三返回值透出记忆固化写入
+    /// 摘要(scope / agent / 条目数 / 追加字符数),供上层落盘审计。
+    #[tokio::test]
+    async fn consolidation_returns_memory_write_info() {
+        use crate::summarizer::SummarizerError;
+        use reflect_memory::{InMemoryStore, MemoryScope};
+
+        struct WithMemories(Arc<MockSummarizer>);
+        #[async_trait::async_trait]
+        impl crate::summarizer::Summarizer for WithMemories {
+            async fn summarize_full(&self, m: &[ChatMessage]) -> Result<String, SummarizerError> {
+                self.0.summarize_full(m).await
+            }
+            async fn summarize_recent(
+                &self,
+                m: &[ChatMessage],
+                p: Option<&str>,
+            ) -> Result<String, SummarizerError> {
+                self.0.summarize_recent(m, p).await
+            }
+            async fn extract_memories(
+                &self,
+                _m: &[ChatMessage],
+            ) -> Result<Vec<String>, SummarizerError> {
+                Ok(vec!["fact one".into(), "fact two".into()])
+            }
+        }
+
+        let store: std::sync::Arc<dyn reflect_memory::MemoryStore> =
+            Arc::new(InMemoryStore::default());
+        let c = Compactor::new(
+            CompactorConfig {
+                trigger_tokens: 100,
+                keep_recent_microcompact: 5,
+                keep_recent_smart_prune: 5,
+                target_ratio: 0.01,
+                summarize_after: true,
+                ..Default::default()
+            },
+            Arc::new(WithMemories(Arc::new(MockSummarizer {
+                canned: "fake summary".into(),
+                fail: false,
+            }))),
+        )
+        .with_memory_consolidation(store, MemoryScope::Session, "tester");
+        let msgs = huge_message_list();
+        let (_, evt, mem) = c.compact_with_prior_and_tokens(msgs, None, None).await;
+        assert!(matches!(
+            evt.strategy,
+            ContextCompactedStrategy::LlMSummarize
+        ));
+        let info = mem.expect("固化发生时应透出写入摘要");
+        assert_eq!(info.scope, MemoryScope::Session);
+        assert_eq!(info.agent, "tester");
+        assert_eq!(info.facts, 2);
+        assert!(info.chars > 0, "追加字符数应大于 0");
+    }
+
+    /// v1.x:未配置 consolidation 时第三返回值为 None(不阻断主路径)。
+    #[tokio::test]
+    async fn no_consolidation_yields_none_memory_write() {
+        let c = Compactor::new(
+            CompactorConfig {
+                trigger_tokens: 100,
+                keep_recent_microcompact: 5,
+                keep_recent_smart_prune: 5,
+                target_ratio: 0.01,
+                summarize_after: true,
+                ..Default::default()
+            },
+            Arc::new(MockSummarizer {
+                canned: "fake summary".into(),
+                fail: false,
+            }),
+        );
+        let msgs = huge_message_list();
+        let (_, _evt, mem) = c.compact_with_prior_and_tokens(msgs, None, None).await;
+        assert!(mem.is_none());
+    }
+
     #[tokio::test]
     async fn fallback_to_smart_prune_when_summarize_fails() {
         let c = Compactor::new(
@@ -648,7 +769,7 @@ mod tests {
             }),
         );
         let msgs = huge_message_list();
-        let (_out, evt) = c.compact_with_prior_and_tokens(msgs, None, None).await;
+        let (_out, evt, _mem) = c.compact_with_prior_and_tokens(msgs, None, None).await;
         assert!(!matches!(evt.strategy, ContextCompactedStrategy::Noop));
     }
 
@@ -671,7 +792,7 @@ mod tests {
         let msgs = vec![ChatMessage::User(UserContent {
             blocks: vec![ContentBlock::text("hi")],
         })];
-        let (_out, evt) = c
+        let (_out, evt, _mem) = c
             .compact_with_prior_and_tokens(msgs, None, Some(50_000))
             .await;
         assert!(
@@ -699,7 +820,7 @@ mod tests {
             }),
         );
         let msgs = huge_message_list();
-        let (_out, evt) = c
+        let (_out, evt, _mem) = c
             .compact_with_prior_and_tokens(msgs, None, Some(8_000))
             .await;
         assert!(
@@ -745,7 +866,7 @@ mod tests {
             local > 7000,
             "test setup wrong: local estimate {local} should exceed micro-threshold 7000"
         );
-        let (_out, evt) = c.compact_with_prior_and_tokens(msgs, None, Some(0)).await;
+        let (_out, evt, _mem) = c.compact_with_prior_and_tokens(msgs, None, Some(0)).await;
         assert!(
             !matches!(evt.strategy, ContextCompactedStrategy::Noop),
             "llm=0 must not suppress local-estimate over-budget, got strategy {:?}",

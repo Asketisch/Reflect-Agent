@@ -113,6 +113,8 @@ fn compaction_summary_becomes_leading_system() {
             strategy: "microcompact".into(),
             removed_count: 4,
             summary: "会话摘要:讨论了 X".into(),
+            before_tokens: 0,
+            after_tokens: 0,
         },
         // 后续消息保留(全量历史 + 摘要前置是既定语义)。
         msg(MessageRole::User, serde_json::json!("新问题")),
@@ -142,6 +144,8 @@ fn audit_records_ignored() {
             turn_id: TurnId::new(),
             usage: Default::default(),
             cost_usd: None,
+            model: None,
+            provider: None,
             at: chrono::Utc::now(),
         },
         msg(MessageRole::User, serde_json::json!("唯一有效消息")),

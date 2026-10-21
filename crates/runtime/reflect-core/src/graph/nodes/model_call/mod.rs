@@ -160,7 +160,18 @@ pub async fn model_call(state: &mut AgentState, ctx: &NodeContext) -> Option<Gra
         let next_client = match ctx.registry.next_for(&spec, &exclude) {
             Some(nc) => nc,
             None => {
-                failed(tried.clone(), ctx, "ALL_CREDENTIALS_EXHAUSTED").await;
+                // 无可用 client —— provider 未知(这正是耗尽的表现),
+                // span 的 provider 字段留空。
+                failed(
+                    tried.clone(),
+                    ctx,
+                    "ALL_CREDENTIALS_EXHAUSTED",
+                    &spec,
+                    None,
+                    attempt,
+                    llm_call_started,
+                )
+                .await;
                 return None;
             }
         };
@@ -175,7 +186,16 @@ pub async fn model_call(state: &mut AgentState, ctx: &NodeContext) -> Option<Gra
                 label: label.clone(),
                 outcome: "max_attempts".into(),
             });
-            failed(tried.clone(), ctx, "MAX_ATTEMPTS").await;
+            failed(
+                tried.clone(),
+                ctx,
+                "MAX_ATTEMPTS",
+                &spec,
+                Some(&provider_name),
+                attempt,
+                llm_call_started,
+            )
+            .await;
             return None;
         }
         let cred_attempt = per_cred_attempts.entry(cred_ptr).or_insert(0);
@@ -269,6 +289,16 @@ pub async fn model_call(state: &mut AgentState, ctx: &NodeContext) -> Option<Gra
                                 }),
                             ))
                             .await;
+                        // v1.x:补一条 failed span(此前失败调用在 telemetry
+                        // 里完全不可见)。
+                        record_failed_model_call(
+                            ctx,
+                            &spec,
+                            Some(&provider_name),
+                            attempt,
+                            &e.to_string(),
+                            llm_call_started,
+                        );
                         return None;
                     }
                     RetryAction::Failover => {}
@@ -371,7 +401,20 @@ pub async fn model_call(state: &mut AgentState, ctx: &NodeContext) -> Option<Gra
                     continue;
                 }
                 RetryAction::CooldownAndFailover { .. } => continue,
-                RetryAction::GiveUp => return None,
+                RetryAction::GiveUp => {
+                    // v1.x:mid-stream 错误彻底放弃时补一条 failed span
+                    // (错误详情已由 process_stream_events 发 StreamError
+                    // 事件,这里只记 span 骨架)。
+                    record_failed_model_call(
+                        ctx,
+                        &spec,
+                        Some(&provider_name),
+                        attempt,
+                        "stream error (give up)",
+                        llm_call_started,
+                    );
+                    return None;
+                }
             },
         }
     };
@@ -506,6 +549,9 @@ pub async fn model_call(state: &mut AgentState, ctx: &NodeContext) -> Option<Gra
                 cost_usd,
                 provider: Some(success_provider.clone()),
                 credential_label: Some(success_label.clone()),
+                // v1.x 模型级统计:完整 model spec,供 TUI / GUI 实时按模型
+                // 展示用量。
+                model: Some(model.clone()),
             }),
         ))
         .await;
@@ -514,12 +560,16 @@ pub async fn model_call(state: &mut AgentState, ctx: &NodeContext) -> Option<Gra
     // 复用已计算好的 `usage` 与 `cost_usd`(不重新调 `price()`,避免两次调用
     // 对未在 pricing 表的 model 行为不一致)。best-effort:`record()` 失败仅
     // warn,不 abort 当前 turn —— model_call 不能因落盘失败中断主流程。
+    // `model` / `provider` 供 `session_stats` 按模型分组聚合(旧 JSONL 无
+    // 这两字段,聚合方回退 SessionMeta.model)。
     if let Some(recorder) = ctx.recorder.clone() {
         recorder
             .record(RolloutRecord::TokenCount {
                 turn_id: ctx.turn_id,
                 usage: usage.clone(),
                 cost_usd,
+                model: Some(model.clone()),
+                provider: Some(success_provider.clone()),
                 at: chrono::Utc::now(),
             })
             .await
@@ -547,8 +597,10 @@ pub async fn model_call(state: &mut AgentState, ctx: &NodeContext) -> Option<Gra
             })).collect::<Vec<_>>(),
         });
         // req_record:完整 messages + system + thinking + cache_control + tool 名;
-        // 工具只留名避免存完整 ToolSpec 体量过大。
-        let req_record = serde_json::json!({
+        // 工具默认只留名避免存完整 ToolSpec 体量过大;v1.x:
+        // `[telemetry].record_tool_schemas = true` 时额外记完整 schema
+        // (name + description + parameters JSON Schema)。
+        let mut req_record = serde_json::json!({
             "model": model,
             "attempt": attempt,
             "provider": success_provider,
@@ -559,6 +611,10 @@ pub async fn model_call(state: &mut AgentState, ctx: &NodeContext) -> Option<Gra
             "thinking": serde_json::to_value(&request.thinking).unwrap_or(serde_json::Value::Null),
             "cache_control": serde_json::to_value(&request.cache_control).unwrap_or(serde_json::Value::Null),
         });
+        if sink.record_tool_schemas() {
+            req_record["tool_schemas"] =
+                serde_json::to_value(&request.tools).unwrap_or(serde_json::Value::Null);
+        }
         sink.record_model_call(
             None,
             Some(&ctx.turn_id.to_string()),
@@ -653,7 +709,20 @@ pub async fn model_call(state: &mut AgentState, ctx: &NodeContext) -> Option<Gra
 }
 
 /// v1.0 多 Provider 路由:`model_call` 全部 candidate 失败时的收尾路径。
-async fn failed(tried: Vec<TriedCredential>, ctx: &NodeContext, code: &'static str) {
+///
+/// v1.x:收尾时补一条 `model.request.failed` span —— 此前 4 个失败路径
+/// 全部直接 `return None`,`record_model_call` 的调用点又全部硬编码
+/// `Completed`,导致失败调用在 telemetry 里完全不可见。
+async fn failed(
+    tried: Vec<TriedCredential>,
+    ctx: &NodeContext,
+    code: &'static str,
+    model: &str,
+    provider: Option<&str>,
+    attempt: u32,
+    started: std::time::Instant,
+) {
+    record_failed_model_call(ctx, model, provider, attempt, code, started);
     let _ = ctx
         .event_tx
         .send(Event::new(
@@ -665,4 +734,42 @@ async fn failed(tried: Vec<TriedCredential>, ctx: &NodeContext, code: &'static s
             }),
         ))
         .await;
+}
+
+/// v1.x:LLM 调用彻底失败时补一条 failed span(带 attempt / duration /
+/// 错误摘要)。usage 全 0 —— 流未完成,本就没有权威 usage;model-io 记录
+/// 的 response 带 error 摘要,便于离线分析失败原因。
+fn record_failed_model_call(
+    ctx: &NodeContext,
+    model: &str,
+    provider: Option<&str>,
+    attempt: u32,
+    error: &str,
+    started: std::time::Instant,
+) {
+    let Some(sink) = ctx.telemetry.as_ref() else {
+        return;
+    };
+    if !sink.enabled() {
+        return;
+    }
+    let bare_model = model.split_once('/').map(|(_, m)| m).unwrap_or(model);
+    let model_ref = reflect_telemetry::ModelRef {
+        model_id: bare_model.to_string(),
+        provider_id: provider.map(|s| s.to_string()),
+        role: Some("main".into()),
+        source: Some("main_turn".into()),
+    };
+    sink.record_model_call(
+        None,
+        Some(&ctx.turn_id.to_string()),
+        model_ref,
+        serde_json::json!({ "model": model, "attempt": attempt }),
+        serde_json::json!({ "error": error }),
+        reflect_telemetry::UsageSnapshot::default(),
+        started.elapsed().as_millis() as u64,
+        attempt,
+        reflect_telemetry::SpanStatus::Failed,
+        "main_turn",
+    );
 }

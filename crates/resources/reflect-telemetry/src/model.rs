@@ -157,8 +157,12 @@ pub struct ModelIoRecord {
     /// 调用来源,同 [`ModelRef::source`]。
     pub query_source: String,
     pub model: ModelRef,
-    /// 简化的请求体(`{model, tool_names, message_count, system_summary}`),
-    /// 已脱敏 + 截断。完整 messages 体量过大,只保留元信息 + tool 名。
+    /// 完整请求体(`{model, attempt, provider, credential_label, messages,
+    /// system, tool_names, thinking, cache_control}`),已脱敏 + 逐字段
+    /// 截断(16 KiB 或 `[telemetry].max_bytes`)。v1.x:
+    /// `[telemetry].record_tool_schemas = true` 时额外带 `tool_schemas`
+    /// (完整 ToolSpec JSON)。messages 数组整体不设上限 —— 单字段截断
+    /// 已防失控,长会话的 messages 会很长但每条字段有界。
     pub request: serde_json::Value,
     /// 简化的响应体(`{finish_reason, text(截断), tool_calls, usage}`),
     /// 已脱敏。
@@ -228,6 +232,29 @@ pub fn new_trace_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+/// v1.x:telemetry 写入配置(`[telemetry]` 段的 `redact` / `max_bytes`)。
+///
+/// 此前这两个配置项在 schema 里定义了但 `build_telemetry_sink` 从未读取
+/// —— 脱敏无条件硬启、截断用编译期常量。本结构让它们真正生效:
+/// - `redact = false` 时跳过密钥 pattern 脱敏(仅截断仍生效);
+/// - `max_bytes` 覆盖默认 16 KiB 字段截断阈值。
+#[derive(Debug, Clone)]
+pub struct TelemetryWriteConfig {
+    /// 是否做密钥 pattern 脱敏(默认 true)。
+    pub redact: bool,
+    /// 单字符串字段截断阈值(字节,默认 `MAX_FIELD_CHARS`)。
+    pub max_bytes: usize,
+}
+
+impl Default for TelemetryWriteConfig {
+    fn default() -> Self {
+        Self {
+            redact: true,
+            max_bytes: MAX_FIELD_CHARS,
+        }
+    }
+}
+
 /// 对一个 JSON value 做递归脱敏。两道关卡,顺序固定:
 ///
 /// 1. **密钥 pattern 脱敏**(`reflect_sanitize::redact_string`,10 类默认
@@ -237,15 +264,23 @@ pub fn new_trace_id() -> String {
 ///
 /// 对齐 rollout `redact_value`,两处行为一致。
 pub fn redact_value(v: &mut serde_json::Value) {
-    use reflect_sanitize::redact_string;
+    redact_value_with(v, &TelemetryWriteConfig::default());
+}
+
+/// [`redact_value`] 的可配置版本(v1.x):`redact = false` 跳过密钥脱敏,
+/// `max_bytes` 覆盖截断阈值。
+pub fn redact_value_with(v: &mut serde_json::Value, cfg: &TelemetryWriteConfig) {
     match v {
         serde_json::Value::String(s) => {
-            *s = redact_string(s);
+            if cfg.redact {
+                use reflect_sanitize::redact_string;
+                *s = redact_string(s);
+            }
             // 0.8:`String::truncate` 在非 char 边界会 panic。trace 里存的
             // 是完整 prompt / 工具输出,CJK 内容极常见。与 rollout
             // `redact_value` 同一修法。
-            if s.len() > MAX_FIELD_CHARS {
-                let cut = MAX_FIELD_CHARS.saturating_sub(REDACTION_MARKER.len());
+            if s.len() > cfg.max_bytes {
+                let cut = cfg.max_bytes.saturating_sub(REDACTION_MARKER.len());
                 // `truncate_str` 返回 &str(借自 s),先取长度再原地截断,
                 // 避免 `truncate(0)` + `push_str` 的双次拷贝。
                 let kept_len = reflect_protocol::truncate_str(s, cut).len();
@@ -255,12 +290,12 @@ pub fn redact_value(v: &mut serde_json::Value) {
         }
         serde_json::Value::Array(items) => {
             for item in items {
-                redact_value(item);
+                redact_value_with(item, cfg);
             }
         }
         serde_json::Value::Object(map) => {
             for (_k, val) in map.iter_mut() {
-                redact_value(val);
+                redact_value_with(val, cfg);
             }
         }
         _ => {}
@@ -269,8 +304,16 @@ pub fn redact_value(v: &mut serde_json::Value) {
 
 /// 脱敏后序列化为单行 JSON 字符串。
 pub fn serialize_redacted<T: Serialize>(v: &T) -> serde_json::Result<String> {
+    serialize_redacted_with(v, &TelemetryWriteConfig::default())
+}
+
+/// [`serialize_redacted`] 的可配置版本(v1.x)。
+pub fn serialize_redacted_with<T: Serialize>(
+    v: &T,
+    cfg: &TelemetryWriteConfig,
+) -> serde_json::Result<String> {
     let mut val = serde_json::to_value(v)?;
-    redact_value(&mut val);
+    redact_value_with(&mut val, cfg);
     serde_json::to_string(&val)
 }
 

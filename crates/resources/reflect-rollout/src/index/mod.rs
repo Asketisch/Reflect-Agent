@@ -7,12 +7,19 @@
 //! v0.2.4 新增 [`list_sessions_with_discussion`]:只列出 JSONL 文件中
 //! 包含指定 `discussion_id` 的 `RolloutRecord::DiscussionTranscript`
 //! 记录的 session。
+//!
+//! v1.x 新增 [`stats`] 子模块:`session_stats` / `all_model_usage`
+//! 全量扫描(活跃 + 轮转文件)按模型聚合 token 用量。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use reflect_protocol::{MessageRole, RolloutRecord, SessionInfo, ThreadId, TurnId};
+
+mod stats;
+
+pub use stats::{all_model_usage, session_stats};
 
 /// 扫描 `<base>/**/*.jsonl`,为每个 **session** 返回一条
 /// [`SessionInfo`](按 `session_id` 去重)。开销低:每个文件只读首行。

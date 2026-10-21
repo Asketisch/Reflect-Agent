@@ -10,8 +10,10 @@
 //! - body:`{"batch": [{"id","type","timestamp","body"}, ...]}`。
 //! - `type` ∈ `trace-create` / `span-create` / `span-update` / `generation-create`。
 //!
-//! 映射策略(简化):每个 turn/model/tool span 投一条 `span-create`(首次)或
-//! `span-update`(completed/failed),trace_id 复用本地 trace_id。
+//! 映射策略(简化):每个 turn/model/tool span 投一条 `span-create`(`.started`
+//! 结尾事件)或 `span-update`(其余),trace_id 复用本地 trace_id。
+//! **不投 `trace-create` / `generation-create`** —— 本地 span 流没有
+//! trace 根事件,generation 语义由 span 的 context.usage 承载。
 //! v2 可细化 event 类型与字段。
 
 use std::sync::Arc;

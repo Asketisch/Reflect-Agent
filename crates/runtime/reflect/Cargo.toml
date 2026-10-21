@@ -17,6 +17,7 @@ reflect-skills     = { workspace = true }
 reflect-agent-def  = { workspace = true }
 reflect-compact    = { workspace = true }
 reflect-rollout    = { workspace = true }
+reflect-telemetry  = { workspace = true }
 reflect-subagent   = { workspace = true }
 reflect-discussion = { workspace = true }
 reflect-config     = { workspace = true }

@@ -648,6 +648,39 @@ mod tests {
     }
 
     #[test]
+    fn token_count_with_model_roundtrip() {
+        // v1.x 模型级统计:`model` 字段 Some/None 两个分支 roundtrip,
+        // None 时序列化省略(与 provider / credential_label 同策略)。
+        let ev = EventMsg::TokenCount(TokenCountEvent {
+            input_tokens: 100,
+            output_tokens: 20,
+            cached_tokens: 0,
+            cache_write_tokens: 0,
+            total_tokens: 120,
+            cost_usd: None,
+            model: Some("openai/gpt-4o".into()),
+            ..Default::default()
+        });
+        let j = serde_json::to_string(&ev).unwrap();
+        assert!(j.contains(r#""model":"openai/gpt-4o""#), "got: {j}");
+        let back: EventMsg = serde_json::from_str(&j).unwrap();
+        match back {
+            EventMsg::TokenCount(e) => {
+                assert_eq!(e.model.as_deref(), Some("openai/gpt-4o"));
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+
+        // None 分支:序列化时省略。
+        let ev_none = EventMsg::TokenCount(TokenCountEvent {
+            total_tokens: 0,
+            ..Default::default()
+        });
+        let j = serde_json::to_string(&ev_none).unwrap();
+        assert!(!j.contains("\"model\""), "None must be skipped, got: {j}");
+    }
+
+    #[test]
     fn token_count_backward_compat_with_m7_wire() {
         // M8:M7 producer 没有 `cache_write_tokens` 或 `cost_usd`。
         // M8 consumer 必须仍能接受 M7 的 wire 格式。

@@ -759,11 +759,14 @@ fn truncate_session_after_turn_none_drops_last_turn() {
 use reflect_protocol::TokenUsage;
 
 /// 写一条 `RolloutRecord::TokenCount` 单行 JSONL。
+/// v1.x:`model` / `provider` 可选(模型级统计字段;旧记录为 None)。
 fn token_count_line(usage: TokenUsage, cost_usd: Option<f64>) -> String {
     serde_json::to_string(&RolloutRecord::TokenCount {
         turn_id: TurnId::new(),
         usage,
         cost_usd,
+        model: None,
+        provider: None,
         at: chrono::Utc::now(),
     })
     .unwrap()

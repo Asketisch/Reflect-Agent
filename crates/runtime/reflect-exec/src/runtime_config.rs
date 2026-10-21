@@ -63,7 +63,21 @@ pub(crate) fn build_telemetry_sink(
         .clone()
         .unwrap_or_else(|| reflect_telemetry::resolve_traces_dir(None));
     let session_id = uuid::Uuid::new_v4().to_string();
-    let sink = reflect_telemetry::TelemetrySink::new(base_dir, session_id);
+    // v1.x:redact / max_bytes / record_tool_schemas 三个配置项此前在
+    // schema 里定义了但从未读取 —— 现在经 new_with_config 真正生效。
+    let write_cfg = reflect_telemetry::TelemetryWriteConfig {
+        redact: section.should_redact(),
+        max_bytes: section
+            .max_bytes
+            .map(|n| n as usize)
+            .unwrap_or(reflect_telemetry::model::MAX_FIELD_CHARS),
+    };
+    let sink = reflect_telemetry::TelemetrySink::new_with_config(
+        base_dir,
+        session_id,
+        write_cfg,
+        section.should_record_tool_schemas(),
+    );
 
     // P2 `langfuse`:若 [langfuse] 配了 endpoint + public/secret key,启动
     // cloud HTTP exporter 并挂到 sink(本地 JSONL + Langfuse 并行投递)。

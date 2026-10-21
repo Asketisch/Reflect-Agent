@@ -29,6 +29,7 @@ pub mod types;
 pub mod writer;
 
 pub use export::{MAX_MARKDOWN_CHARS, to_markdown};
+pub use index::{all_model_usage, session_stats};
 pub use reader::{replay, replay_path};
 pub use writer::JsonlRolloutWriter;
 

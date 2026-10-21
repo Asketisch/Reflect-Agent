@@ -27,6 +27,7 @@ pub mod op;
 pub mod op_prompt;
 pub mod question;
 pub mod recorder;
+pub mod stats;
 pub mod submission;
 pub mod text;
 
@@ -60,7 +61,8 @@ pub use question::{
     MIN_OPTIONS, Question, QuestionError, QuestionOption,
 };
 pub use recorder::{
-    MessageRole, NullRecorder, RolloutRecord, RolloutRecorder, SessionInfo, derive_title,
+    MemoryOp, MessageRole, NullRecorder, RolloutRecord, RolloutRecorder, SessionInfo, derive_title,
 };
+pub use stats::{ModelUsage, SessionStats};
 pub use submission::{Submission, W3cTraceContext};
 pub use text::{floor_char_boundary, truncate_chars, truncate_str, truncate_string_in_place};

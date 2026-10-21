@@ -103,7 +103,9 @@ pub async fn pre_loop(state: &mut AgentState, ctx: &NodeContext) -> Option<Graph
         )
     };
 
-    let (compacted, evt) = if compact_denied {
+    // v1.x:第三返回值是记忆固化写入摘要(compact 期间 append 进 MEMORY.md
+    // 的事实),供下方落盘 MemoryAccess 审计。
+    let (compacted, evt, memory_write) = if compact_denied {
         tracing::info!("PreCompact hook denied; skipping compaction this round");
         (
             state.messages.messages.clone(),
@@ -113,6 +115,7 @@ pub async fn pre_loop(state: &mut AgentState, ctx: &NodeContext) -> Option<Graph
                 before_tokens: 0,
                 after_tokens: 0,
             },
+            None,
         )
     } else {
         m4.compactor
@@ -198,8 +201,28 @@ pub async fn pre_loop(state: &mut AgentState, ctx: &NodeContext) -> Option<Graph
                         strategy: strategy_str.into(),
                         removed_count,
                         summary: summary_text.unwrap_or_default(),
+                        // v1.x:压缩前后 token 估算落盘(此前只在内存事件里,
+                        // 会话统计无法回答「压缩省了多少」)。
+                        before_tokens,
+                        after_tokens,
                     })
                     .await;
+                // v1.x:记忆固化写入审计 —— compact 的 LLM 摘要成功后
+                // 把提取的事实 append 进了 MEMORY.md(此前只有 tracing
+                // 日志,无持久化)。
+                if let Some(info) = &memory_write {
+                    let _ = rec
+                        .record(RolloutRecord::MemoryAccess {
+                            turn_id: ctx.turn_id,
+                            op: reflect_protocol::MemoryOp::Write,
+                            scope: info.scope.to_string(),
+                            agent_type: info.agent.clone(),
+                            chars: info.chars as u32,
+                            entries: info.facts as u32,
+                            at: chrono::Utc::now(),
+                        })
+                        .await;
+                }
             }
         }
     }
@@ -253,6 +276,30 @@ pub async fn pre_loop(state: &mut AgentState, ctx: &NodeContext) -> Option<Graph
             String::new()
         }
     };
+    // v1.x:记忆检索注入审计 —— 每轮迭代把相关记忆拼进 system prompt,
+    // 此前无任何持久化。空记忆不记(避免无 memory 配置的会话刷噪声)。
+    if !memory_text.is_empty()
+        && let Some(rec) = ctx.recorder.as_ref()
+    {
+        let scopes = m4
+            .active_agent_def
+            .memory
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let _ = rec
+            .record(RolloutRecord::MemoryAccess {
+                turn_id: ctx.turn_id,
+                op: reflect_protocol::MemoryOp::Read,
+                scope: scopes,
+                agent_type: m4.active_agent_def.name.clone(),
+                chars: memory_text.chars().count() as u32,
+                entries: 0,
+                at: chrono::Utc::now(),
+            })
+            .await;
+    }
 
     // 4. 构建分层 system prompt。
     // v1.x Plan mode:active-mode 状态告知。在 `compose_core` 之后追加

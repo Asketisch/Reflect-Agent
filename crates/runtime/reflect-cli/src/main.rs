@@ -298,6 +298,13 @@ enum SessionAction {
         #[arg(long, short = 'o')]
         out: Option<std::path::PathBuf>,
     },
+    /// v1.x:跨会话按模型汇总 token 用量(每个模型的使用量一览)。
+    /// 不带 `--workspace` 统计全部会话;带则只统计归属该工作区的会话。
+    Stats {
+        /// 只统计 `SessionMeta.workspace` 等于该路径的会话。
+        #[arg(long)]
+        workspace: Option<String>,
+    },
 }
 
 /// `reflect traces ...` —— 列 / 看本地 LLM 调用记录(v1.2 P1)。
@@ -712,6 +719,7 @@ fn main() -> anyhow::Result<()> {
             SessionAction::Fork { id, branch } => session::fork(&id, branch.as_deref()),
             SessionAction::Rename { id, name } => session::rename(&id, &name),
             SessionAction::Export { id, out } => session::export(&id, out.as_deref()),
+            SessionAction::Stats { workspace } => session::stats(workspace.as_deref()),
         },
         Command::Traces { action } => match action {
             TracesAction::Ls { limit } => traces::ls(limit),

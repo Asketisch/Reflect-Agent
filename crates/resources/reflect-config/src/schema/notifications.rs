@@ -122,6 +122,11 @@ pub struct TelemetrySection {
     pub dir: Option<PathBuf>,
     pub redact: Option<bool>,
     pub max_bytes: Option<u64>,
+    /// v1.x:是否在 model-io 记录里存完整工具 schema(默认 false)。
+    /// `false` = 只记工具名(`tool_names`);`true` = 额外记
+    /// `tool_schemas`(完整 ToolSpec JSON,含 parameters)。完整 schema
+    /// 体量大,长会话磁盘增长明显,故默认关。
+    pub record_tool_schemas: Option<bool>,
 }
 
 impl TelemetrySection {
@@ -132,5 +137,9 @@ impl TelemetrySection {
     /// 解析最终生效的 `redact` 值(`None` → `true`)。
     pub fn should_redact(&self) -> bool {
         self.redact.unwrap_or(true)
+    }
+    /// v1.x:解析最终生效的 `record_tool_schemas` 值(`None` → `false`)。
+    pub fn should_record_tool_schemas(&self) -> bool {
+        self.record_tool_schemas.unwrap_or(false)
     }
 }

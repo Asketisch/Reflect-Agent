@@ -37,7 +37,10 @@ use reflect_task::coordinator::CoordinatorConfig;
 ///   找不到时回退默认 system prompt(简短编码助手,5 条约束);
 /// - `model` 作为 LLM summarizer 的 fallback model spec;
 /// - `registry` 必须包含至少 1 个 provider pool,否则 summarizer 退化为 Noop;
-/// - `thread_id` 用作 rollout 文件名 / session notes 文件名。
+/// - `thread_id` 用作 rollout 文件名 / session notes 文件名;
+/// - `rollout_base` 为 `None` 时用默认 `~/.reflect/sessions`;`Some(dir)`
+///   用自定义目录(SDK 消费者经 `ReflectBuilder::with_rollout_dir` 传入,
+///   便于测试隔离 / 多租户分目录)。
 pub fn build_default_m4(
     workspace: &std::path::Path,
     agent_name: &str,
@@ -45,13 +48,15 @@ pub fn build_default_m4(
     registry: &reflect_llm::SharedModelRegistry,
     thread_id: ThreadId,
 ) -> anyhow::Result<M4Deps> {
-    build_default_m4_with_prompts(workspace, agent_name, model, registry, thread_id, &[])
+    build_default_m4_with_prompts(workspace, agent_name, model, registry, thread_id, &[], None)
 }
 
 /// [`build_default_m4`] 的扩展版:额外扫描 `extra_prompt_dirs` 下的
 /// `*.md` 模型层(v1.6,TUI / GUI 经 `ReflectBuilder::with_prompts_dir`
 /// 传入)。目录顺序即优先级:后扫者覆盖同名层;固定顺序为
 /// `<workspace>/.reflect/prompts` → `~/.reflect/prompts` → 额外目录。
+///
+/// v1.x:`rollout_base` 参数化 rollout 落盘根目录(见 [`build_default_m4`])。
 pub fn build_default_m4_with_prompts(
     workspace: &std::path::Path,
     agent_name: &str,
@@ -59,6 +64,7 @@ pub fn build_default_m4_with_prompts(
     registry: &reflect_llm::SharedModelRegistry,
     thread_id: ThreadId,
     extra_prompt_dirs: &[std::path::PathBuf],
+    rollout_base: Option<&std::path::Path>,
 ) -> anyhow::Result<M4Deps> {
     let _ = model; // model spec 由 model_call 每请求解析,此处不再消费
     let home = std::env::var("HOME").unwrap_or_default();
@@ -144,8 +150,14 @@ pub fn build_default_m4_with_prompts(
     }
 
     // ── Recorder:默认挂 JsonlRolloutWriter ──────────────────
-    let recorder: Arc<dyn RolloutRecorder> =
-        Arc::new(JsonlRolloutWriter::new(default_base(), thread_id));
+    // v1.x:rollout_base 为 None 时用默认 `~/.reflect/sessions`;
+    // Some(dir) 用自定义目录(SDK 消费者经 ReflectBuilder::with_rollout_dir
+    // 传入)。完全关闭 rollout 由调用方在拿到 M4Deps 后置
+    // `recorder = None`(ReflectBuilder::without_rollout)。
+    let base = rollout_base
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(default_base);
+    let recorder: Arc<dyn RolloutRecorder> = Arc::new(JsonlRolloutWriter::new(base, thread_id));
 
     // ── file recovery + subagent registry ────────────────────
     let file_recovery = Arc::new(ActiveFileRecovery::new(Arc::from(workspace.to_path_buf())));
@@ -236,5 +248,59 @@ mod tests {
     fn build_minimal_m4_uses_agent_name() {
         let m4 = build_minimal_m4("named-agent");
         assert_eq!(m4.active_agent_def.name, "named-agent");
+    }
+
+    /// v1.x:自定义 rollout_base 时,recorder 把记录写到该目录而非默认
+    /// `~/.reflect/sessions`(SDK 消费者经 `ReflectBuilder::with_rollout_dir`
+    /// 传入,便于测试隔离 / 多租户分目录)。
+    #[tokio::test]
+    async fn build_default_m4_writes_rollout_to_custom_base() {
+        let tmp = TempDir::new().expect("tempdir");
+        let registry: reflect_llm::SharedModelRegistry =
+            Arc::new(reflect_llm::ModelRegistry::new());
+        let rollout_dir = tmp.path().join("custom-sessions");
+        let thread_id = ThreadId::new();
+        let m4 = build_default_m4_with_prompts(
+            tmp.path(),
+            "test-agent",
+            "openai/gpt-4o",
+            &registry,
+            thread_id,
+            &[],
+            Some(&rollout_dir),
+        )
+        .expect("build_default_m4_with_prompts should succeed");
+        let rec = m4.recorder.expect("默认应挂 recorder");
+        // 写一条 SessionMeta,验证文件落在自定义目录下。
+        rec.record(reflect_protocol::RolloutRecord::session_meta(
+            thread_id,
+            "openai/gpt-4o",
+        ))
+        .await
+        .expect("record should succeed");
+        // session_path_at 按当前 UTC 日期分桶;递归查找该 session 的文件,
+        // 不依赖具体日期。
+        let found = find_file_recursive(&rollout_dir, &format!("{thread_id}.jsonl"));
+        assert!(
+            found.is_some(),
+            "rollout 文件应落在自定义 base {} 下",
+            rollout_dir.display()
+        );
+    }
+
+    /// 递归在 `dir` 下找名为 `name` 的文件(测试辅助)。
+    fn find_file_recursive(dir: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+        let entries = std::fs::read_dir(dir).ok()?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(found) = find_file_recursive(&path, name) {
+                    return Some(found);
+                }
+            } else if path.file_name().and_then(|n| n.to_str()) == Some(name) {
+                return Some(path);
+            }
+        }
+        None
     }
 }

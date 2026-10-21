@@ -68,6 +68,8 @@ fn write_parent(
                 strategy: "smart_prune".to_string(),
                 removed_count: 3,
                 summary: s.to_string(),
+                before_tokens: 0,
+                after_tokens: 0,
             })
             .unwrap()
         )

@@ -114,11 +114,17 @@ pub fn to_markdown(records: &[RolloutRecord]) -> String {
                 strategy,
                 removed_count,
                 summary,
+                before_tokens,
+                after_tokens,
                 ..
             } => {
                 push_header(&mut out, "Compaction");
                 out.push_str(&format!("- strategy: {strategy}\n"));
                 out.push_str(&format!("- removed_count: {removed_count}\n"));
+                // v1.x:压缩前后 token(旧记录两字段为 0,不渲染误导行)。
+                if *before_tokens > 0 || *after_tokens > 0 {
+                    out.push_str(&format!("- tokens: {before_tokens} → {after_tokens}\n"));
+                }
                 out.push_str(&format!("- summary: {summary}\n\n"));
             }
             RolloutRecord::Fork {
@@ -201,9 +207,15 @@ pub fn to_markdown(records: &[RolloutRecord]) -> String {
                 turn_id,
                 usage,
                 cost_usd,
+                model,
                 at,
+                ..
             } => {
                 push_header(&mut out, &format!("TokenCount {turn_id}"));
+                // v1.x:模型归属(旧记录无该字段时不渲染此行)。
+                if let Some(m) = &model {
+                    out.push_str(&format!("- model: {m}\n"));
+                }
                 out.push_str(&format!("- input: {}\n", usage.input_tokens));
                 out.push_str(&format!("- output: {}\n", usage.output_tokens));
                 out.push_str(&format!("- cached: {}\n", usage.cached_tokens));
@@ -260,6 +272,29 @@ pub fn to_markdown(records: &[RolloutRecord]) -> String {
             RolloutRecord::PermissionModeChanged { from, to, at } => {
                 push_header(&mut out, "PermissionModeChanged");
                 out.push_str(&format!("- {} → {}\n", from.as_str(), to.as_str()));
+                out.push_str(&format!("- at: {}\n\n", at.format("%Y-%m-%dT%H:%M:%SZ")));
+            }
+            // v1.x:记忆访问审计(读 = 检索注入;写 = compact 固化)。
+            RolloutRecord::MemoryAccess {
+                op,
+                scope,
+                agent_type,
+                chars,
+                entries,
+                at,
+                ..
+            } => {
+                let op_str = match op {
+                    reflect_protocol::MemoryOp::Read => "read",
+                    reflect_protocol::MemoryOp::Write => "write",
+                };
+                push_header(&mut out, &format!("MemoryAccess ({op_str})"));
+                out.push_str(&format!("- scope: {scope}\n"));
+                out.push_str(&format!("- agent_type: {agent_type}\n"));
+                out.push_str(&format!("- chars: {chars}\n"));
+                if *entries > 0 {
+                    out.push_str(&format!("- entries: {entries}\n"));
+                }
                 out.push_str(&format!("- at: {}\n\n", at.format("%Y-%m-%dT%H:%M:%SZ")));
             }
         }
@@ -420,6 +455,8 @@ mod tests {
                 strategy: "microcompact".into(),
                 removed_count: 7,
                 summary: "<summary>old context</summary>".into(),
+                before_tokens: 12_000,
+                after_tokens: 3_000,
             },
             RolloutRecord::Fork {
                 parent_session_id: parent,
