@@ -13,6 +13,14 @@ use serde::{Deserialize, Serialize};
 pub struct CredentialConfig {
     /// 必填(用户诊断标识);缺省时 builder 兜底 `"env-N"` 或 `"default"`。
     pub label: String,
+    /// 凭据密钥。
+    ///
+    /// `#[serde(default)]` —— **可以整条省略**。免 Key 的 OpenAI 兼容端点
+    /// (免费模型池)是真实存在的接入形态:此前本字段是必填,GUI 的 plan
+    /// 编辑器在 key 为空时**整行省略** `api_key`,写出的 TOML 直接反序列化
+    /// 失败(整份配置保存被拒),于是「免 Key 端点」在 GUI 里根本无法表达。
+    /// 缺省 = 空串 = 该凭据不带 Authorization 头(`OpenAIClient` 的既有约定)。
+    #[serde(default)]
     pub api_key: String,
     #[serde(default)]
     pub base_url: Option<String>,

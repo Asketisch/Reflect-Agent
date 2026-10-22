@@ -425,7 +425,22 @@ fn build_openai_pool(section: &OpenAISection) -> Result<Option<CredentialPool>, 
         section.credentials.clone()
     } else {
         let key = resolve_openai_key(section);
-        if key.is_empty() {
+        // **免 Key 端点也要注册** —— 显式配了 `base_url` 就是「我把这个
+        // 端点接进来了」,哪怕它不要 key(免费模型池就是这种端点:
+        // `api_key = ""` → client 不发 Authorization 头)。
+        //
+        // 此前这里是「key 空 → 不注册」,于是免 Key 端点**只能绕道
+        // `[[openai.credentials]]` 数组形态**才能用 —— 配置形态被迫分叉,
+        // GUI 也无法表达(plan 编辑器省略 `api_key` → TOML 反序列化失败)。
+        //
+        // 仍然不注册的只有一种:既没 key 也没 base_url —— 那就是「用户没配
+        // 这个 provider」,不该凭空造一个池子。
+        let has_custom_endpoint = section
+            .base_url
+            .as_deref()
+            .map(|b| !b.trim().is_empty())
+            .unwrap_or(false);
+        if key.is_empty() && !has_custom_endpoint {
             return Ok(None);
         }
         vec![CredentialConfig {
@@ -559,6 +574,10 @@ fn has_openai_credential(s: &OpenAISection) -> bool {
     !s.credentials.is_empty()
         || s.api_key.as_deref().is_some_and(|k| !k.is_empty())
         || env_has(ENV_OPENAI_API_KEY)
+        // 免 Key 端点:显式 `base_url` 就是一次「我接了这个端点」的声明 ——
+        // 与 `build_openai_pool` 的注册条件保持同口径(否则配置能注册却
+        // 推不出 active provider,状态栏会显示「未配置」)。
+        || s.base_url.as_deref().is_some_and(|b| !b.trim().is_empty())
 }
 
 fn env_has(name: &str) -> bool {
