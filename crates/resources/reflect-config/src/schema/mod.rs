@@ -206,8 +206,20 @@ pub struct ActiveSection {
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct SandboxSection {
+    /// `[sandbox].os_level` —— OS 级沙箱(Seatbelt / Landlock)开关。
+    ///
+    /// **`Option<bool>` 而不是 `bool`** —— 解析后必须能区分「用户没写」
+    /// 与「用户写了 false」:
+    /// - `None` = 用户**未表态** → 走调用方的基线(核心 CLI 的基线是
+    ///   「默认要求 OS sandbox」,`OsSandbox::default()` = enabled + strict);
+    /// - `Some(false)` = 用户**显式关闭** → 尊重表态。
+    ///
+    /// 此前是 `bool` + `#[serde(default)]`,两者解析后不可区分 —— 想表达
+    /// 「未表态但要按基线走」的一方只能去**重新解析原始 TOML** 找 key
+    /// 是否存在(桌面端 `app-core/src/sandbox.rs` 此前就是这么绕的)。
+    /// 改成 `Option<bool>` 后,「未表态」的语义由 schema 直接承载。
     #[serde(default)]
-    pub os_level: bool,
+    pub os_level: Option<bool>,
     #[serde(default)]
     pub writable_dirs: Vec<PathBuf>,
     #[serde(default)]

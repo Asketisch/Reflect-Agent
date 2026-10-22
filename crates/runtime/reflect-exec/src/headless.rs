@@ -100,7 +100,12 @@ pub async fn bootstrap_common(args: &HeadlessArgs) -> anyhow::Result<HeadlessCom
     // 把 `[sandbox].os_level` 配置桥接到 env(`REFLECT_SANDBOX_OS_LEVEL`)
     // —— `BashTool` 在 execute 时读 env 决定是否激活 Seatbelt/Landlock。
     // env 优先于 TOML(让 `REFLECT_SANDBOX_OS_LEVEL=0` 能临时覆盖配置)。
-    if initial_cfg.sandbox.os_level && std::env::var_os("REFLECT_SANDBOX_OS_LEVEL").is_none() {
+    // `Option<bool>`:`None` = 用户未表态 → 不桥接 env,让
+    // `OsSandbox::from_env()` 走**核心基线**(env 未设置 = 默认开启);
+    // `Some(true)` = 显式要求开 → 桥接 env=1。
+    if initial_cfg.sandbox.os_level == Some(true)
+        && std::env::var_os("REFLECT_SANDBOX_OS_LEVEL").is_none()
+    {
         unsafe {
             std::env::set_var("REFLECT_SANDBOX_OS_LEVEL", "1");
         }
