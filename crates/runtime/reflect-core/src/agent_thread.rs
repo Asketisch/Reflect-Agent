@@ -187,11 +187,7 @@ impl AgentThread {
     /// 答不出「跑到第几轮 / LM 判定是什么 / 累计多少 token / 被什么卡住」。
     /// 本方法把 `GoalController` 里的 `GoalState` 原样交出去。
     pub fn goal_snapshot(&self) -> Option<reflect_goal::GoalState> {
-        self.cfg
-            .goal
-            .read()
-            .as_ref()
-            .and_then(|c| c.snapshot())
+        self.cfg.goal.read().as_ref().and_then(|c| c.snapshot())
     }
 
     pub fn registry(&self) -> &SharedModelRegistry {
