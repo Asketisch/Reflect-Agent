@@ -23,27 +23,62 @@ use tokio::sync::mpsc;
 fn mock_binary_path() -> std::path::PathBuf {
     // v0.4 起,`mock_mcp_server` 二进制仅由 `reflect-mcp` 声明 —— 单二进制合并后
     // 此 crate 不再 [[bin]] 注入 `CARGO_BIN_EXE_mock_mcp_server`。改为从
-    // workspace 布局推算路径:`cargo test -p reflect-exec` 会先 build reflect-mcp
-    // (作为 dependency),`target/{debug,release}/mock_mcp_server` 总在测试运行前就生成。
+    // workspace 布局推算路径。
     //
     // 路径推算:`CARGO_MANIFEST_DIR` = `<workspace>/crates/runtime/reflect-exec`,
     // 需向上取 **3 层** parent 才回到 workspace root(原代码只取 2 层会落到
     // `crates/`,拼出不存在的 `crates/target/...` 导致 `Spawn NotFound`)。
-    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let workspace_root = manifest_dir
-        .parent()
-        .and_then(|p| p.parent())
-        .and_then(|p| p.parent())
-        .expect("workspace root");
-    let target = std::env::var("CARGO_TARGET_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| workspace_root.join("target"));
-    let profile = if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    };
-    target.join(profile).join("mock_mcp_server")
+    //
+    // ⚠️ 关键(2026-10 修复):reflect-mcp 只是本包的 **dependency**,
+    // cargo 只构建它的 **lib**,不构建它的 bin —— 干净 checkout 上
+    // `cargo test --workspace --all-targets` 结束后,`target/debug/mock_mcp_server`
+    // **并不存在**,本文件的子进程用例会以 "mock server should start" 失败。
+    // 现在缺失时用 cargo 现构建一次(与 tests/rust/*.sh 的
+    // `cargo build -p reflect-mcp --bin mock_mcp_server` 同一手法),
+    // 保证任何调用方式(整 workspace / 只跑本包)都能自洽。
+    static BIN: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    BIN.get_or_init(|| {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace_root = manifest_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+            .expect("workspace root");
+        let target = std::env::var("CARGO_TARGET_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| workspace_root.join("target"));
+        let release = !cfg!(debug_assertions);
+        let profile = if release { "release" } else { "debug" };
+        let bin = target.join(profile).join("mock_mcp_server");
+        if !bin.is_file() {
+            build_mock_server(workspace_root, release);
+        }
+        bin
+    })
+    .clone()
+}
+
+/// 用 cargo 构建 `mock_mcp_server` 二进制(缺失时的兜底)。
+///
+/// 失败不 panic —— 调用方随后会因为二进制不存在而报出更直观的错误
+/// (子进程 spawn 失败),这里只留一条 stderr 说明。
+fn build_mock_server(workspace_root: &std::path::Path, release: bool) {
+    let cargo = option_env!("CARGO").unwrap_or("cargo");
+    let mut cmd = std::process::Command::new(cargo);
+    cmd.args(["build", "-p", "reflect-mcp", "--bin", "mock_mcp_server"]);
+    if release {
+        cmd.arg("--release");
+    }
+    cmd.current_dir(workspace_root);
+    eprintln!("[mcp_integration] mock_mcp_server 不存在,现构建中…");
+    match cmd.output() {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => eprintln!(
+            "[mcp_integration] 构建 mock_mcp_server 失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ),
+        Err(e) => eprintln!("[mcp_integration] 构建 mock_mcp_server 失败: {e}"),
+    }
 }
 
 fn stdio_cfg_entry(_name: &str) -> McpServerEntry {
