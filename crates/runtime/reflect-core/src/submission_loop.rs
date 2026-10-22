@@ -89,7 +89,7 @@ pub struct NodeContext {
     pub telemetry: Option<Arc<reflect_telemetry::TelemetrySink>>,
     /// v1.2 P1:目标模式 controller。`None` = 未激活;turn 结束后
     /// submission_loop 调 `on_turn_end` 自校验 + 续作。
-    pub goal: Option<Arc<reflect_goal::GoalController>>,
+    pub goal: Arc<parking_lot::RwLock<Option<Arc<reflect_goal::GoalController>>>>,
     /// v1.x 功能 7:token plan 配额追踪器。`None` = 不追踪(无 credential
     /// 声明配额);`Some` = `model_call` 在 LLM 调用成功后累计 usage,
     /// 耗尽时对该 credential 触发 cooldown,`next_for` 顺位切到下一个 plan。
@@ -129,7 +129,7 @@ pub async fn submission_loop(
     mut sub_rx: mpsc::Receiver<Submission>,
     turn_subs: Arc<Mutex<HashMap<String, mpsc::Sender<Event>>>>,
     session_subs: Arc<Mutex<Vec<mpsc::Sender<Event>>>>,
-    mut cfg: AgentConfig,
+    cfg: AgentConfig,
     registry: SharedModelRegistry,
     _tools: Arc<ToolRegistry>,
     tools_queue: Arc<ToolExecutionQueue>,
@@ -601,7 +601,7 @@ pub async fn submission_loop(
                 let recorder = cfg.m4.as_ref().and_then(|m| m.recorder.clone());
                 // v1.2 P1:goal / steering / telemetry 句柄 clone 进 spawned task,
                 // 供 turn 结束后自校验 + 续作。
-                let cfg_goal_clone = cfg.goal.clone();
+                let cfg_goal_clone = cfg.goal.read().clone();
                 let steering_queue_clone = steering_queue.clone();
                 let cfg_telemetry_clone = cfg.telemetry.clone();
                 // v1.4 A1:取消判定三件套 —— 回合令牌(被 Interrupt cancel)、
@@ -1176,12 +1176,12 @@ pub async fn submission_loop(
                     cfg.cancel.clone(),
                     cfg.telemetry.clone(),
                 ));
-                cfg.goal = Some(controller);
+                *cfg.goal.write() = Some(controller);
                 tracing::info!(goal = %goal, "goal mode entered");
             }
             // v1.2 P1:退出目标模式 —— 清空 controller。
             reflect_protocol::Op::ExitGoalMode => {
-                if let Some(c) = cfg.goal.take() {
+                if let Some(c) = cfg.goal.write().take() {
                     c.clear();
                 }
                 tracing::info!("goal mode exited");

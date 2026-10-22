@@ -66,6 +66,18 @@ impl GoalController {
             .is_some_and(|s| s.status == GoalStatus::Active)
     }
 
+    /// 当前目标状态快照 —— GUI / TUI 读「跑到第几轮、被什么卡住」。
+    ///
+    /// 此前 `GoalState` 的字段全是 `pub`,但**没有任何读取口** ——
+    /// controller 只暴露 `is_active()` / `clear()`,于是 GUI 只能知道
+    /// 「目标模式是否活跃」,答不出「跑到第几轮 / LM 判定是什么 / 累计多少
+    /// token / 被什么卡住」。本方法补上这个缺口。
+    ///
+    /// 返回 `None` = 没有活跃目标(未进目标模式,或已退出 / 已到终态被清空)。
+    pub fn snapshot(&self) -> Option<GoalState> {
+        self.state.read().clone()
+    }
+
     pub fn clear(&self) {
         *self.state.write() = None;
     }
@@ -261,5 +273,33 @@ mod tests {
         let prompt = build_continuation_prompt(&state, &verdict);
         assert!(prompt.contains("no DB"));
         assert!(prompt.contains("2/3"));
+    }
+
+    /// `snapshot()` —— GUI 读「跑到第几轮 / 判定 / token」的读口。
+    /// 此前 `GoalState` 的字段全是 `pub` 但**没有任何读取口**,GUI 只能
+    /// 知道「目标模式是否活跃」。
+    #[test]
+    fn snapshot_exposes_goal_state() {
+        let controller = GoalController::new(
+            "ship the feature",
+            Some("cargo test".into()),
+            Some(50_000),
+            Arc::new(reflect_llm::providers::mock::MockClient::from_env()),
+            CancellationToken::new(),
+            None,
+        );
+        let snap = controller.snapshot().expect("刚构造的 controller 应有状态");
+        assert_eq!(snap.goal, "ship the feature");
+        assert_eq!(snap.verify_command.as_deref(), Some("cargo test"));
+        assert_eq!(snap.token_budget, Some(50_000));
+        assert_eq!(snap.status, GoalStatus::Active);
+        assert_eq!(snap.turn_count, 0);
+        assert_eq!(snap.tokens_used, 0);
+        assert!(controller.is_active());
+
+        // clear 后没有活跃目标 —— 快照为 None。
+        controller.clear();
+        assert!(controller.snapshot().is_none());
+        assert!(!controller.is_active());
     }
 }

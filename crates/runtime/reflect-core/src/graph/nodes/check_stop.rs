@@ -84,7 +84,7 @@ mod tests {
             token_budget: Arc::new(parking_lot::RwLock::new(None)),
             force_compact_next: Arc::new(parking_lot::RwLock::new(false)),
             telemetry: None,
-            goal: None,
+            goal: Arc::new(parking_lot::RwLock::new(None)),
             quota_tracker: None,
             plan_approval_gate: None,
             plan_session_subs: None,

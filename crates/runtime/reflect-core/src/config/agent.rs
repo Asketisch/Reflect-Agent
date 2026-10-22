@@ -117,7 +117,14 @@ pub struct AgentConfig {
     /// v1.2 P1:目标模式 controller(参考 zcode `/goal` 设计)。
     /// `None` = 目标模式未激活;`/goal <obj>` 时由 submission_loop 构造。
     /// turn 结束后 `on_turn_end` 自校验,未完成则推 steering 续作。
-    pub goal: Option<Arc<reflect_goal::GoalController>>,
+    ///
+    /// **共享槽**(`Arc<RwLock<..>>`):`AgentConfig` 会被 clone 进 submission
+    /// loop(`let cfg_c = cfg.clone()`),普通字段在 clone 上改**回不到**
+    /// `AgentThread` —— 此前目标模式的 enter/exit 只活在 loop 的副本里,
+    /// 线程侧永远看不到 controller,GUI 也因此只能靠前端投影猜「目标模式
+    /// 是否活跃」。共享槽让线程侧能读到**权威**状态
+    /// (`AgentThread::goal_snapshot()`)。
+    pub goal: Arc<RwLock<Option<Arc<reflect_goal::GoalController>>>>,
     /// v1.x 功能 7:token plan 配额追踪器。`None` = 无 credential 声明配额
     /// (向后兼容);`Some` = `model_call` 累计 usage,耗尽触发 cooldown 切换。
     pub quota_tracker: Option<SharedQuotaTracker>,
@@ -204,7 +211,7 @@ impl AgentConfig {
             context_window_overrides: Arc::new(RwLock::new(HashMap::new())),
             force_compact_next: Arc::new(RwLock::new(false)),
             telemetry: None,
-            goal: None,
+            goal: Arc::new(RwLock::new(None)),
             quota_tracker: None,
             tool_env: HashMap::new(),
             session_id: None,
