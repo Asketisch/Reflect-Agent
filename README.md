@@ -243,6 +243,7 @@ TypeScript API 同构(`ReflectAgent.spawn()` / `registerTool` / `prompt`)。
 | `reflect session` | 持久化 session 管理(`ls` / `show` / `rm` / `fork` / `rename` / `export`) |
 | `reflect traces` | 本地 LLM 调用记录查看(`ls` / `show`,数据在 `~/.reflect/traces/model-io/`) |
 | `reflect doctor` | best-effort 环境自检(支持 `--check-network`) |
+| `reflect models` | 模型清单发现(`list` / `pick`)—— 清单**实时取自 provider 接口**,含免费标记与上下文窗口 |
 | `reflect plugin` | 插件安装 / 列出 / 启用 / 禁用 / 卸载 + marketplace |
 | `reflect lsp` | LSP server 配置管理 |
 | `reflect task` | 结构化任务 + 团队管理(TaskCreate / TaskList / TeamCreate 等) |
@@ -261,6 +262,29 @@ reflect exec -c "继续上次的工作"         # 续最近 session
 reflect exec -r 2 "在第二条上追问"       # 按序号
 reflect exec --resume <uuid>             # 按 UUID
 ```
+
+### 免费模型(零成本实践测试)
+
+Reflect 内置**模型发现能力** —— 模型清单实时取自 provider 的清单接口,
+不写死模型 id(免费模型集合由上游决定,随时可能增删):
+
+```bash
+reflect models list --free-only          # 看当前可用的免费模型
+reflect models pick --free-only          # 挑一个(只打印 id,便于脚本消费)
+
+# 配置里写 model = "free" → 运行时从清单里挑一个
+[active]
+provider = "openai"
+[openai]
+api_key = ""                              # 免 Key 端点
+base_url = "https://api.kilo.ai/api/gateway"
+timeout_secs = 300
+model = "free"
+```
+
+配套的实模型演练层(`REFLECT_LIVE=1 ./tests/run_all.sh live`)用真实模型
+跑完整 agent 链路,断言只到协议形状。详见
+[`docs/FREE_MODEL_PRACTICE.md`](docs/FREE_MODEL_PRACTICE.md)。
 
 ### 典型工作流
 

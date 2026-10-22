@@ -13,25 +13,33 @@
 | SDK 绑定层 | `tests/sdk-python/`、`tests/sdk-ts/` | 两个**客户端自己**的行为 | ✅ | Python 9 条 / TS 5 条 |
 | SDK 单测 | `sdks/*/tests/` | SDK 纯逻辑(mock serve),随包发布 | ✅ | Python 7 / TS 5 条 |
 | crate 单测 | `crates/**/tests/` | 内部单元与集成 | — | 既有 |
+| **实模型演练层**(可选) | `tests/live/` | **真实模型**下的引擎行为(协议形状) | ❌ | 12 条 |
 
 **新增能力断言只落能力覆盖层一处** —— 不要在 SDK 测试里重复写协议/能力断言。
 理由:SDK 自身的 bug 会把 Rust 的 bug 遮住(见 §6 已知缺陷 D1)。
 
+⚠️ **实模型演练层不算能力覆盖** —— 它断言的是**协议形状与运行时行为**
+(事件序 / 终态 / usage 字段 / 工具成对),**不断言具体回答文本**。
+能力断言仍然只在 `tests/functional/`。两层不重叠、不互相替代:
+能力覆盖层是 CI 强制门禁(离线、确定性),实模型层是可选手动/夜间门禁
+(需外网与免费额度,默认 SKIP)。
+
 ## 1. 能力 × 覆盖层矩阵
 
-| 能力域 | 能力覆盖层 | CLI 参数面 | SDK 绑定层 | crate 单测 |
-|---|---|---|---|---|
-| 基础通信(握手/单轮/多轮/事件流/终态) | D1–D5 | cli_core | K1–K2 | ✅ |
-| 并发与路由 | S1–S3 | — | — | — |
-| 内置工具调用 | T1–T2 | tools_drive | — | ✅ |
-| 远程工具(注册/往返/失败/超时) | T3–T4、X4 | serve_ops | K3、K8 | ✅ |
-| 审批交互(approve / deny / bubble) | T5–T6 | integrations | — | ✅ |
-| 会话状态 Op(19 Op) | A1–A12 | serve_ops | K4 | ✅ |
-| 重连与恢复(resume / -c / -r / 崩溃 / EOF) | R1–R5 | cli_core(exec --resume) | — | ✅ |
-| 容错与失败恢复 | X1–X6 | — | — | ✅ |
-| 持久化(rollout / 截断 / 索引) | P1–P4 | cli_deep(session) | — | ✅ |
-| 编排(子代理/讨论/任务/团队/流水线/goal) | O1–O5 | cli_modules、cli_deep | — | ✅ |
-| CLI 能力面 | C1–C4 | cli_deep(194 断言) | — | — |
+| 能力域 | 能力覆盖层 | CLI 参数面 | SDK 绑定层 | crate 单测 | 实模型层 |
+|---|---|---|---|---|---|
+| 基础通信(握手/单轮/多轮/事件流/终态) | D1–D5 | cli_core | K1–K2 | ✅ | L1–L4 |
+| 并发与路由 | S1–S3 | — | — | — | — |
+| 内置工具调用 | T1–T2 | tools_drive | — | ✅ | T1–T3 |
+| 远程工具(注册/往返/失败/超时) | T3–T4、X4 | serve_ops | K3、K8 | ✅ | — |
+| 审批交互(approve / deny / bubble) | T5–T6 | integrations | — | ✅ | — |
+| 会话状态 Op(19 Op) | A1–A12 | serve_ops | K4 | ✅ | — |
+| 重连与恢复(resume / -c / -r / 崩溃 / EOF) | R1–R5 | cli_core(exec --resume) | — | ✅ | P2 |
+| 容错与失败恢复 | X1–X6 | — | — | ✅ | X1 |
+| 持久化(rollout / 截断 / 索引) | P1–P4 | cli_deep(session) | — | ✅ | P1–P2 |
+| 编排(子代理/讨论/任务/团队/流水线/goal) | O1–O5 | cli_modules、cli_deep | — | ✅ | — |
+| CLI 能力面 | C1–C4 | cli_deep(194 断言) | — | — | — |
+| 模型发现(清单接口 / 免费判定 / 动态 model) | — | models_* | — | ✅ | — |
 
 ## 2. 能力覆盖层明细(`tests/functional/`)
 
@@ -173,6 +181,20 @@ Result + rounds_completed)/ 任务与团队(create → ls)/ 流水线错误路�
 | D5 | 协议文档与实现不符:`sdks/PROTOCOL.md` §4 称「core 侧串行排队」,实测每个 `UserInput` 提交一个独立 task(真并发) | `submission_loop.rs:621`;能力层 S1/S2 实测 | 依赖"第二个 turn 一定在第一个之后开始"的客户端会踩坑;文档应改为"并发执行、事件按 id 路由" |
 | D6 | `tests/` 套件此前从未进 CI,导致**已存在的失败用例**长期未被发现(原 `test_sdk_real_bin.py` 的 interrupt 断言与当前 core 行为不符;`cli_core.sh` 的 `exec --plan-mode` 期望 0 而实际按约定 122;`serve_ops.sh` 期望「不 emit plan_approved」而引擎现在会发;`tools_drive.sh` 的 grep 期望 `./` 前缀而实际无前缀) | 本批次修正前实测失败 | 本批次已修正断言(不改服务端行为),并由 CI job `functional-suite` 收口 |
 | D7 | **bash 工具对被沙箱拒绝的命令仍报成功**:macOS Seatbelt 下越界写被拦下(stderr 含 `Operation not permitted`、文件不落地),但工具输出 `is_error=false`(退出码经 sentinel 回报为 0) | 本地实测 `reflect exec` + bash 越界写;`tests/rust/tools_drive.sh` 的沙箱用例 | 模型看不到失败信号,可能误以为写成功;安全不变量(文件不落地)成立,但错误信号缺失 |
+| D8 | **`InvalidRequest`(400)被归到 `CooldownReason::Auth`**(默认 1 小时冷却) | `crates/runtime/reflect-core/src/graph/nodes/model_call/stream.rs` 的 `build_cooldown_reason` 兜底分支 | 一次 400(如模型不支持 tools)会让该凭据停摆一小时,远超合理范围;本次未改(超出最小改动边界),记此备查 |
+
+### 实模型层观测到的上游限制(非 Reflect 缺陷)
+
+以下来自 `tests/live/` 对真实免费池的观测,**不计入缺陷**,但影响实模型层的
+跑法与断言口径:
+
+| 现象 | 说明 | 应对 |
+|---|---|---|
+| 429 限流频繁 | 免费池配额是**全局**的;OpenCode 车道按会话计额度,`retry-after` 可达 12h | live 层把 429 判为**跳过**而非失败;矩阵**串行**跑 |
+| 部分模型不支持 tools | provider 直接 400(如 `dots-studio/dots-3-note-preview:free`) | 能力探测识别并跳过,不写死黑名单 |
+| 首字延迟大 / 思考静默 | 实测首字 >30s、思考阶段可静默 60~70s | `timeout_secs` 放大到 300(默认 60s 是 reqwest 的**总**请求时长,会腰斩流式响应) |
+| 模型集合随时变 | 上游随时下架某个 id | 清单每次实时拉取;`[routing].fallbacks` 跨模型降级兜底 |
+| prompt 可能被上游记录 | 免费池模型卡明示 | 实模型层只用合成数据 |
 
 ## 7. 用例规模汇总
 
@@ -185,6 +207,10 @@ Result + rounds_completed)/ 任务与团队(create → ls)/ 流水线错误路�
 | `functional/test_orchestration.py` | 5 条(O5) |
 | `functional/test_cli.py` | 4 条(C4) |
 | **能力覆盖层合计** | **51 条** |
+| `live/test_live_basic.py` | 4 条(L1–L4) |
+| `live/test_live_tools.py` | 3 条(T1–T3) |
+| `live/test_live_persistence.py` | 3 条(P1–P2、X1) |
+| **实模型演练层合计** | **10 条**(默认 SKIP,需 `REFLECT_LIVE=1`) |
 | `sdk-python/test_sdk_real_bin.py` | 9 条(K1–K8) |
 | `sdk-ts/real-bin.test.mjs` | 5 条 |
 | `rust/cli_core.sh` | 71 断言 |

@@ -10,6 +10,7 @@
 ./tests/run_all.sh            # 全部(功能覆盖 + Rust 全套 + 双 SDK)
 ./tests/run_all.sh functional # 功能覆盖门禁(CI 用):能力覆盖层 + Rust 参数面 + 双 SDK 绑定层
 ./tests/run_all.sh functional-layer  # 只跑能力覆盖层
+./tests/run_all.sh live       # 实模型演练层(真实模型;默认 SKIP,需 REFLECT_LIVE=1)
 ./tests/run_all.sh rust       # 只跑 Rust 侧(含 cargo test / clippy / fmt / doc)
 ./tests/run_all.sh sdk-python # 只跑 Python SDK 绑定层
 ./tests/run_all.sh sdk-ts     # 只跑 TS SDK 绑定层
@@ -31,6 +32,7 @@ Python 3 + pytest、Node ≥ 18。缺依赖的批次自动 SKIP,不算失败。
 | CLI 参数面 | `tests/rust/*.sh` | 17 个子命令的**参数矩阵**与输出契约(bash) | ❌ 不依赖 |
 | SDK 绑定层 | `tests/sdk-python/`、`tests/sdk-ts/` | 两个**客户端自己**的行为:迭代器收尾、handler 调度、回执形状、close 语义 | ✅ 依赖 |
 | SDK 单测 | `sdks/python/tests/`、`sdks/typescript/tests/` | SDK 纯逻辑(mock serve 驱动),随包发布给外部用户 | ✅ 依赖 |
+| **实模型演练层**(可选) | `tests/live/` | **真实模型**下的引擎行为:协议形状 / 终态 / usage / 工具成对。模型从 provider 清单接口**实时获取** | ❌ 不依赖 |
 
 **判据**:
 - 断言「服务端发什么 / 落盘什么」→ **能力覆盖层**;
@@ -69,6 +71,12 @@ Python 3 + pytest、Node ≥ 18。缺依赖的批次自动 SKIP,不算失败。
 | `sdk-python/run.sh` | pytest 入口(含仓库原有 `sdks/python/tests` 协议单测) |
 | `sdk-ts/real-bin.test.mjs` | TS SDK 绑定层(5 条:证明 TS SDK 仍能与真服务端对话) |
 | `sdk-ts/run.sh` | node --test 入口(含仓库原有 vitest 协议单测;dist 陈旧时自动重构建) |
+| `live/conftest.py` | 实模型层设施:模型清单拉取 + 能力探测 + 隔离环境 |
+| `live/liveutil.py` | 实模型层助手:换会话重试 / 限流判定 / 协议形状断言 |
+| `live/test_live_basic.py` | 基础面:握手 / 单轮 / usage / 多轮 |
+| `live/test_live_tools.py` | 工具面:内置工具调用 / 未注册工具 / 工具输出 |
+| `live/test_live_persistence.py` | 持久化 + 容错面:rollout 落盘 / 多轮累积 / 限流可观测 |
+| `live/run.sh` | 实模型层入口(默认 SKIP) |
 
 ## 设计要点
 
@@ -91,6 +99,11 @@ Python 3 + pytest、Node ≥ 18。缺依赖的批次自动 SKIP,不算失败。
   (`id=""`),不进按 submission id 路由的迭代器;能力覆盖层用
   `global_events()` 收集,SDK 侧因无公开读取口只能读私有队列
   (见 `COVERAGE.md`「已知缺陷」D4)。
+- **实模型层是独立层**:默认 SKIP(不发起网络请求),不进 CI 门禁;模型
+  **从 provider 接口实时获取**(不写死 id —— 免费模型集合随时变);断言只到
+  **协议形状**,不断言回答文本;上游限流(429)判为**跳过**而非失败。
+  详见 [`live/README.md`](live/README.md) 与
+  [`docs/FREE_MODEL_PRACTICE.md`](../docs/FREE_MODEL_PRACTICE.md)。
 - **三个 id 互不相同**(易踩坑):`session_configured.session_id`、
   rollout 内 `session_meta.session_id`、**会话文件名**里的 thread id 是
   三个不同的 uuid。`--resume` 的参数必须用**文件名**里的 id。
