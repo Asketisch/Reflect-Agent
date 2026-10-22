@@ -27,6 +27,7 @@ use crate::capabilities::Capabilities;
 use crate::client::ModelClient;
 use crate::error::LlmError;
 use crate::event::ChatEvent;
+use crate::model_catalog::ModelInfo;
 use crate::request::{ChatRequest, ContentBlock, ToolSpec};
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com";
@@ -121,10 +122,15 @@ impl ModelClient for OpenAIResponsesClient {
         let mut req = self
             .http
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.config.api_key))
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream")
             .body(body.to_string());
+
+        // 空 `api_key` 不发 Authorization 头(免 Key 端点)—— 与 openai.rs
+        // / ollama.rs 的既有约定一致。
+        if !self.config.api_key.is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", self.config.api_key));
+        }
 
         if cancel.is_cancelled() {
             return Err(LlmError::Cancelled);
@@ -141,6 +147,49 @@ impl ModelClient for OpenAIResponsesClient {
         }
 
         Ok(Box::pin(stream_sse(response, cancel)))
+    }
+
+    /// R0-1:与 Chat Completions 共用同一份清单解析器(端点同为 `{base}/v1/models`)。
+    async fn list_models(
+        &self,
+        cancel: CancellationToken,
+    ) -> Result<Option<Vec<ModelInfo>>, LlmError> {
+        let base = self
+            .config
+            .base_url
+            .as_deref()
+            .unwrap_or(DEFAULT_BASE_URL)
+            .trim_end_matches('/');
+        let url = format!("{base}/v1/models");
+
+        let mut req = self.http.get(&url).header("Accept", "application/json");
+        if !self.config.api_key.is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", self.config.api_key));
+        }
+
+        if cancel.is_cancelled() {
+            return Err(LlmError::Cancelled);
+        }
+
+        let response = req.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            if status == reqwest::StatusCode::NOT_FOUND
+                || status == reqwest::StatusCode::METHOD_NOT_ALLOWED
+            {
+                return Ok(None);
+            }
+            let status_code = status.as_u16();
+            let headers = response.headers().clone();
+            let text = response.text().await.unwrap_or_default();
+            return Err(classify_status(status_code, &text, &headers));
+        }
+
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|e| LlmError::Internal(format!("model listing parse failed: {e}")))?;
+        Ok(Some(crate::providers::openai::parse_model_listing(&body)))
     }
 }
 

@@ -18,6 +18,7 @@ use crate::capabilities::Capabilities;
 use crate::client::ModelClient;
 use crate::error::LlmError;
 use crate::event::ChatEvent;
+use crate::model_catalog::ModelInfo;
 use crate::request::{
     ChatMessage, ChatRequest, ContentBlock, ReasoningEffort, ThinkingConfig, ToolSpec,
 };
@@ -101,10 +102,16 @@ impl ModelClient for OpenAIClient {
         let mut req = self
             .http
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.config.api_key))
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream")
             .body(body.to_string());
+
+        // `api_key` 为空时**不**发 Authorization 头:免 Key 的 OpenAI 兼容
+        // 端点(免费模型池)对「空 Bearer」宽容、对「非空无效 token」严格,
+        // 少发一个头更稳。与 Ollama provider 的既有做法一致。
+        if !self.config.api_key.is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", self.config.api_key));
+        }
 
         if cancel.is_cancelled() {
             return Err(LlmError::Cancelled);
@@ -122,6 +129,127 @@ impl ModelClient for OpenAIClient {
 
         Ok(Box::pin(stream_sse(response, cancel)))
     }
+
+    /// R0-1:拉取 OpenAI 兼容的模型清单(`GET {base}/v1/models`)。
+    async fn list_models(
+        &self,
+        cancel: CancellationToken,
+    ) -> Result<Option<Vec<ModelInfo>>, LlmError> {
+        let base = self
+            .config
+            .base_url
+            .as_deref()
+            .unwrap_or(DEFAULT_BASE_URL)
+            .trim_end_matches('/');
+        let url = format!("{base}/v1/models");
+
+        let mut req = self.http.get(&url).header("Accept", "application/json");
+        // 清单端点同样尊重「空 key 不发头」的约定(免 Key 端点)。
+        if !self.config.api_key.is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", self.config.api_key));
+        }
+
+        if cancel.is_cancelled() {
+            return Err(LlmError::Cancelled);
+        }
+
+        let response = req.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            // 端点不存在(404/405)→ 该 provider 没有清单能力,诚实降级为 None;
+            // 其余状态是真实故障,上报错误。
+            if status == reqwest::StatusCode::NOT_FOUND
+                || status == reqwest::StatusCode::METHOD_NOT_ALLOWED
+            {
+                return Ok(None);
+            }
+            let status_code = status.as_u16();
+            let headers = response.headers().clone();
+            let text = response.text().await.unwrap_or_default();
+            return Err(classify_status(status_code, &text, &headers));
+        }
+
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|e| LlmError::Internal(format!("model listing parse failed: {e}")))?;
+        Ok(Some(parse_model_listing(&body)))
+    }
+}
+
+/// 解析 OpenAI 兼容的模型清单响应(`{"object":"list","data":[...]}`)。
+///
+/// ⚠️ 各家端点披露的字段差别很大,这里按「能取到什么就取什么」的顺序探测:
+/// - 上下文窗口:`context_window` → `context_length` → `top_provider.context_length`;
+/// - 免费标记:`isFree` → `pricing` 全零 → `None`(交给规则判);
+/// - 思考档位:`x_ofm_efforts`。
+///
+/// `openai.rs` 与 `responses.rs` 共用本函数,避免两处解析漂移。
+pub(crate) fn parse_model_listing(body: &Value) -> Vec<ModelInfo> {
+    let Some(data) = body.get("data").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    data.iter()
+        .filter_map(|entry| {
+            let id = entry.get("id").and_then(Value::as_str)?;
+            if id.is_empty() {
+                return None;
+            }
+            Some(ModelInfo {
+                id: id.to_string(),
+                context_window: extract_context_window(entry),
+                is_free: extract_is_free(entry),
+                efforts: entry
+                    .get("x_ofm_efforts")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    }),
+                owned_by: entry
+                    .get("owned_by")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            })
+        })
+        .collect()
+}
+
+/// 从清单条目里取上下文窗口(三种字段形态依次探测)。
+fn extract_context_window(entry: &Value) -> Option<u32> {
+    let candidates = [
+        entry.get("context_window"),
+        entry.get("context_length"),
+        entry
+            .get("top_provider")
+            .and_then(|tp| tp.get("context_length")),
+    ];
+    for candidate in candidates.into_iter().flatten() {
+        if let Some(v) = candidate.as_u64() {
+            if v > 0 && v <= u32::MAX as u64 {
+                return Some(v as u32);
+            }
+        }
+    }
+    None
+}
+
+/// 从清单条目里取免费标记:显式 `isFree` 优先,其次 `pricing` 全零。
+///
+/// `pricing` 全零是「这条线路不花钱」的另一种表述(免费池常这么标),
+/// 与显式标记同等的权威性 —— 两者冲突时以 `isFree` 为准。
+fn extract_is_free(entry: &Value) -> Option<bool> {
+    if let Some(flag) = entry.get("isFree").and_then(Value::as_bool) {
+        return Some(flag);
+    }
+    let pricing = entry.get("pricing")?;
+    let prompt = pricing.get("prompt").and_then(Value::as_str)?;
+    let completion = pricing.get("completion").and_then(Value::as_str)?;
+    // 价格字段是字符串("0" / "0.00" / "0.000");非零一律视为收费。
+    let is_zero = |raw: &str| raw.trim().parse::<f64>().map(|v| v == 0.0).unwrap_or(false);
+    Some(is_zero(prompt) && is_zero(completion))
 }
 
 fn classify_status(status: u16, body: &str, headers: &reqwest::header::HeaderMap) -> LlmError {
@@ -251,7 +379,15 @@ fn parse_chunk(v: &Value) -> Vec<ChatEvent> {
                 // reasoning_content:DeepSeek / Qwen / 部分 OpenAI o-series 兼容端点
                 // 用此字段流式输出思考过程(区别于正文 content)。此前被忽略,
                 // 导致这些模型的 reasoning 在 provider 层就已丢失。
-                if let Some(rc) = delta.get("reasoning_content").and_then(|x| x.as_str()) {
+                //
+                // R1:另一批兼容端点(免费模型池实测:OpenRouter / Kilo 系)用
+                // `delta.reasoning` 承载同一语义。两者并存时 `reasoning_content`
+                // 优先;都没有则不产出 ThinkingDelta。
+                let reasoning = delta
+                    .get("reasoning_content")
+                    .and_then(|x| x.as_str())
+                    .or_else(|| delta.get("reasoning").and_then(|x| x.as_str()));
+                if let Some(rc) = reasoning {
                     if !rc.is_empty() {
                         out.push(ChatEvent::ThinkingDelta(rc.to_string()));
                     }
@@ -497,6 +633,107 @@ fn base64_encode(input: &[u8]) -> String {
 mod tests {
     use super::*;
     use crate::request::{SystemBlocks, UserContent};
+
+    #[test]
+    fn 清单解析_取id与上下文窗口() {
+        let body = serde_json::json!({
+            "object": "list",
+            "data": [
+                {"id": "cohere/north-mini-code:free", "context_length": 256000, "owned_by": "kilo"},
+                {"id": "a-model", "top_provider": {"context_length": 1000000}}
+            ]
+        });
+        let list = parse_model_listing(&body);
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].id, "cohere/north-mini-code:free");
+        assert_eq!(list[0].context_window, Some(256000));
+        assert_eq!(list[0].owned_by.as_deref(), Some("kilo"));
+        assert_eq!(list[1].context_window, Some(1000000));
+    }
+
+    #[test]
+    fn 清单解析_显式免费标记优先() {
+        let body = serde_json::json!({
+            "data": [
+                {"id": "x-free", "isFree": true},
+                {"id": "y-paid", "isFree": false},
+                {"id": "z-pricing-zero", "pricing": {"prompt": "0", "completion": "0"}},
+                {"id": "w-pricing-paid", "pricing": {"prompt": "3", "completion": "15"}},
+                {"id": "v-no-marker"}
+            ]
+        });
+        let list = parse_model_listing(&body);
+        assert_eq!(list[0].is_free, Some(true));
+        assert_eq!(list[1].is_free, Some(false));
+        assert_eq!(list[2].is_free, Some(true));
+        assert_eq!(list[3].is_free, Some(false));
+        assert_eq!(list[4].is_free, None);
+    }
+
+    #[test]
+    fn 清单解析_空data返回空列表() {
+        let body = serde_json::json!({"object": "list"});
+        assert!(parse_model_listing(&body).is_empty());
+    }
+
+    #[test]
+    fn 清单解析_读思考档位菜单() {
+        let body = serde_json::json!({
+            "data": [{"id": "m", "x_ofm_efforts": ["none", "low", "high"]}]
+        });
+        let list = parse_model_listing(&body);
+        assert_eq!(
+            list[0].efforts.as_deref(),
+            Some(["none".to_string(), "low".to_string(), "high".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn 思考字段回落_读delta_reasoning() {
+        // R1:部分兼容端点(免费模型池)用 `reasoning` 而非 `reasoning_content`。
+        let chunk = serde_json::json!({
+            "choices": [{"index": 0, "delta": {"reasoning": "thinking..."}}]
+        });
+        let events = parse_chunk(&chunk);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ChatEvent::ThinkingDelta(s) if s == "thinking..."))
+        );
+    }
+
+    #[test]
+    fn 思考字段_两者并存时reasoning_content优先() {
+        let chunk = serde_json::json!({
+            "choices": [{"index": 0, "delta": {
+                "reasoning_content": "primary",
+                "reasoning": "secondary"
+            }}]
+        });
+        let events = parse_chunk(&chunk);
+        let deltas: Vec<&String> = events
+            .iter()
+            .filter_map(|e| match e {
+                ChatEvent::ThinkingDelta(s) => Some(s),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deltas.len(), 1, "只应产出一条思考增量:{deltas:?}");
+        assert_eq!(deltas[0], "primary");
+    }
+
+    #[test]
+    fn 思考字段_都没有时不产出思考事件() {
+        let chunk = serde_json::json!({
+            "choices": [{"index": 0, "delta": {"content": "hi"}}]
+        });
+        let events = parse_chunk(&chunk);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, ChatEvent::ThinkingDelta(_)))
+        );
+    }
 
     #[test]
     fn base64_roundtrip_known_values() {

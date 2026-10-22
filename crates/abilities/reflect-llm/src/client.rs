@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use crate::capabilities::{Capabilities, ProviderKind};
 use crate::error::LlmError;
 use crate::event::ChatEvent;
+use crate::model_catalog::ModelInfo;
 use crate::request::ChatRequest;
 
 pub type BoxedModelClient = std::sync::Arc<dyn ModelClient>;
@@ -86,5 +87,26 @@ pub trait ModelClient: Send + Sync {
             }
         }
         Ok(out)
+    }
+
+    /// 拉取 provider 当前可用的**模型清单**。
+    ///
+    /// 默认实现返回 `Ok(None)` —— 该 provider 没有清单端点(诚实降级,
+    /// **不编造**)。实现了清单端点的 provider(OpenAI 兼容 / Ollama)
+    /// override 本方法。
+    ///
+    /// 语义:
+    /// - `Ok(None)` = 该 provider 不提供清单;
+    /// - `Ok(Some(list))` = 清单拿到了(可能为空列表);
+    /// - `Err` = 端点存在但调用失败(网络 / 鉴权 / 解析)。
+    ///
+    /// 清单条目里的「免费」判定由 [`crate::model_catalog::FreeModelRules`]
+    /// 负责 —— provider 披露的字段在不同方言下差别很大,判定规则独立于
+    /// 清单本身。
+    async fn list_models(
+        &self,
+        _cancel: CancellationToken,
+    ) -> Result<Option<Vec<ModelInfo>>, LlmError> {
+        Ok(None)
     }
 }

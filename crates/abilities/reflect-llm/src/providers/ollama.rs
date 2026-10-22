@@ -23,6 +23,7 @@ use crate::capabilities::Capabilities;
 use crate::client::ModelClient;
 use crate::error::LlmError;
 use crate::event::ChatEvent;
+use crate::model_catalog::ModelInfo;
 use crate::request::{ChatMessage, ChatRequest, ContentBlock, ToolSpec, UserContent};
 
 /// Ollama 默认 endpoint,本地 `ollama serve` 监听端口。
@@ -157,6 +158,62 @@ impl ModelClient for OllamaClient {
         }
 
         Ok(Box::pin(stream_ndjson(response, cancel)))
+    }
+
+    /// R0-1:拉取 Ollama 原生模型清单(`GET {base}/api/tags`)。
+    ///
+    /// Ollama 的清单只有本地已拉取的模型(`name` / `model` 字段),不带
+    /// 免费标记 —— 免费判定交给规则层。
+    async fn list_models(
+        &self,
+        cancel: CancellationToken,
+    ) -> Result<Option<Vec<ModelInfo>>, LlmError> {
+        let url = format!("{}/api/tags", self.resolved_base_url());
+
+        let mut req = self.http.get(&url).header("Accept", "application/json");
+        if let Some(key) = self.config.api_key.as_deref().filter(|k| !k.is_empty()) {
+            req = req.header("Authorization", format!("Bearer {key}"));
+        }
+
+        if cancel.is_cancelled() {
+            return Err(LlmError::Cancelled);
+        }
+
+        let response = req.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            if status == reqwest::StatusCode::NOT_FOUND {
+                return Ok(None);
+            }
+            let status_code = status.as_u16();
+            let text = response.text().await.unwrap_or_default();
+            return Err(classify_status(status_code, &text));
+        }
+
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|e| LlmError::Internal(format!("model listing parse failed: {e}")))?;
+        let Some(models) = body.get("models").and_then(Value::as_array) else {
+            return Ok(Some(Vec::new()));
+        };
+        let list = models
+            .iter()
+            .filter_map(|entry| {
+                let id = entry
+                    .get("name")
+                    .or_else(|| entry.get("model"))
+                    .and_then(Value::as_str)?;
+                if id.is_empty() {
+                    return None;
+                }
+                Some(ModelInfo {
+                    id: id.to_string(),
+                    ..Default::default()
+                })
+            })
+            .collect();
+        Ok(Some(list))
     }
 }
 
