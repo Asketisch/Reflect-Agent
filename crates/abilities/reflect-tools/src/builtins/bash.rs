@@ -297,7 +297,12 @@ impl Tool for BashTool {
                     message: "run_in_background: 本线程未接入后台任务生成器".into(),
                 })?;
             let bg_cmd = match &saved_cwd {
-                Some(c) => format!("cd -- {} 2>/dev/null; {cmd}", shell_quote(c)),
+                // 同样不依赖 `2>/dev/null`(见下方 script 处的注释):
+                // Landlock 下写 /dev/null 被拒会让重定向失败并中止命令。
+                Some(c) => format!(
+                    "if [ -d {q} ]; then cd -- {q}; fi; {cmd}",
+                    q = shell_quote(c)
+                ),
                 None => cmd.clone(),
             };
             let task_id = spawner.spawn_bash(&bg_cmd, &ctx.workspace_path(), ctx.os_sandbox)?;
@@ -320,8 +325,14 @@ impl Tool for BashTool {
         // 提示 stderr、不阻断执行。
         let mut script = String::new();
         if let Some(c) = &saved_cwd {
+            // 恢复持久 cwd。**刻意不依赖 `>/dev/null`**:Linux Landlock
+            // 沙箱此前未放行 /dev/null 写(只有 macOS Seatbelt 放行),
+            // 重定向失败时 sh 报 "cannot create /dev/null: Permission
+            // denied" 并**中止整条命令** —— cd 根本没执行,目录明明还在
+            // 却被误判成"已不存在"(CI 实测:持久 cwd 跨调用失效)。
+            // 改用 `test -d` 判定:目录没了才提示回落,目录在就直接 cd。
             script.push_str(&format!(
-                "cd -- {q} >/dev/null 2>&1 || printf '%s\\n' \"reflect: 持久工作目录 {d} 已不存在,回落到 workspace 根\" >&2\n",
+                "if [ -d {q} ]; then cd -- {q}; else printf '%s\\n' \"reflect: 持久工作目录 {d} 已不存在,回落到 workspace 根\" >&2; fi\n",
                 q = shell_quote(c),
                 d = c.display()
             ));

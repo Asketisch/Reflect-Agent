@@ -583,6 +583,38 @@ mod landlock {
         unsafe { *__errno_location() }
     }
 
+    /// 给 ruleset 加一条 `PATH_BENEATH` 规则(允许访问 `path` 本身及其
+    /// 下属文件的 `allowed_access` 右)。
+    ///
+    /// 路径可以是目录(workspace / 额外可写目录)也可以是普通文件或
+    /// 字符设备(/dev/null)。打开失败或规则添加失败都**静默跳过** ——
+    /// 少一条放行规则只意味着"更严",不应让沙箱整体失败。
+    fn add_path_beneath_rule(ruleset_fd: i32, path: &Path, allowed_access: u64) {
+        let cpath = match CString::new(path.to_string_lossy().as_bytes()) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        // O_PATH = 0o200000 (0x200000):只取路径引用,不打开目标。
+        let parent_fd = unsafe { open(cpath.as_ptr(), 0o200000) };
+        if parent_fd < 0 {
+            return;
+        }
+        let pb = LandlockPathBeneathAttr {
+            allowed_access,
+            parent_fd,
+        };
+        let _ = unsafe {
+            syscall(
+                SYS_LANDLOCK_ADD_RULE,
+                ruleset_fd as i64,
+                LANDLOCK_RULE_PATH_BENEATH as i64,
+                &pb as *const _,
+                0,
+            )
+        };
+        unsafe { close(parent_fd) };
+    }
+
     /// 非破坏性地探测内核是否支持 Landlock:只发一次
     /// `landlock_create_ruleset(NULL, 0, 0)`。该系统调用不创建任何
     /// ruleset、不改变当前进程状态,可以安全地在常驻 agent 进程里调用。
@@ -655,29 +687,20 @@ mod landlock {
         // `chain` 两臂类型必须一致:once 产出 `&Path`,故 iter 侧映射为
         // as_path(此前直接 iter() 产出 &PathBuf,类型不匹配编译失败)。
         for dir in std::iter::once(workspace).chain(writable.iter().map(|p| p.as_path())) {
-            let cpath = match CString::new(dir.to_string_lossy().as_bytes()) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            let parent_fd = unsafe { open(cpath.as_ptr(), 0o200000) }; // O_PATH = 0o200000 (0x200000)
-            if parent_fd < 0 {
-                continue;
-            }
-            let pb = LandlockPathBeneathAttr {
-                allowed_access: ACCESS_FS_WRITE_ONLY,
-                parent_fd,
-            };
-            let _ = unsafe {
-                syscall(
-                    SYS_LANDLOCK_ADD_RULE,
-                    ruleset_fd as i64,
-                    LANDLOCK_RULE_PATH_BENEATH as i64,
-                    &pb as *const _,
-                    0,
-                )
-            };
-            unsafe { close(parent_fd) };
+            add_path_beneath_rule(ruleset_fd, dir, ACCESS_FS_WRITE_ONLY);
         }
+
+        // 2b. /dev/null:shell 里 `cmd 2>/dev/null` / `cmd >/dev/null` 是高频
+        // 写法,重定向失败时 sh 会**中止整条命令**(静默跳过执行),必须显式
+        // 允许。与 macOS Seatbelt profile 的
+        // `(allow file-write* (path "/dev/null"))` 对齐 —— 此前只有 Seatbelt
+        // 放行,Landlock 漏了,导致 Linux 上 `2>/dev/null` 全部失败
+        // (CI 实证:sh 报 "cannot create /dev/null: Permission denied",
+        // bash 内建工具的持久 cwd 恢复因此被误判成"目录已不存在")。
+        //
+        // /dev/null 是字符设备(非目录),规则只给文件级写权限(WRITE_FILE);
+        // MAKE_* / REMOVE_* 是目录语义,对文件规则无意义。
+        add_path_beneath_rule(ruleset_fd, Path::new("/dev/null"), ACCESS_FS_WRITE_FILE);
 
         // 3. 对自身应用限制(restrict self)。
         //
@@ -1088,6 +1111,59 @@ mod tests {
         let r = apply_landlock(&ws, &[]);
         // 测试进程已应用 landlock 后可能影响后续测试,故只验证不 panic。
         let _ = r;
+    }
+
+    // ── 回归:Landlock 必须放行 /dev/null 写 ────────────────────────────
+
+    /// 子进程入口:`REFLECT_SANDBOX_DEVNULL_CHILD=1` 时应用 Landlock,
+    /// 再尝试以写模式打开 /dev/null —— 成功 exit(0),被拒 exit(3)。
+    ///
+    /// 必须在**子进程**里做:Landlock 一旦 restrict 就无法撤销,会污染
+    /// 整个测试进程(父进程)。
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn landlock_devnull_write_child() {
+        if std::env::var("REFLECT_SANDBOX_DEVNULL_CHILD").as_deref() != Ok("1") {
+            return;
+        }
+        let ws = std::env::temp_dir();
+        if apply_landlock(&ws, &[]).is_err() {
+            std::process::exit(2); // 环境不支持 Landlock → 父进程按 skip 处理
+        }
+        match std::fs::OpenOptions::new().write(true).open("/dev/null") {
+            Ok(_) => std::process::exit(0),
+            Err(_) => std::process::exit(3),
+        }
+    }
+
+    /// 回归:Landlock 下 `/dev/null` 必须可写。
+    ///
+    /// 此前只有 macOS Seatbelt profile 放行 `/dev/null`
+    /// (`(allow file-write* (path "/dev/null"))`),Landlock 漏了 ——
+    /// Linux 上 shell 的 `cmd 2>/dev/null` 重定向直接失败(sh 报
+    /// "cannot create /dev/null: Permission denied" 并**中止整条命令**),
+    /// bash 内建工具的持久 cwd 恢复因此被误判成"目录已不存在"
+    /// (CI 实证:reflect-tools 的 `cwd_persists_across_calls` 失败)。
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn landlock_allows_devnull_write() {
+        if !landlock_kernel_supported() {
+            eprintln!("skip: 内核不支持 Landlock");
+            return;
+        }
+        let exe = std::env::current_exe().expect("current exe");
+        let status = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "tests::landlock_devnull_write_child",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("REFLECT_SANDBOX_DEVNULL_CHILD", "1")
+            .status()
+            .expect("spawn child");
+        // exit(2) = 环境不支持(不算失败);exit(3) = /dev/null 被拒(回归)。
+        assert_ne!(status.code(), Some(3), "/dev/null 写必须被 Landlock 放行");
     }
 
     #[test]
