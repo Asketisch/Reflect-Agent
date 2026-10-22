@@ -136,7 +136,7 @@ pub async fn run(config_path: &Path, output: Option<&Path>) -> Result<(), CliErr
         config.mailbox_capacity,
     );
 
-    let result = match try_build_llm_orchestrator(&config, &bus) {
+    let result = match try_build_llm_orchestrator(&config, &bus).await {
         Some((orch, factory, _toolset_usage)) => {
             tracing::info!(
                 model = %factory.default_model(),
@@ -217,7 +217,7 @@ type ToolsetUsageMap = HashMap<AgentId, Arc<Mutex<Option<TokenUsage>>>>;
 ///
 /// TOML `AgentSection[]` 由调用方在 `build_context` 处透传(此处只校验
 /// provider + factory wiring 完整性,不接触 system_prompt)。
-fn try_build_llm_orchestrator(
+async fn try_build_llm_orchestrator(
     config: &DiscussionConfig,
     bus: &MessageBus,
 ) -> Option<(
@@ -225,11 +225,14 @@ fn try_build_llm_orchestrator(
     Arc<SubAgentFactory>,
     ToolsetUsageMap,
 )> {
-    // 1. provider + model spec
+    // 1. provider + model spec(`model = "free"` 在此解析成具体 id)
     let reflect_cfg = reflect_config::load_default();
-    let resolved = reflect_cfg.resolved_model_spec()?;
     let registry: SharedModelRegistry = Arc::new(ModelRegistry::new());
     reflect_cfg.apply_to_registry(&registry).ok()?;
+    let resolved = reflect_config::resolve_model_spec(&reflect_cfg, &registry)
+        .await
+        .ok()
+        .flatten()?;
 
     // 2. 每个 participant 一个 DiscussionToolSet,合并到 parent ToolRegistry。
     // 注意 SendMessageTool 携带 self_id,所以必须每个 participant 单独构造,
@@ -432,8 +435,11 @@ system_prompt = "x"
     ///
     /// 注:不强制清 env,这样测试与本地 dev 配置兼容 —— 只要 env 没设关键变量,
     /// `ReflectConfig::active_provider()` 走 `None` 路径即 OK。
-    #[test]
-    fn try_build_returns_none_when_no_provider() {
+    // `try_build_llm_orchestrator` 是 async(内部要 await 模型解析),
+    // 故本用例必须 async —— 否则 `.await` 落在同步 fn 里编译不过
+    // (E0728:await is only allowed inside async functions)。
+    #[tokio::test]
+    async fn try_build_returns_none_when_no_provider() {
         // SAFETY: 用 mutex 串行化避免与并行测试互相覆盖 env。简单起见,
         // 这里仅在大概率无 env 环境下断言;若用户本地真有 OPENAI_API_KEY,
         // 该测试仍会通过(只要 ReflectConfig::resolved_model_spec 返回 Some 就不会 fail)。
@@ -451,7 +457,7 @@ system_prompt = "x"
                 mailbox_capacity: 4,
                 judge: false,
             };
-            let r = try_build_llm_orchestrator(&config, &bus);
+            let r = try_build_llm_orchestrator(&config, &bus).await;
             assert!(r.is_none(), "expected None when no provider configured");
         }
         // env 有 provider 时此分支无意义,跳过(测试不失败)。

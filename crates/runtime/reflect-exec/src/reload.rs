@@ -115,8 +115,15 @@ pub async fn handle_reload(
         return Err(format!("apply_to_registry failed: {e}"));
     }
     let sections_changed = diff_sections(old_cfg, new_cfg);
-    let old_spec = old_cfg.resolved_model_spec();
-    let new_spec = new_cfg.resolved_model_spec();
+    // `model = "free"` 这类运行时才知道的值要在**这里**重新解析 —— 配置
+    // 改的可能是 `[model_discovery]` 规则,或 provider 换了(清单跟着变)。
+    // 解析失败 → 本轮 reload 报错(保留旧 model),不静默沿用旧值。
+    let old_spec = reflect_config::resolve_model_spec(old_cfg, registry)
+        .await
+        .map_err(|e| format!("resolve old model failed: {e}"))?;
+    let new_spec = reflect_config::resolve_model_spec(new_cfg, registry)
+        .await
+        .map_err(|e| format!("resolve new model failed: {e}"))?;
     let model_changed = old_spec != new_spec && new_spec.is_some();
     if let Some(new_model) = new_spec.as_ref() {
         if model_changed {

@@ -4,6 +4,7 @@
 //!
 //! - [`provider`] —— 各 provider 段(`AnthropicSection` / `OpenAISection` / `OllamaSection`) + `CredentialConfig`
 //! - [`agent`] —— 路由 / 子代理 / 协调器 / 压缩 / token 预算
+//! - [`discovery`] —— 模型清单发现(`[model_discovery]` 段)
 //! - [`notifications`] —— 通知 / 遥测 / 分析
 //! - [`integrations`] —— MCP / LSP / PostgreSQL / Redis / Bridge / Voice / DAP / ACP / 网络搜索
 //! - [`plugins`] —— 插件市场配置 / 插件段
@@ -11,6 +12,7 @@
 //! 所有子模块类型通过 `pub use` 重导出,外部代码仍走 `crate::schema::XxxSection`。
 
 pub mod agent;
+pub mod discovery;
 pub mod integrations;
 pub mod notifications;
 pub mod permission_syntax;
@@ -24,6 +26,7 @@ pub use agent::{
     OpenAISubagentSection, RoutingSection, SpecSlotConfig, SubagentProvidersSection,
     SubagentSpecConfig, TokenBudgetSection,
 };
+pub use discovery::ModelDiscoverySection;
 pub use integrations::{
     AcpSection, BridgeSection, DapSection, LspFilePattern, LspServerEntry, LspServersSection,
     McpServerEntry, McpServersSection, McpTransport, PostgresSessionSection, SseRedisSection,
@@ -94,6 +97,11 @@ pub struct ReflectConfig {
     /// ```
     #[serde(default)]
     pub context_windows: Option<ContextWindowsSection>,
+    /// 模型清单发现配置(TOML:`[model_discovery]`)。
+    ///
+    /// 段缺省时用内置默认(发现能力开启 + 内置免费判定规则)。
+    #[serde(default)]
+    pub model_discovery: Option<ModelDiscoverySection>,
     #[serde(default)]
     pub goal: Option<GoalSection>,
     #[serde(default)]
@@ -154,6 +162,7 @@ impl Default for ReflectConfig {
             plugins: PluginsSection::default(),
             routing: None,
             context_windows: None,
+            model_discovery: None,
             subagent_providers: None,
             coordinator: None,
             sanitize: None,

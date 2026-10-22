@@ -117,7 +117,9 @@ pub fn build_default_m4_with_prompts(
 
     // ── Compactor(LlmSummarizer 优先,无 provider 退化 Noop) ──
     let cfg = reflect_config::load_default();
-    let policy = cfg.routing_policy();
+    // 用**已解析**的 model 构建 routing policy:`model = "free"` 这类动态值
+    // 在调用方已解析成真实 id,同步的 `cfg.routing_policy()` 拿到的仍是占位串。
+    let policy = cfg.routing_policy_with(model);
     let summarizer: Arc<dyn Summarizer> = {
         let spec = {
             let p = policy.resolve(reflect_llm::Role::Compact).primary.clone();

@@ -67,6 +67,9 @@ impl ReflectConfig {
     /// `api_key = "..."` 单值在 builder 内部 wrap 为
     /// `label = "default"` / `weight = 1` 的单 entry pool。
     pub fn apply_to_registry(&self, registry: &ModelRegistry) -> Result<(), ConfigError> {
+        // provider 池即将重建(可能换了 base_url / 凭据)→ 旧的模型清单缓存
+        // 必须失效,否则新端点的清单会被旧端点的条目顶掉(TTL 内)。
+        crate::discovery::clear_catalog_cache();
         if let Some(anth) = &self.anthropic {
             if let Some(pool) = build_anthropic_pool(anth)? {
                 registry.register_pool("anthropic", pool);
@@ -270,9 +273,24 @@ impl ReflectConfig {
     /// 各 slot 的 `primary` 缺省时,优先用该 slot 的 env 变量:
     /// `REFLECT_COMPACT_MODEL` / `REFLECT_SUBAGENT_MODEL`,否则兜底
     /// active spec。
+    ///
+    /// ⚠️ 本方法用的是**同步**的 `resolved_model_spec()`。当配置里的 model
+    /// 是 `free` 这类「运行时才知道」的特殊值时,同步解析拿到的仍是占位串
+    /// (`"openai/free"`),而 `model_call` 的 spec 优先取 routing 的 main
+    /// slot primary —— 占位串会盖掉已解析出的真实 id。**动态 model 场景
+    /// 必须用 [`Self::routing_policy_with`] 传入解析后的 spec。**
     pub fn routing_policy(&self) -> reflect_llm::RoutingPolicy {
-        use reflect_llm::{Role, RoutingPolicy, SpecSlot};
         let active_spec = self.resolved_model_spec().unwrap_or_default();
+        self.routing_policy_with(&active_spec)
+    }
+
+    /// 同 [`Self::routing_policy`],但 active spec 由调用方传入。
+    ///
+    /// 用于「model 需要运行时解析」的场景:调用方先解析出真实模型 id,再
+    /// 用它构建 policy,保证 routing 的 main slot 与实际请求一致。
+    pub fn routing_policy_with(&self, active_spec: &str) -> reflect_llm::RoutingPolicy {
+        use reflect_llm::{Role, RoutingPolicy, SpecSlot};
+        let active_spec = active_spec.to_string();
 
         let Some(section) = &self.routing else {
             return RoutingPolicy {

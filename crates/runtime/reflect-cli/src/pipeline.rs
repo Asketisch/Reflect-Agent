@@ -52,7 +52,7 @@ pub async fn run(
 
     // 构造 manager(读 ~/.reflect 已有 team)与 factory。
     let manager = Arc::new(build_manager()?);
-    let factory = Arc::new(build_factory(manager.clone())?);
+    let factory = Arc::new(build_factory(manager.clone()).await?);
 
     // 预加载所有 team 到本地 HashMap —— `from_toml` 的 runner_for 闭包
     // 签名是同步的,无法直接 `await manager.get_team`。
@@ -147,13 +147,17 @@ fn parse_inputs(inputs: &[String]) -> anyhow::Result<HashMap<String, String>> {
 /// model 用 resolved spec —— 此前空 registry + 硬编码 `"openai/gpt-4o"`
 /// 使 team 节点 spawn 在任何配置下都无法命中客户端(测试只能断言
 /// 渲染失败路径)。mock 下整条 plan→prd→exec→verify 可离线跑通。
-fn build_factory(_manager: Arc<TaskManager>) -> anyhow::Result<SubAgentFactory> {
+///
+/// `model = "free"`(运行时从 provider 清单里挑免费模型)在此解析成
+/// 具体 id —— 子 agent 拿到的必须是真实模型名。
+async fn build_factory(_manager: Arc<TaskManager>) -> anyhow::Result<SubAgentFactory> {
     let cfg = reflect_config::load_default();
     let registry = Arc::new(ModelRegistry::new());
     cfg.apply_to_registry(&registry)
         .map_err(|e| anyhow!("build provider from config: {e}"))?;
-    let model = cfg
-        .resolved_model_spec()
+    let model = reflect_config::resolve_model_spec(&cfg, &registry)
+        .await
+        .map_err(|e| anyhow!("resolve model: {e}"))?
         .unwrap_or_else(|| "openai/gpt-4o".to_string());
     let parent_tools = Arc::new(ToolRegistry::default());
     Ok(SubAgentFactory::new(
@@ -181,7 +185,7 @@ fn build_manager() -> anyhow::Result<TaskManager> {
 /// `run_team_pipeline` / `TEAM_PIPELINE_TOML`。
 pub async fn run_team(team_name: &str, topic: &str) -> anyhow::Result<()> {
     let manager = Arc::new(build_manager()?);
-    let factory = Arc::new(build_factory(manager.clone())?);
+    let factory = Arc::new(build_factory(manager.clone()).await?);
     let cancel = CancellationToken::new();
     let report =
         reflect_pipeline::run_team_pipeline(manager, team_name, topic.to_string(), factory, cancel)

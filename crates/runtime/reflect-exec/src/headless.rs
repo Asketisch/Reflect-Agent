@@ -138,13 +138,19 @@ pub async fn bootstrap_common(args: &HeadlessArgs) -> anyhow::Result<HeadlessCom
             config_path.display()
         );
     }
-    let model = initial_cfg.resolved_model_spec().ok_or_else(|| {
-        anyhow::anyhow!(
-            "no model configured for the active provider: set [<provider>].model \
-             or a [[<provider>.credentials]].model entry in {} (or REFLECT_MODEL env)",
-            config_path.display()
-        )
-    })?;
+    // `model = "free"` 这类**运行时才知道**的值(从 provider 清单里挑一个
+    // 免费模型)在此解析成真实 id —— 之后 `AgentConfig.model` 拿到的永远是
+    // 具体模型,事件流 / tracing 里也不会出现 "free" 这种占位。
+    let model = reflect_config::resolve_model_spec(&initial_cfg, &registry)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to resolve model: {e}"))?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no model configured for the active provider: set [<provider>].model \
+                 or a [[<provider>.credentials]].model entry in {} (or REFLECT_MODEL env)",
+                config_path.display()
+            )
+        })?;
 
     let watcher = ConfigWatcher::spawn(config_path.clone(), initial_cfg.clone()).map_err(|e| {
         anyhow::anyhow!(
@@ -393,7 +399,7 @@ pub async fn bootstrap_normal(
         telemetry_sink.clone(),
     )
     .expect("bootstrap_m4 must succeed for the normal (non-resume) path");
-    let policy = Arc::new(initial_cfg.routing_policy());
+    let policy = Arc::new(initial_cfg.routing_policy_with(&model));
 
     // M5 bootstrap:subagent 工具(call_<role>)。
     let parent_recorder: Arc<dyn reflect_protocol::RolloutRecorder> = m4
@@ -666,7 +672,7 @@ pub async fn bootstrap_resumed(
     factory.set_cancel(cancel.clone());
     let cfg = AgentConfig::new(model.clone(), workspace.clone())
         .with_m4(m4)
-        .with_policy(Arc::new(initial_cfg.routing_policy()))
+        .with_policy(Arc::new(initial_cfg.routing_policy_with(&model)))
         .with_telemetry(telemetry_sink)
         .with_cancel(cancel.clone())
         .with_preload_messages(bundle.initial_messages.clone());

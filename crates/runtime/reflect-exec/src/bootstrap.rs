@@ -188,7 +188,7 @@ pub(crate) fn bootstrap_m4(
     // v1.0 多 Provider 路由:用 registry + policy 注入,`LlmSummarizer` 内
     // 部走 `Role::Compact` slot 并在失败时跨 credential failover。
     let summarizer: Arc<dyn Summarizer> = {
-        let policy = cfg.routing_policy();
+        let policy = cfg.routing_policy_with(model);
         // 选 compact slot 的 primary 作 spec 起点(向后兼容 model)
         let spec = {
             let p = policy.resolve(reflect_llm::Role::Compact).primary.clone();

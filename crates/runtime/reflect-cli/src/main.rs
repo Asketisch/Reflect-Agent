@@ -18,6 +18,7 @@ mod init;
 mod login;
 mod lsp;
 mod mcp;
+mod models;
 mod pipeline;
 mod plugin;
 mod security;
@@ -106,6 +107,11 @@ enum Command {
         /// 同时对当前 provider 发一次 1 token 请求探测(会消耗 token)。
         #[arg(long)]
         check_network: bool,
+    },
+    /// 列出 / 挑选 provider 当前可用的模型(清单实时取自 provider 接口)。
+    Models {
+        #[command(subcommand)]
+        action: ModelsAction,
     },
     /// 安装 / 列出 / 启用 / 禁用 / 卸载插件。
     /// v1.0.0-rc2:plugin 主体 7 条 + marketplace stub 3 条。
@@ -229,6 +235,44 @@ enum WorkspaceAction {
         /// 浅克隆深度(0 = 全量克隆)。
         #[arg(long, default_value_t = 0)]
         depth: u32,
+    },
+}
+
+/// `reflect models` 子命令。
+///
+/// 模型清单**实时取自 provider 接口** —— 免费模型池的成员集合由上游决定,
+/// 随时可能增删,写死在配置里必然腐烂。
+#[derive(Debug, Subcommand)]
+enum ModelsAction {
+    /// 列出 provider 当前可用的模型(含免费标记与上下文窗口)。
+    List {
+        /// provider 名(默认:配置里的 active provider)。
+        #[arg(long)]
+        provider: Option<String>,
+        /// 只列免费模型。
+        #[arg(long)]
+        free_only: bool,
+        /// 以 JSON 输出(供脚本 `jq` 消费)。
+        #[arg(long)]
+        json: bool,
+        /// 清单接口超时(秒)。
+        #[arg(long)]
+        timeout_secs: Option<u64>,
+    },
+    /// 挑一个模型并只打印它的 id(供 `$(...)` 消费)。
+    Pick {
+        /// provider 名(默认:配置里的 active provider)。
+        #[arg(long)]
+        provider: Option<String>,
+        /// 只在免费模型里挑。
+        #[arg(long)]
+        free_only: bool,
+        /// id 子串偏好(优先挑含该子串的模型)。
+        #[arg(long)]
+        prefer: Option<String>,
+        /// 清单接口超时(秒)。
+        #[arg(long)]
+        timeout_secs: Option<u64>,
     },
 }
 
@@ -725,7 +769,38 @@ fn main() -> anyhow::Result<()> {
             TracesAction::Ls { limit } => traces::ls(limit),
             TracesAction::Show { id } => traces::show(&id),
         },
-        Command::Doctor { check_network } => doctor::run(check_network),
+        Command::Doctor { check_network } => rt.block_on(doctor::run(check_network)),
+        Command::Models { action } => {
+            let code = match action {
+                ModelsAction::List {
+                    provider,
+                    free_only,
+                    json,
+                    timeout_secs,
+                } => rt.block_on(models::list(models::ListArgs {
+                    provider,
+                    free_only,
+                    json,
+                    timeout_secs,
+                }))?,
+                ModelsAction::Pick {
+                    provider,
+                    free_only,
+                    prefer,
+                    timeout_secs,
+                } => rt.block_on(models::pick(models::PickArgs {
+                    provider,
+                    free_only,
+                    prefer,
+                    timeout_secs,
+                }))?,
+            };
+            // 退出码约定:0 成功;2 provider 无清单能力;3 无匹配模型。
+            if code != 0 {
+                std::process::exit(code);
+            }
+            Ok(())
+        }
         Command::Init { force } => {
             let existed = std::env::current_dir()
                 .ok()
