@@ -116,8 +116,10 @@ impl PyReflectBuilder {
     /// tokio runtime 上 `block_on`。
     fn build<'py>(&self, py: Python<'py>) -> PyResult<PyReflect> {
         let builder = self.inner.clone();
+        // `detach` 即旧版的 `allow_threads`:释放 GIL 后执行闭包,闭包返回
+        // 时重新拿回 GIL(pyo3 0.26 起 `allow_threads` 更名为 `detach`)。
         let agent = py
-            .allow_threads(move || {
+            .detach(move || {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()?;
@@ -166,7 +168,7 @@ impl PyReflect {
         // 释放 GIL 跑异步 turn —— 在工作线程上 spawn 一个 current-thread
         // tokio runtime,阻塞到 turn 终结。Python 主线程在此期间可继续
         // 处理其他任务(若启用子线程)。
-        let result = py.allow_threads(move || run_turn_blocking(agent, prompt));
+        let result = py.detach(move || run_turn_blocking(agent, prompt));
         match result {
             Ok(r) => PyRunResult::from(r).into_bound_py_any(py),
             Err(e) => Err(PyRuntimeError::new_err(e.to_string())),

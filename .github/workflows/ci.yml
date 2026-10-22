@@ -9,6 +9,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # PyO3 在编译期需要解释器。CI runner 镜像的默认 Python 会随镜像升级漂移
+  # (曾从 3.12 漂到 3.14,导致 pyo3-ffi 构建脚本硬失败),故所有需要
+  # 编译 pyo3 的 job 显式 setup-python 并用 PYO3_PYTHON 锁定解释器。
+  PYTHON_VERSION: "3.14"
+  PYO3_PYTHON: python3
 
 jobs:
   check:
@@ -17,6 +22,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
       - run: cargo check --workspace --all-targets
 
   fmt:
@@ -37,6 +45,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
@@ -45,6 +56,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
       # --no-fail-fast:一个 test binary 失败不阻断其余 binaries(一次
       # 看到全部失败面,失败诊断不再打地鼠)。
       - run: cargo test --workspace --all-targets --no-fail-fast

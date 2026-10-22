@@ -118,7 +118,10 @@ clap               = { version = "4", features = ["derive"] }
 # S2:TUI 反射 `TaskManager::list_tasks`(async)—— 用 pollster 在 sync 上下文
 # block_on,免去给整个 App 套 tokio runtime。pollster 无依赖、~200 LOC。
 pollster           = "0.4"
-pyo3               = "0.23"
+# pyo3 ≥ 0.27 才正式支持 Python 3.14 final(0.25/0.26 仅支持 3.14 beta);
+# 0.30 进一步支持 3.15,MSRV 1.85 与本仓库一致。旧版 0.23 在 CI runner
+# 默认 Python 3.14 下构建失败(pyo3-ffi build.rs 硬校验版本上限)。
+pyo3               = "0.30"
 reqwest            = { version = "0.12", features = ["json", "stream", "gzip", "rustls-tls"] }
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
