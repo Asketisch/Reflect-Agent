@@ -89,6 +89,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # 显式装 toolchain:runner 镜像里的 rustup **没有默认 toolchain**
+      # (既没有 `rustup default`,仓库外的临时目录也读不到 rust-toolchain.toml),
+      # 任何在仓库外执行的 cargo 都会报
+      # "rustup could not choose a version of cargo to run"。
+      - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

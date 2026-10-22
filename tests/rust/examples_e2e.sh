@@ -24,9 +24,17 @@ examples_e2e() {
     export REFLECT_MODEL=mock
     export OPENAI_API_KEY="${OPENAI_API_KEY:-e2e-dummy-key}"
 
-    # examples 需先构建(存在即跳过)
+    # examples 需先构建(存在即跳过)。
+    #
+    # 必须在 **仓库根** 执行:rustup 选 toolchain 的顺序是
+    # `+toolchain` 参数 → RUSTUP_TOOLCHAIN 环境变量 → 当前目录及祖先
+    # 目录里的 rust-toolchain.toml → 默认 toolchain。make_isolated_env
+    # 已把 cwd 切到仓库外的临时目录,那里既没有 rust-toolchain.toml,
+    # CI runner(GHA ubuntu)也没配默认 toolchain → cargo 直接报
+    # "rustup could not choose a version of cargo to run"。
+    # 回到仓库根构建,rust-toolchain.toml 生效。
     if [ ! -x "$EX_BIN_DIR/headless_run" ]; then
-        cargo build --release -p reflect --examples --quiet
+        (cd "$ROOT" && cargo build --release -p reflect --examples --quiet)
     fi
 
     # headless_run 需要 prompt 参数
