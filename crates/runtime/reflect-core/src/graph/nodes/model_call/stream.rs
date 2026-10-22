@@ -14,6 +14,14 @@ use tokio::time::sleep;
 use super::super::retry::{RetryAction, classify_action, error_code, outcome_code};
 use crate::submission_loop::NodeContext;
 
+/// 结束原因之后等待尾部 usage chunk 的上限。
+///
+/// provider 把 usage 放在「结束原因之后」的额外 chunk 里是常见做法
+/// (OpenAI `stream_options.include_usage`、Kilo 免费池实测均如此)。
+/// 该 chunk 通常紧随其后到达,但有些 provider 收尾后不立刻关连接 ——
+/// 用短超时兜底,避免整个回合被拖住。
+const USAGE_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(2000);
+
 /// 解析流式累积的工具参数 JSON。
 ///
 /// 模型(尤其弱模型)可能输出空 / 截断 / 非法 JSON,导致 `from_str` 失败。
@@ -68,10 +76,49 @@ pub async fn process_stream_events(
     let mut current_args_str = String::new();
     let mut usage = TokenUsage::default();
     let mut stop = false;
+    // 收到结束原因后的「排空」阶段:只再收 usage 事件。
+    //
+    // 某些 provider 把 usage 放在**结束原因之后**的额外 chunk 里 ——
+    // OpenAI(`stream_options.include_usage`)与 Kilo 免费池实测均如此。
+    // 此前在 `MessageStop` 处直接 break,尾部的 usage chunk 被丢弃 →
+    // `token_count` 恒为 0,配额/成本统计全部失真。
+    let mut draining = false;
+    // 排空阶段的截止时刻(进入排空时设定)—— 整个排空窗口有界。
+    let mut drain_deadline: Option<tokio::time::Instant> = None;
     let mut error: Option<LlmError> = None;
     let mut truncated = false;
 
     loop {
+        // 排空阶段:在有界窗口内继续读,**跳过非 usage 事件**直到拿到 usage。
+        //
+        // 为什么不能只读一个事件:provider 的每个 chunk 都会先产出一个
+        // `MessageStart`(OpenAI 兼容形状里 id/model 每帧都有),所以尾部
+        // usage chunk 前面还隔着一个 `MessageStart` —— 只读一次拿到的是
+        // 它,usage 反而被漏掉。
+        if draining {
+            let deadline = drain_deadline.unwrap_or_else(tokio::time::Instant::now);
+            match tokio::time::timeout_at(deadline, s.next()).await {
+                Ok(Some(Ok(ChatEvent::Usage {
+                    input_tokens,
+                    output_tokens,
+                    cached_tokens,
+                    cache_write_tokens,
+                }))) => {
+                    usage = TokenUsage {
+                        input_tokens,
+                        output_tokens,
+                        cached_tokens,
+                        cache_write_tokens,
+                        total_tokens: input_tokens + output_tokens,
+                    };
+                    break;
+                }
+                // 非 usage 事件(如每个 chunk 都带的 MessageStart)——跳过继续等。
+                Ok(Some(Ok(_))) => continue,
+                // 流结束 / 出错 / 超时 —— 放弃排空。
+                _ => break,
+            }
+        }
         tokio::select! {
             biased;
             _ = ctx.cancel.cancelled() => {
@@ -155,7 +202,16 @@ pub async fn process_stream_events(
                     Some(Err(e)) => { error = Some(e); stop = true; }
                     Some(Ok(_)) => {}
                 }
-                if stop { break; }
+                if stop {
+                    // 流中出错:立即结束,不排空(错误优先)。
+                    if error.is_some() {
+                        break;
+                    }
+                    // 结束原因已到 —— 进入排空阶段等尾部 usage chunk。
+                    draining = true;
+                    drain_deadline =
+                        Some(tokio::time::Instant::now() + USAGE_DRAIN_TIMEOUT);
+                }
             }
         }
     }

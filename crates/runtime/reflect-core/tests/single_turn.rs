@@ -1125,3 +1125,63 @@ async fn mid_stream_retry_same_is_capped_then_fails_over() {
         "超限 failover 应发 Switched(retry_same_exhausted) 路由事件"
     );
 }
+
+/// provider 把 usage 放在**结束原因之后**的额外 chunk 里
+/// (OpenAI `stream_options.include_usage` / Kilo 免费池实测均如此)时,
+/// `token_count` 必须仍能拿到真实用量 —— 否则配额与成本统计全部失真。
+///
+/// 回归:此前在 `MessageStop` 处直接 break,尾部的 usage chunk 被丢弃。
+#[tokio::test]
+async fn usage_after_message_stop_is_still_reported() {
+    let registry = Arc::new(ModelRegistry::new());
+    // 事件顺序刻意复刻真实 wire:先 finish_reason,后 usage。
+    let stub = Arc::new(StubClient::new(vec![
+        ChatEvent::MessageStart {
+            id: "m1".into(),
+            model: "stub-1".into(),
+        },
+        ChatEvent::ContentDelta("hi".into()),
+        ChatEvent::MessageStop,
+        // 真实 wire 形状:每个 chunk 都先产出一个 MessageStart(id/model 每帧都有),
+        // usage chunk 前面还隔着一个 MessageStart —— 排空逻辑必须跳过它。
+        ChatEvent::MessageStart {
+            id: "m1".into(),
+            model: "stub-1".into(),
+        },
+        ChatEvent::Usage {
+            input_tokens: 42,
+            output_tokens: 7,
+            cached_tokens: 3,
+            cache_write_tokens: 0,
+        },
+    ]));
+    registry.register_pool(
+        "stub",
+        CredentialPool {
+            entries: vec![PoolEntry {
+                client: stub.clone(),
+                label: "default".into(),
+                weight: 1,
+            }],
+        },
+    );
+    let thread = build_thread(registry);
+
+    let mut handle = thread.submit(make_sub("echo hi")).await;
+    let mut got: Vec<EventMsg> = Vec::new();
+    while let Some(ev) = handle.next().await {
+        got.push(ev.msg.clone());
+    }
+
+    let token = got
+        .iter()
+        .find_map(|m| match m {
+            EventMsg::TokenCount(t) => Some(t.clone()),
+            _ => None,
+        })
+        .expect("应有 TokenCount 事件");
+    assert_eq!(token.input_tokens, 42, "结束原因之后的 usage 必须被采集");
+    assert_eq!(token.output_tokens, 7);
+    assert_eq!(token.cached_tokens, 3);
+    assert_eq!(token.total_tokens, 49);
+}
