@@ -55,6 +55,29 @@ fn make_sub(text: &str) -> Submission {
     Submission::user_input(text)
 }
 
+/// 恒定 429 的 client —— 用于验证「池耗尽后切 fallback spec」。
+struct AlwaysRateLimitedClient {
+    call_count: Arc<Mutex<u32>>,
+}
+
+#[async_trait]
+impl ModelClient for AlwaysRateLimitedClient {
+    fn name(&self) -> &str {
+        "always-limited"
+    }
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::default()
+    }
+    async fn stream(
+        &self,
+        _req: ChatRequest,
+        _cancel: CancellationToken,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError> {
+        *self.call_count.lock() += 1;
+        Err(LlmError::RateLimited { retry_after_ms: 1 })
+    }
+}
+
 #[tokio::test]
 async fn main_turn_fails_over_and_completes() {
     let registry = Arc::new(ModelRegistry::new());
@@ -280,4 +303,90 @@ fn coordinator_worker_registry_strips_internal_tools() {
         assert!(!worker.list().contains(&forbidden.to_string()));
     }
     assert!(worker.list().contains(&"TaskCreate".to_string()));
+}
+
+/// R3:`SpecSlot.fallbacks` 是**跨模型**降级链 —— 当前 spec 的 credential
+/// 池全部不可用时,切到链上的下一个 spec 并继续本轮。
+///
+/// 回归:`fallbacks` 此前是「只解析不消费」的死字段(`policy.rs` 文档承诺过,
+/// `reflect-core` 从未读过它)—— 配了不生效。
+#[tokio::test]
+async fn fallback_spec_takes_over_when_pool_exhausted() {
+    let registry = Arc::new(ModelRegistry::new());
+
+    // provider "openai" 池里只有一条恒定 429 的凭据 → 池很快耗尽。
+    let count_a = Arc::new(Mutex::new(0u32));
+    let c_a: Arc<dyn ModelClient> = Arc::new(AlwaysRateLimitedClient {
+        call_count: count_a,
+    });
+    registry.register_pool(
+        "openai",
+        CredentialPool {
+            entries: vec![PoolEntry {
+                client: c_a,
+                label: "primary".into(),
+                weight: 1,
+            }],
+        },
+    );
+
+    // fallback provider "backup" 池里有一条正常凭据。
+    let count_b = Arc::new(Mutex::new(0u32));
+    let c_b: Arc<dyn ModelClient> = Arc::new(FlakyClient {
+        call_count: count_b,
+        first_error: None,
+    });
+    registry.register_pool(
+        "backup",
+        CredentialPool {
+            entries: vec![PoolEntry {
+                client: c_b,
+                label: "backup".into(),
+                weight: 1,
+            }],
+        },
+    );
+
+    // primary 池的凭据恒定 429:第一次失败后进入 cooldown,池耗尽 → 切 spec。
+    let policy = Arc::new(reflect_llm::RoutingPolicy {
+        main: reflect_llm::SpecSlot {
+            primary: "openai/gpt-4o".to_string(),
+            fallbacks: vec!["backup/gpt-4o-mini".to_string()],
+            weights: vec![1],
+        },
+        ..Default::default()
+    });
+
+    let cfg = AgentConfig::new("openai/gpt-4o", Path::new("."))
+        .with_policy(policy)
+        .with_initial_permission_mode(reflect_protocol::PermissionMode::Auto);
+    let tools = Arc::new(ToolRegistry::default());
+    let thread = AgentThread::new(cfg, registry, tools, None, None);
+    let mut handle = thread.submit(make_sub("hi")).await;
+
+    let mut saw_spec_fallback = false;
+    let mut fallback_to: Option<String> = None;
+    let mut saw_turn_complete = false;
+
+    while let Some(ev) = handle.next().await {
+        match ev.msg {
+            EventMsg::Routing(ref r) if r.kind == RoutingEventKind::SpecFallback => {
+                saw_spec_fallback = true;
+                fallback_to = r.to_credential.clone();
+            }
+            EventMsg::TurnComplete(_) => saw_turn_complete = true,
+            _ => {}
+        }
+    }
+
+    assert!(
+        saw_spec_fallback,
+        "primary 池耗尽后应发出 RoutingEvent(SpecFallback)"
+    );
+    assert_eq!(
+        fallback_to.as_deref(),
+        Some("backup/gpt-4o-mini"),
+        "应切到 fallback spec"
+    );
+    assert!(saw_turn_complete, "fallback 接管后本轮仍应正常收尾");
 }

@@ -31,4 +31,15 @@ pub enum RoutingEventKind {
     CooldownStarted,
     /// 成功调用后清除 cooldown(标记恢复)。
     CooldownCleared,
+    /// v1.7 R3:当前 spec 的 credential 池全部不可用,切到 fallback spec
+    /// (跨模型降级)。
+    ///
+    /// 与 [`Self::Switched`] 的区别:前者是**同池内**换 credential
+    /// (`from_credential` / `to_credential` 都是凭据 label),本变体是
+    /// **换模型 spec**(`from_credential` / `to_credential` 装的是
+    /// `"provider/model"` 形式的 spec)。
+    ///
+    /// 新增变体是 Protocol v0 允许的向后兼容扩展 —— 既有变体语义不变,
+    /// SDK 遇到未知变体须能降级不崩。
+    SpecFallback,
 }

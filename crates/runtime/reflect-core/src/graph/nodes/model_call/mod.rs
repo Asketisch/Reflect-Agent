@@ -63,11 +63,38 @@ pub async fn model_call(state: &mut AgentState, ctx: &NodeContext) -> Option<Gra
 
     let model = ctx.model.read().clone();
     let initial_spec = ctx.policy.resolve(Role::Main).primary.clone();
-    let spec = if initial_spec.is_empty() {
+    // R3:spec 在 fallback 链上会变(切模型),故为可变绑定。
+    let mut spec = if initial_spec.is_empty() {
         model.clone()
     } else {
         initial_spec
     };
+
+    // R3:跨模型 fallback 链 —— primary 之后的 fallback spec 依次接管。
+    //
+    // 池内 credential 全不可用(全冷却 / 全被 exclude)时切到下一个 spec;
+    // 切 spec 会换模型(provider 相同则只是换模型名),因此请求体的 model
+    // 与工具描述覆盖都要跟着换。
+    //
+    // ⚠️ `SpecSlot.fallbacks` 在 v1.0 之前是「只解析不消费」的死字段
+    // (`policy.rs` 的文档承诺过,但 `reflect-core` 从未读过它)—— 本次接通。
+    let spec_chain: Vec<String> = {
+        let slot = ctx.policy.resolve(Role::Main);
+        let mut chain: Vec<String> = Vec::with_capacity(1 + slot.fallbacks.len());
+        chain.push(spec.clone());
+        for fb in &slot.fallbacks {
+            let fb = fb.trim();
+            if fb.is_empty() || fb == spec {
+                continue;
+            }
+            if !chain.iter().any(|s| s == fb) {
+                chain.push(fb.to_string());
+            }
+        }
+        chain
+    };
+    // 当前 spec 在链上的位置(切 spec 时 +1)。
+    let mut spec_index: usize = 0;
 
     let mut messages = if !state.messages.messages.is_empty() {
         state.messages.messages.clone()
@@ -160,6 +187,46 @@ pub async fn model_call(state: &mut AgentState, ctx: &NodeContext) -> Option<Gra
         let next_client = match ctx.registry.next_for(&spec, &exclude) {
             Some(nc) => nc,
             None => {
+                // 当前 spec 的池已无可用 credential —— 切到下一个 fallback spec
+                // (跨模型降级);链尾才真正耗尽。
+                if spec_index + 1 < spec_chain.len() {
+                    spec_index += 1;
+                    let previous_spec = spec.clone();
+                    spec = spec_chain[spec_index].clone();
+                    // 换模型 → 请求体的 model 与工具描述覆盖都要跟着换。
+                    request.model = spec
+                        .split_once('/')
+                        .map(|(_, m)| m)
+                        .unwrap_or(&spec)
+                        .to_string();
+                    reflect_prompt::apply_model_overrides(
+                        &mut request.tools,
+                        &reflect_prompt::library().resolve(&spec),
+                    );
+                    // 排除集按 client 指针比对,跨 provider 池不复用 —— 清空后
+                    // 新池的全池重新参与派位。
+                    exclude.clear();
+                    tracing::info!(
+                        from = %previous_spec,
+                        to = %spec,
+                        "model_call: credential pool exhausted; switching to fallback spec"
+                    );
+                    let _ = ctx
+                        .event_tx
+                        .send(Event::new(
+                            ctx.sub_id.clone(),
+                            EventMsg::Routing(RoutingEvent {
+                                kind: RoutingEventKind::SpecFallback,
+                                role: "main".into(),
+                                from_credential: Some(previous_spec),
+                                to_credential: Some(spec.clone()),
+                                reason: "all_credentials_exhausted".into(),
+                                cooldown_until_ms: None,
+                            }),
+                        ))
+                        .await;
+                    continue;
+                }
                 // 无可用 client —— provider 未知(这正是耗尽的表现),
                 // span 的 provider 字段留空。
                 failed(
