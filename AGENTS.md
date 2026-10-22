@@ -44,6 +44,9 @@ cargo doc --no-deps
 # 打包分发 / 磁盘治理
 make dist                                 # DMG / tar.gz / zip 到 dist/
 make gc                                   # 清 target/debug 中 cargo 不 GC 的中间产物(曾膨胀 30+GB)
+
+# SDK 发布(PyPI / npm,详见 docs/release.md)
+./scripts/release_sdk.sh check            # 版本一致性 + 双包构建检查(dry-run,不发布)
 ```
 
 离线开发:examples 与 e2e 用 `REFLECT_MODEL=mock` 跳过真实 LLM 网络调用。
