@@ -325,6 +325,18 @@ pub async fn pre_loop(state: &mut AgentState, ctx: &NodeContext) -> Option<Graph
     let mut core = reflect_prompt::LayeredPrompt::compose_core(agent_prompt, &memory_text);
     let current_mode = ctx.cfg.permission_mode();
     reflect_prompt::append_active_mode_section(&mut core, current_mode);
+    // 清单回灌:把**最近一次** `TodoWrite` 的清单注入 core prompt ——
+    // 否则清单「只出不进」,LLM 写完即忘(见 `AgentConfig::todos_slot`)。
+    // 放在 active-mode 段之后:它是**当前状态**,不是记忆。
+    if let Some(checklist) = ctx.todos_slot.read().clone() {
+        if !checklist.trim().is_empty() {
+            core.push_str("\n\n## Current Todo List\n");
+            core.push_str(&checklist);
+            core.push_str(
+                "\nThis is your own working checklist — keep it up to date with the `TodoWrite` tool, and work through the remaining items.\n",
+            );
+        }
+    }
     let ephemeral_skills = m4.skills.render_for_system_prompt();
     let reminder = format!("Iteration {}/{}", state.iteration, ctx.max_iterations);
     let mut effective = m4.skills.active_tool_names();

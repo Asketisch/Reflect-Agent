@@ -90,6 +90,9 @@ pub struct NodeContext {
     /// v1.2 P1:目标模式 controller。`None` = 未激活;turn 结束后
     /// submission_loop 调 `on_turn_end` 自校验 + 续作。
     pub goal: Arc<parking_lot::RwLock<Option<Arc<reflect_goal::GoalController>>>>,
+    /// 会话级「当前 todo 清单」槽(渲染好的紧凑文本)—— 见
+    /// `AgentConfig::todos_slot`。`tool_exec` 写,`pre_loop` 读并注入。
+    pub todos_slot: Arc<parking_lot::RwLock<Option<String>>>,
     /// v1.x 功能 7:token plan 配额追踪器。`None` = 不追踪(无 credential
     /// 声明配额);`Some` = `model_call` 在 LLM 调用成功后累计 usage,
     /// 耗尽时对该 credential 触发 cooldown,`next_for` 顺位切到下一个 plan。
@@ -542,6 +545,7 @@ pub async fn submission_loop(
                     force_compact_next: cfg.force_compact_next.clone(),
                     telemetry: cfg.telemetry.clone(),
                     goal: cfg.goal.clone(),
+                    todos_slot: cfg.todos_slot.clone(),
                     quota_tracker: cfg.quota_tracker.clone(),
                     // v1.x Plan mode:把 submission_loop 拥有的共享
                     // `PlanApprovalGate` 与 session subscriber list clone

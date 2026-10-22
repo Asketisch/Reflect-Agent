@@ -125,6 +125,15 @@ pub struct AgentConfig {
     /// 是否活跃」。共享槽让线程侧能读到**权威**状态
     /// (`AgentThread::goal_snapshot()`)。
     pub goal: Arc<RwLock<Option<Arc<reflect_goal::GoalController>>>>,
+    /// 会话级「当前 todo 清单」槽 —— 渲染好的紧凑文本(注入给模型)。
+    ///
+    /// `TodoWrite` 把清单写进 `ToolOutput.metadata.todos` —— 那是**输出
+    /// 通道**:GUI 能展示,但没有任何组件把它**回灌进模型上下文**,于是
+    /// 清单「只出不进」,LLM 写完即忘。
+    ///
+    /// 本槽(`Arc` → 跨 `AgentConfig` 的 clone 共享,跨回合存活)由
+    /// `tool_exec` 写、`pre_loop` 读并注入进 core prompt。
+    pub todos_slot: Arc<RwLock<Option<String>>>,
     /// v1.x 功能 7:token plan 配额追踪器。`None` = 无 credential 声明配额
     /// (向后兼容);`Some` = `model_call` 累计 usage,耗尽触发 cooldown 切换。
     pub quota_tracker: Option<SharedQuotaTracker>,
@@ -212,6 +221,7 @@ impl AgentConfig {
             force_compact_next: Arc::new(RwLock::new(false)),
             telemetry: None,
             goal: Arc::new(RwLock::new(None)),
+            todos_slot: Arc::new(RwLock::new(None)),
             quota_tracker: None,
             tool_env: HashMap::new(),
             session_id: None,
