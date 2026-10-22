@@ -1168,7 +1168,25 @@ pub async fn submission_loop(
                 let client = match registry.next_for(&spec, &[]) {
                     Some(nc) => nc.client.clone(),
                     None => {
+                        // 此前只是 warn + continue —— **静默丢弃**目标模式:
+                        // 命令返回了 submission id(看起来成功),GUI 的
+                        // 「目标模式」投影还亮着,而引擎里根本没有
+                        // controller(校验永不发生)。用户无从得知。
+                        //
+                        // 现在**如实上报**:发一条 error 事件,让前端能提示
+                        // 「目标模式没开成」,而不是让用户对着一个假投影
+                        // 干等。
                         tracing::warn!("goal: no LLM client available for verification");
+                        let ev = Event::new(
+                            reflect_protocol::EVENT_ID_NONE,
+                            reflect_protocol::EventMsg::Error(reflect_protocol::ErrorEvent {
+                                code: "GOAL_NO_CLIENT".into(),
+                                message: "目标模式未开启:没有可用的 LLM 客户端(检查 provider / api_key 配置)".into(),
+                                details: None,
+                            }),
+                        );
+                        let _ = turn_tx.send(ev.clone()).await;
+                        fan_out_session(&session_subs, &ev);
                         continue;
                     }
                 };

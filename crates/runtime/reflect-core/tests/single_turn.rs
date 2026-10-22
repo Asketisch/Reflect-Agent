@@ -1296,3 +1296,63 @@ async fn tool_args_from_start_only_are_not_lost() {
         seen[0]
     );
 }
+
+// ── 目标模式:没有 LLM 客户端时必须**如实上报** ──────────────────────────
+
+/// 目标模式在**没有可用 LLM 客户端**时必须**如实上报**,不能静默丢弃。
+///
+/// 此前是 `warn` + `continue`:命令返回了 submission id(看着像成功),
+/// GUI 的「目标模式」投影还亮着,而引擎里**根本没有** controller ——
+/// 校验永不发生,用户无从得知。现在发一条 `GOAL_NO_CLIENT` 的 error 事件。
+#[tokio::test]
+async fn goal_mode_without_client_reports_error() {
+    // 空 registry —— 没有任何 provider / 凭据 → `next_for` 必然 None。
+    let registry = Arc::new(ModelRegistry::new());
+    let thread = build_thread(registry);
+    let mut session_rx = thread.subscribe_session();
+
+    let submission = Submission {
+        id: "goal-sub".into(),
+        op: reflect_protocol::Op::EnterGoalMode {
+            goal: "probe goal".into(),
+            verify_command: None,
+            token_budget: None,
+        },
+        client_user_message_id: None,
+        trace: None,
+        workspace: None,
+        source_command: None,
+    };
+    let mut handle = thread.submit(submission).await;
+
+    // 收事件:要么是 error(GOAL_NO_CLIENT),要么是 submission_closed。
+    let mut saw_error = false;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        match tokio::time::timeout(std::time::Duration::from_secs(2), session_rx.recv()).await {
+            Ok(Some(ev)) => {
+                if let reflect_protocol::EventMsg::Error(e) = &ev.msg {
+                    assert_eq!(e.code, "GOAL_NO_CLIENT", "错误码不对:{e:?}");
+                    assert!(
+                        e.message.contains("目标模式"),
+                        "错误文案应说明目标模式没开成:{e:?}"
+                    );
+                    saw_error = true;
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => continue,
+        }
+    }
+    // turn 侧也应收尾(不能挂住)。
+    while let Some(ev) = handle.next().await {
+        if matches!(ev.msg, reflect_protocol::EventMsg::TurnComplete(_)) {
+            break;
+        }
+    }
+    assert!(
+        saw_error,
+        "没有 LLM 客户端时目标模式必须发 GOAL_NO_CLIENT 错误事件,而不是静默丢弃"
+    );
+}
