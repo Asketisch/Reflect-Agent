@@ -829,6 +829,12 @@ impl SpawnedChild {
         // 跟踪当前见过最权威的 usage 来源。
         let mut usage_from_turn_complete: Option<TokenUsage> = None;
         let mut usage_from_token_count: Option<TokenUsage> = None;
+        // 最后一个错误事件的摘要 —— 失败时**带上根因**。
+        //
+        // 此前失败只报「no result extractable」:调用方(流水线 / 讨论编排)
+        // 看到的是一句无信息量的话,真正的病因(上游 429 / 鉴权失败 /
+        // 地区门)被吞掉了 —— 排查时只能去翻日志。
+        let mut last_error: Option<String> = None;
         while let Some(ev) = handle.next().await {
             // v1.4 C1:进度回调(终态事件不转发,终态由返回值承载)。
             // v1.4 C1:进度回调。子代理文本走 AgentMessageDelta(core 的
@@ -870,6 +876,12 @@ impl SpawnedChild {
                 reflect_protocol::EventMsg::TurnComplete(tc) => {
                     usage_from_turn_complete = Some(tc.usage.clone());
                 }
+                reflect_protocol::EventMsg::Error(e) => {
+                    last_error = Some(format!("{}: {}", e.code, e.message));
+                }
+                reflect_protocol::EventMsg::StreamError(e) => {
+                    last_error = Some(format!("{}: {}", e.code, e.message));
+                }
                 reflect_protocol::EventMsg::TokenCount(tc) => {
                     usage_from_token_count = Some(TokenUsage {
                         input_tokens: tc.input_tokens,
@@ -907,7 +919,13 @@ impl SpawnedChild {
             }
         }
         let text = crate::data_transfer::extract_result(&events, &data_transfer.result_extractor)
-            .ok_or_else(|| SubAgentError::SpawnFailed("no result extractable".into()))?;
+            .ok_or_else(|| {
+            // 带根因:没有错误事件时保留原措辞。
+            SubAgentError::SpawnFailed(match last_error {
+                Some(e) => format!("no result extractable (last error: {e})"),
+                None => "no result extractable".into(),
+            })
+        })?;
         let token_usage = usage_from_turn_complete.or(usage_from_token_count);
         // v1.4 A1:终态释放已交给 `_cleanup` guard(见函数开头),它在本
         // 函数任何路径返回时 drop,统一执行 fetch_sub + 注销 + cancel。
