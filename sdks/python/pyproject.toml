@@ -9,6 +9,11 @@ authors = [{ name = "Reflect Agent Contributors" }]
 # 无运行时依赖:仅 stdlib(os / subprocess / threading / json / dataclasses)。
 dependencies = []
 
+[project.urls]
+Homepage = "https://github.com/Asketisch/Reflect-Agent"
+Repository = "https://github.com/Asketisch/Reflect-Agent"
+Issues = "https://github.com/Asketisch/Reflect-Agent/issues"
+
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
 

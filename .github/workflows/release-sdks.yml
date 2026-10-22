@@ -1,0 +1,168 @@
+# SDK 双仓库发布流水线:Python SDK → PyPI,TS SDK → npm。
+#
+# 触发:
+#   - `git push --tags v*` → 正式发布(前提:平台侧 Trusted Publishing 已配置,
+#     见 docs/release.md;未配置时 PyPI/npm 发布步骤会失败,CLI 的 release.yml
+#     不受影响);
+#   - Actions 页手动 dispatch → 默认 dry_run=true,只做构建 + 检查 + 产物上传,
+#     绝不发布(测试阶段验证流水线用这条路径)。
+#
+# 认证:两端均走 OIDC Trusted Publishing,仓库 secrets 不存任何 token。
+#   - PyPI 要求 id-token: write + environment `pypi`(登记五元组时须一致);
+#   - npm 要求 npm CLI ≥ 11.5.1、Node ≥ 22.14、id-token: write + environment `npm`。
+#
+# 包名与版本一律从包清单文件读取,不在此处硬编码 —— 项目改名时本文件无需变动。
+
+name: release-sdks
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:    # Actions 标签页手动触发(input dry_run 默认 true)
+    inputs:
+      dry_run:
+        description: '试运行(只构建 + 检查 + 上传产物,不发布)'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read        # 仅读代码;发布走 OIDC,无需 contents: write
+  id-token: write       # PyPI / npm Trusted Publishing 的 OIDC 令牌所需
+
+concurrency:
+  group: release-sdks-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────
+  # 发布门禁:三处版本一致性(手动 dispatch 时跳过与 tag 的比对)+
+  # 双 SDK 离线测试(mock,无网络)。任一失败则两个发布 job 均不执行。
+  # ─────────────────────────────────────────────────────────────────────
+  gate:
+    name: gate(版本一致性 + SDK 测试)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 版本一致性校验
+        run: |
+          set -euo pipefail
+          CARGO_VER=$(awk '/^\[workspace\.package\]/{f=1;next} /^\[/{f=0} f && /^version = /{print; exit}' Cargo.toml | cut -d'"' -f2)
+          PY_VER=$(sed -n 's/^version = "\(.*\)"/\1/p' sdks/python/pyproject.toml | head -n1)
+          TS_VER=$(node -p "require('./sdks/typescript/package.json').version")
+          echo "workspace=$CARGO_VER  python=$PY_VER  ts=$TS_VER"
+          [ "$CARGO_VER" = "$PY_VER" ] || { echo "FAIL: workspace($CARGO_VER) != python($PY_VER)"; exit 1; }
+          [ "$PY_VER" = "$TS_VER" ] || { echo "FAIL: python($PY_VER) != ts($TS_VER)"; exit 1; }
+          # 仅 tag 触发时要求三处版本与 tag 一致;手动 dispatch 在分支上,无此约束
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            TAG_VER="${GITHUB_REF_NAME#v}"
+            for v in "$CARGO_VER" "$PY_VER" "$TS_VER"; do
+              [ "$v" = "$TAG_VER" ] || { echo "FAIL: 版本 $v != tag v$TAG_VER"; exit 1; }
+            done
+          fi
+
+      - name: Python SDK 测试(离线)
+        run: |
+          pip install --quiet pytest
+          (cd sdks/python && pytest -ra)
+
+      - name: TS SDK 测试(离线)
+        run: (cd sdks/typescript && npm ci --no-fund --no-audit && npm test)
+
+  # ─────────────────────────────────────────────────────────────────────
+  # PyPI:dry-run 只构建 + twine check + 产物上传;tag 触发且非 dry-run
+  # 才用 Trusted Publishing(OIDC)真发布。发布失败时 artifact 已上传,
+  # 可直接检查产物定位问题。
+  # ─────────────────────────────────────────────────────────────────────
+  pypi:
+    name: PyPI(构建 → 检查 → [dry-run 时不发布])
+    needs: gate
+    runs-on: ubuntu-latest
+    environment: pypi    # 须与 PyPI 侧 Pending Publisher 登记的 environment 一致
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安装构建工具
+        run: pip install --quiet build twine
+
+      - name: 构建 sdist + wheel
+        run: (cd sdks/python && python -m build --outdir dist)
+
+      - name: 元数据检查(twine check)
+        run: twine check sdks/python/dist/*
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: pypi-dist
+          path: sdks/python/dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 发布到 PyPI(OIDC,无 token)
+        if: startsWith(github.ref, 'refs/tags/v') && inputs.dry_run != true
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: sdks/python/dist
+
+  # ─────────────────────────────────────────────────────────────────────
+  # npm:流程与 PyPI 对称。npm pack 出真实 tgz 供 artifact 检查,
+  # --dry-run 校验发布文件清单;tag 触发且非 dry-run 才真发布。
+  # ─────────────────────────────────────────────────────────────────────
+  npm:
+    name: npm(构建 → 检查 → [dry-run 时不发布])
+    needs: gate
+    runs-on: ubuntu-latest
+    environment: npm    # 须与 npm 侧 Trusted Publisher 登记的 environment 一致
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      # OIDC 发布要求 npm CLI ≥ 11.5.1(Node 22 自带的可能偏旧,显式升级)
+      - name: 升级 npm CLI
+        run: npm install -g npm@latest
+
+      - name: 安装依赖 + 构建
+        run: (cd sdks/typescript && npm ci --no-fund --no-audit && npm run build)
+
+      - name: 生成发布包预览
+        run: (cd sdks/typescript && npm pack --pack-destination packing)
+
+      - name: 发布清单校验(publish --dry-run)
+        run: (cd sdks/typescript && npm publish --dry-run)
+
+      - name: 上传发布包预览
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-pack
+          path: sdks/typescript/packing/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 发布到 npm(OIDC + provenance,无 token)
+        if: startsWith(github.ref, 'refs/tags/v') && inputs.dry_run != true
+        run: (cd sdks/typescript && npm publish --provenance)
