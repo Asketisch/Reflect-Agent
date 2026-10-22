@@ -697,6 +697,49 @@ async fn maybe_emit_plan_draft_updated(
         .await;
 }
 
+// ── todo 清单回灌 ────────────────────────────────────────────────────────
+//
+// `TodoWrite` 的输出元数据形状(见 reflect-task 的 TodoWriteTool):
+// ```json
+// { "todos": [ { "content": "...", "status": "pending|in_progress|completed",
+//                 "activeForm": "..." } ], "count": 3 }
+// ```
+//
+// 渲染成注入给模型的紧凑文本:`- [ ] / - [~] / - [x]` 三态。
+//
+// 返回 `None` = 这不是一份 todo 清单(别的工具 / 没有 `todos` 字段 /
+// 清单为空)—— 调用方据此**不覆盖**已有槽位。
+
+/// 把 `TodoWrite` 的 `metadata.todos` 渲染成注入给模型的紧凑清单文本。
+fn render_todo_checklist(metadata: &serde_json::Value) -> Option<String> {
+    let todos = metadata.get("todos")?.as_array()?;
+    let mut out = String::new();
+    for t in todos {
+        let content = t
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if content.trim().is_empty() {
+            continue;
+        }
+        let mark = match t
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("pending")
+        {
+            "completed" => "x",
+            "in_progress" => "~",
+            _ => " ",
+        };
+        out.push_str(&format!("- [{mark}] {}\n", content.trim()));
+    }
+    if out.trim().is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -929,48 +972,5 @@ mod tests {
         let resolved = resolve_plan_draft_path("PlanWrite", &args, &ws);
         assert!(resolved.is_none(), "plan_dir 不存在时应当返回 None");
         let _ = fs::remove_dir_all(&ws);
-    }
-}
-
-// ── todo 清单回灌 ────────────────────────────────────────────────────────
-//
-// `TodoWrite` 的输出元数据形状(见 reflect-task 的 TodoWriteTool):
-// ```json
-// { "todos": [ { "content": "...", "status": "pending|in_progress|completed",
-//                 "activeForm": "..." } ], "count": 3 }
-// ```
-//
-// 渲染成注入给模型的紧凑文本:`- [ ] / - [~] / - [x]` 三态。
-//
-// 返回 `None` = 这不是一份 todo 清单(别的工具 / 没有 `todos` 字段 /
-// 清单为空)—— 调用方据此**不覆盖**已有槽位。
-
-/// 把 `TodoWrite` 的 `metadata.todos` 渲染成注入给模型的紧凑清单文本。
-fn render_todo_checklist(metadata: &serde_json::Value) -> Option<String> {
-    let todos = metadata.get("todos")?.as_array()?;
-    let mut out = String::new();
-    for t in todos {
-        let content = t
-            .get("content")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        if content.trim().is_empty() {
-            continue;
-        }
-        let mark = match t
-            .get("status")
-            .and_then(|v| v.as_str())
-            .unwrap_or("pending")
-        {
-            "completed" => "x",
-            "in_progress" => "~",
-            _ => " ",
-        };
-        out.push_str(&format!("- [{mark}] {}\n", content.trim()));
-    }
-    if out.trim().is_empty() {
-        None
-    } else {
-        Some(out)
     }
 }
