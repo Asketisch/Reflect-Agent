@@ -334,6 +334,54 @@ fn parse_chunk(v: &Value) -> Vec<ChatEvent> {
     let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("");
     let model = v.get("model").and_then(|x| x.as_str()).unwrap_or("");
 
+    // R2:错误可能**在流里**下发 —— HTTP 仍是 200,但某一帧是
+    // `data: {"error":{...}}`。
+    //
+    // 实测(dsh-our-free-model 本地网关 / OpenCode 车道):地区门与配额用尽
+    // 就是这个形状。该帧既无 `choices` 也无 `usage`,此前被整块丢弃 →
+    // 上层收到一条「成功但零内容」的流,turn 以 `success` + 0 token 收场,
+    // **真实错误被静默吞掉**(用户只看到「助手没说话」,没有任何错误提示)。
+    //
+    // 这里显式产出 Error 事件,让错误沿既有的错误通路冒泡:
+    // - 载荷自报限流(`code` / `type` 含 rate)→ `RateLimited` → 冷却 +
+    //   failover(换凭据/换模型重来),与 HTTP 429 的语义一致;
+    // - 其余 → `Provider{status: 200}` —— HTTP 层确实是 200,错误是流里
+    //   带回来的;`status < 500` 让重试矩阵判 GiveUp(地区门换凭据也没用,
+    //   不做无谓重试)。
+    if let Some(err) = v.get("error") {
+        if err.is_object() {
+            let message = err
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("provider returned an in-stream error")
+                .to_string();
+            let tag = err
+                .get("code")
+                .and_then(Value::as_str)
+                .or_else(|| err.get("type").and_then(Value::as_str))
+                .unwrap_or("");
+            let is_rate = tag.to_lowercase().contains("rate")
+                || message.to_lowercase().contains("rate limit")
+                || message.to_lowercase().contains("quota");
+            let full = if tag.is_empty() || message.contains(tag) {
+                message
+            } else {
+                format!("{tag}: {message}")
+            };
+            out.push(ChatEvent::Error(if is_rate {
+                LlmError::RateLimited {
+                    retry_after_ms: 1000,
+                }
+            } else {
+                LlmError::Provider {
+                    status: 200,
+                    message: full,
+                }
+            }));
+            return out;
+        }
+    }
+
     if !id.is_empty() || !model.is_empty() {
         out.push(ChatEvent::MessageStart {
             id: id.to_string(),
@@ -700,6 +748,76 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, ChatEvent::ThinkingDelta(s) if s == "thinking..."))
         );
+    }
+
+    /// R2:错误帧(`data: {"error":{...}}`)必须变成 Error 事件 ——
+    /// 此前整块被丢弃,turn 会以「success + 0 token」收场,真实错误静默丢失。
+    #[test]
+    fn 流内错误帧_产出error事件() {
+        let chunk = serde_json::json!({
+            "error": {
+                "message": "This model is not available in your country",
+                "type": "server_error"
+            }
+        });
+        let events = parse_chunk(&chunk);
+        let err = events
+            .iter()
+            .find_map(|e| match e {
+                ChatEvent::Error(e) => Some(e),
+                _ => None,
+            })
+            .expect("错误帧必须产出 Error 事件");
+        match err {
+            LlmError::Provider { status, message } => {
+                assert_eq!(*status, 200, "HTTP 层确实是 200 —— 错误在流里");
+                assert!(
+                    message.contains("not available in your country"),
+                    "{message}"
+                );
+            }
+            other => panic!("期望 Provider 错误,得到 {other:?}"),
+        }
+        // 不得同时产出正文 —— 错误帧不是内容帧。
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, ChatEvent::ContentDelta(_) | ChatEvent::ThinkingDelta(_)))
+        );
+    }
+
+    /// R2:流内错误帧自报限流时,语义对齐 HTTP 429 —— 走冷却 + failover。
+    #[test]
+    fn 流内错误帧_限流语义对齐429() {
+        let chunk = serde_json::json!({
+            "error": {
+                "message": "Free usage limit reached.",
+                "type": "rate_limit_error",
+                "code": "RATE_LIMIT"
+            }
+        });
+        let events = parse_chunk(&chunk);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ChatEvent::Error(LlmError::RateLimited { .. })))
+        );
+    }
+
+    /// 普通 chunk 不带 `error` 字段时,行为不变(不误伤)。
+    #[test]
+    fn 普通chunk不受流内错误处理影响() {
+        let chunk = serde_json::json!({
+            "id": "x", "model": "m",
+            "choices": [{"index": 0, "delta": {"content": "hi"}}]
+        });
+        let events = parse_chunk(&chunk);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ChatEvent::ContentDelta(s) if s == "hi"))
+        );
+        assert!(!events.iter().any(|e| matches!(e, ChatEvent::Error(_))));
     }
 
     #[test]

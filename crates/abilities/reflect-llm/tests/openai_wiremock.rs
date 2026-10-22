@@ -329,3 +329,65 @@ async fn openai_list_models_404_returns_none() {
         "404 应降级为 Ok(None),实际:{result:?}"
     );
 }
+
+/// R2:错误**在流里**下发 —— HTTP 仍是 200,但某一帧是
+/// `data: {"error":{...}}`(实测:dsh-our-free-model 网关的 OpenCode 车道
+/// 在地区门 / 配额用尽时就是这个形状)。
+///
+/// 此前该帧被整块丢弃 → 上层收到「成功但零内容」的流,turn 以
+/// `success` + 0 token 收场,真实错误静默丢失。这里断言它必须变成
+/// Error 事件。
+#[tokio::test]
+async fn openai_in_stream_error_frame_yields_error_event() {
+    let server = MockServer::start().await;
+    let body = concat!(
+        "data: {\"id\":\"chatcmpl-1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n",
+        "data: {\"error\":{\"message\":\"This model is not available in your country\",\"type\":\"server_error\"}}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .mount(&server)
+        .await;
+
+    let client = OpenAIClient::new(OpenAIConfig {
+        api_key: String::new(),
+        base_url: Some(server.uri()),
+        timeout: Duration::from_secs(5),
+    })
+    .unwrap();
+    let mut stream = client
+        .stream(basic_request(), CancellationToken::new())
+        .await
+        .unwrap();
+    let mut events = Vec::new();
+    while let Some(e) = stream.next().await {
+        events.push(e.unwrap());
+    }
+
+    let err = events
+        .iter()
+        .find_map(|e| match e {
+            ChatEvent::Error(e) => Some(e),
+            _ => None,
+        })
+        .expect("流内错误帧必须产出 Error 事件");
+    match err {
+        LlmError::Provider { status, message } => {
+            assert_eq!(*status, 200);
+            assert!(
+                message.contains("not available in your country"),
+                "{message}"
+            );
+        }
+        other => panic!("期望 Provider 错误,得到 {other:?}"),
+    }
+    // 不得产出正文 —— 错误帧不是内容帧。
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, ChatEvent::ContentDelta(_) | ChatEvent::ThinkingDelta(_))),
+        "错误帧不应产出内容增量"
+    );
+}
