@@ -2265,7 +2265,7 @@ dependencies = [
 
 [[package]]
 name = "reflect"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2302,7 +2302,7 @@ dependencies = [
 
 [[package]]
 name = "reflect-agent-def"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "reflect-memory",
  "reflect-protocol",
@@ -2317,7 +2317,7 @@ dependencies = [
 
 [[package]]
 name = "reflect-ast"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "ignore",
@@ -2360,14 +2360,14 @@ dependencies = [
 
 [[package]]
 name = "reflect-bm25"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "rankfns",
 ]
 
 [[package]]
 name = "reflect-cli"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2398,7 +2398,7 @@ dependencies = [
 
 [[package]]
 name = "reflect-compact"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2420,7 +2420,7 @@ dependencies = [
 
 [[package]]
 name = "reflect-config"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "notify",
@@ -2445,7 +2445,7 @@ dependencies = [
 
 [[package]]
 name = "reflect-core"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2481,7 +2481,7 @@ dependencies = [
 
 [[package]]
 name = "reflect-discussion"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2507,7 +2507,7 @@ dependencies = [
 
 [[package]]
 name = "reflect-exec"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2553,7 +2553,7 @@ dependencies = [
 
 [[package]]
 name = "reflect-goal"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2574,7 +2574,7 @@ dependencies = [
 
 [[package]]
 name = "reflect-hooks"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "filetime",
@@ -2595,7 +2595,7 @@ dependencies = [
 
 [[package]]
 name = "reflect-integration"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "reqwest 0.12.28",
@@ -2607,7 +2607,7 @@ dependencies = [
 
 [[package]]
 name = "reflect-llm"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2630,7 +2630,7 @@ dependencies = [
 
 [[package]]
 name = "reflect-lsp"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "globset",
@@ -2651,7 +2651,7 @@ dependencies = [
 
 [[package]]
 name = "reflect-mcp"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -2673,7 +2673,7 @@ dependencies = [
 
 [[package]]
 name = "reflect-memory"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "parking_lot",
  "reflect-bm25",
@@ -2686,7 +2686,7 @@ dependencies = [
 
 [[package]]
 name = "reflect-notes"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2703,7 +2703,7 @@ dependencies = [
 
 [[package]]
 name = "reflect-permissions"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "globset",
@@ -2720,7 +2720,7 @@ dependencies = [
 
 [[package]]
 name = "reflect-pipeline"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -2743,7 +2743,7 @@ dependencies = [
 
 [[package]]
 name = "reflect-plugin"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2771,7 +2771,7 @@ dependencies = [
 
 [[package]]
 name = "reflect-prompt"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "minijinja",
  "reflect-llm",
@@ -2786,7 +2786,7 @@ dependencies = [
 
 [[package]]
 name = "reflect-protocol"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2801,7 +2801,7 @@ dependencies = [
 
 [[package]]
 name = "reflect-py"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "pyo3",
@@ -2813,7 +2813,7 @@ dependencies = [
 
 [[package]]
 name = "reflect-recovery"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "chrono",
  "parking_lot",
@@ -2829,7 +2829,7 @@ dependencies = [
 
 [[package]]
 name = "reflect-rollout"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2848,7 +2848,7 @@ dependencies = [
 
 [[package]]
 name = "reflect-sandbox"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2861,7 +2861,7 @@ dependencies = [
 
 [[package]]
 name = "reflect-sanitize"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "once_cell",
  "regex",
@@ -2870,7 +2870,7 @@ dependencies = [
 
 [[package]]
 name = "reflect-skills"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "globset",
@@ -2889,7 +2889,7 @@ dependencies = [
 
 [[package]]
 name = "reflect-stream"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2906,7 +2906,7 @@ dependencies = [
 
 [[package]]
 name = "reflect-subagent"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2935,7 +2935,7 @@ dependencies = [
 
 [[package]]
 name = "reflect-task"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "parking_lot",
@@ -2957,7 +2957,7 @@ dependencies = [
 
 [[package]]
 name = "reflect-telemetry"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2976,7 +2976,7 @@ dependencies = [
 
 [[package]]
 name = "reflect-tools"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "filetime",
