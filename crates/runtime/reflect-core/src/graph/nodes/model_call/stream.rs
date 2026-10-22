@@ -74,6 +74,19 @@ pub async fn process_stream_events(
     let mut tool_calls: Vec<(String, String, serde_json::Value)> = Vec::new();
     let mut current_tool: Option<(String, String)> = None;
     let mut current_args_str = String::new();
+    // 本轮工具的参数是**从 ToolUseStart 带过来的**(`input_json` 非空)吗?
+    //
+    // provider 的两种参数投递形态:
+    // - **分片形态**:ToolUseStart 带**空** `input_json`,参数随后由若干
+    //   `ToolUseDelta` 分片送来(Anthropic / OpenAI / Responses)。
+    // - **整包形态**:ToolUseStart 直接带**完整** `input_json`,**没有**
+    //   delta(Ollama 原生格式;mock provider 也发整包 + 一份重复 delta)。
+    //
+    // 此前只累积 delta、把 `input_json` 整个忽略 —— 于是**整包形态的
+    // provider 参数全丢**(工具收到 `args = null`,表现为「missing 'cmd'」
+    // 这类假故障)。本标记用来区分两种形态:整包形态下忽略随后的 delta
+    // (mock 会重复发一份),分片形态下正常累积。
+    let mut args_from_start = false;
     let mut usage = TokenUsage::default();
     let mut stop = false;
     // 收到结束原因后的「排空」阶段:只再收 usage 事件。
@@ -153,7 +166,7 @@ pub async fn process_stream_events(
                             }),
                         )).await;
                     }
-                    Some(Ok(ChatEvent::ToolUseStart { id, name, .. })) => {
+                    Some(Ok(ChatEvent::ToolUseStart { id, name, input_json })) => {
                         let _ = ctx.event_tx.send(Event::new(
                             ctx.sub_id.clone(),
                             EventMsg::ToolCallBegin(ToolCallBeginEvent {
@@ -174,10 +187,19 @@ pub async fn process_stream_events(
                             tool_calls.push((prev_id, prev_name, prev_args));
                         }
                         current_tool = Some((id, name));
-                        current_args_str.clear();
+                        // 播种而非清空:整包形态的 provider(Ollama 原生
+                        // 格式)把**完整**参数放在这里且**不发** delta ——
+                        // 清空会把参数整个丢掉。
+                        args_from_start = !input_json.is_empty();
+                        current_args_str = input_json;
                     }
                     Some(Ok(ChatEvent::ToolUseDelta(partial))) => {
-                        current_args_str.push_str(&partial);
+                        // 整包形态:参数已由 ToolUseStart 带全,随后的 delta
+                        // 是重复的(mock provider 就这么发)—— 忽略,否则会
+                        // 拼成两遍 JSON,解析失败又变回 `args = null`。
+                        if !args_from_start {
+                            current_args_str.push_str(&partial);
+                        }
                     }
                     Some(Ok(ChatEvent::MessageStopTruncated { .. })) => {
                         truncated = true;

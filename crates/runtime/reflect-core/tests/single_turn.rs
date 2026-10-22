@@ -1185,3 +1185,114 @@ async fn usage_after_message_stop_is_still_reported() {
     assert_eq!(token.cached_tokens, 3);
     assert_eq!(token.total_tokens, 49);
 }
+
+// ── 工具参数投递:整包形态 ────────────────────────────────────────────────
+//
+// provider 投递工具参数有两种形态:
+// - **分片形态**:ToolUseStart 带空 `input_json`,参数由若干 ToolUseDelta
+//   分片送来(Anthropic / OpenAI / Responses)。
+// - **整包形态**:ToolUseStart 直接带**完整** `input_json`,**没有** delta
+//   (Ollama 原生格式;mock provider 发整包 + 一份重复 delta)。
+//
+// 此前核心只累积 delta、把 `input_json` 整个忽略 → 整包形态的 provider
+// (Ollama)**参数全丢**,工具收到 `args = null`,表现为「missing 'cmd'」
+// 这类假故障(实测于 L6 实模型演练层跑本地 Ollama 时)。
+
+/// 记录收到的参数的探针工具。
+struct ArgsProbeTool {
+    seen: Arc<Mutex<Vec<serde_json::Value>>>,
+}
+
+#[async_trait]
+impl reflect_tools::Tool for ArgsProbeTool {
+    fn name(&self) -> &str {
+        "probe"
+    }
+    fn description(&self) -> &str {
+        "records the args it received"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": { "cmd": { "type": "string" } },
+            "required": ["cmd"]
+        })
+    }
+    fn is_concurrency_safe(&self) -> bool {
+        true
+    }
+    async fn execute(
+        &self,
+        _ctx: reflect_tools::ToolContext,
+        args: serde_json::Value,
+    ) -> Result<reflect_tools::ToolOutput, reflect_tools::ToolError> {
+        self.seen.lock().push(args.clone());
+        Ok(reflect_tools::ToolOutput {
+            content: vec![reflect_protocol::ContentBlock::text("ok")],
+            is_error: false,
+            metadata: serde_json::Value::Null,
+            elapsed_ms: 0,
+        })
+    }
+}
+
+/// 整包形态(ToolUseStart 带完整 input_json、**没有** delta)→ 参数必须送达工具。
+#[tokio::test]
+async fn tool_args_from_start_only_are_not_lost() {
+    let registry = Arc::new(ModelRegistry::new());
+    let stub = Arc::new(SequentialStubClient::new(vec![
+        // 第 1 次:整包形态 —— 没有 ToolUseDelta。
+        vec![
+            ChatEvent::MessageStart {
+                id: "m1".into(),
+                model: "stub-1".into(),
+            },
+            ChatEvent::ToolUseStart {
+                id: "tc1".into(),
+                name: "probe".into(),
+                input_json: r#"{"cmd":"echo hi"}"#.into(),
+            },
+            ChatEvent::MessageStop,
+        ],
+        // 第 2 次:纯文本收尾。
+        vec![
+            ChatEvent::MessageStart {
+                id: "m2".into(),
+                model: "stub-1".into(),
+            },
+            ChatEvent::ContentDelta("done".into()),
+            ChatEvent::MessageStop,
+        ],
+    ]));
+    registry.register_pool(
+        "stub",
+        CredentialPool {
+            entries: vec![PoolEntry {
+                client: stub.clone(),
+                label: "default".into(),
+                weight: 1,
+            }],
+        },
+    );
+
+    let seen: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let cfg = AgentConfig::new("stub/m1", Path::new("."));
+    let tools = Arc::new(ToolRegistry::default());
+    tools.register(Arc::new(ArgsProbeTool { seen: seen.clone() }));
+    let thread = AgentThread::new(cfg, registry, tools, None, None);
+
+    let mut handle = thread.submit(make_sub("go")).await;
+    while let Some(ev) = handle.next().await {
+        if matches!(ev.msg, EventMsg::TurnComplete(_)) {
+            break;
+        }
+    }
+
+    let seen = seen.lock().clone();
+    assert_eq!(seen.len(), 1, "探针工具应被调用一次,实际 {seen:?}");
+    assert_eq!(
+        seen[0]["cmd"], "echo hi",
+        "整包形态的工具参数必须送达工具,实际:{:?}",
+        seen[0]
+    );
+}
