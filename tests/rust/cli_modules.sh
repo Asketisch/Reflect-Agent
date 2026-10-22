@@ -119,19 +119,27 @@ cli_modules_task_team() {
     trap cleanup_isolated_env RETURN
 
     # 9a. task 增查改删
-    "$REFLECT_BIN" task create --subject "e2e-task-1" --description "端到端任务" --active-form "Testing" > tc.txt 2>&1
+    #
+    # list id 必须**显式**指定:`task create` 不传 --list 时回落到 "$USER"
+    # (CLI 无 session 上下文),而 show/update/stop 的 --list 是必填项。
+    # 此前本组写死 `--list admin`(开发机用户名),CI runner 上 $USER=runner
+    # → create 落在 list "runner"、show/update 查 list "admin" → 全部
+    # not found("task stop 物理删除"因断言写的是"标题已被改掉"而侥幸通过)。
+    local task_list="e2e-admin"
+    "$REFLECT_BIN" task create --subject "e2e-task-1" --description "端到端任务" --active-form "Testing" --list "$task_list" > tc.txt 2>&1
     tcase "task create 报告创建" grep -q "created" tc.txt
     "$REFLECT_BIN" task ls > tl.txt 2>&1
     tcase "task ls 列出新任务" grep -q "e2e-task-1" tl.txt
-    "$REFLECT_BIN" task show 1 --list admin > ts.txt 2>&1
+    "$REFLECT_BIN" task show 1 --list "$task_list" > ts.txt 2>&1
     tcase "task show 打印详情" grep -q "端到端任务" ts.txt
-    "$REFLECT_BIN" task update 1 --list admin --status in_progress >/dev/null 2>&1
+    "$REFLECT_BIN" task update 1 --list "$task_list" --status in_progress >/dev/null 2>&1
     tcase "task update 改状态" sh -c "\"$REFLECT_BIN\" task ls | grep -q in_progress"
-    "$REFLECT_BIN" task update 1 --list admin --subject "e2e-task-改" >/dev/null 2>&1
+    "$REFLECT_BIN" task update 1 --list "$task_list" --subject "e2e-task-改" >/dev/null 2>&1
     tcase "task update 改标题" sh -c "\"$REFLECT_BIN\" task ls | grep -q 'e2e-task-改'"
-    "$REFLECT_BIN" task stop 1 --list admin >/dev/null 2>&1
+    "$REFLECT_BIN" task stop 1 --list "$task_list" >/dev/null 2>&1
     "$REFLECT_BIN" task ls > tl2.txt 2>&1
-    tcase "task stop 物理删除" sh -c "! grep -q 'e2e-task-改' tl2.txt"
+    # 物理删除 = 该 id 的行整体消失(只查标题会被"标题压根没改成功"糊弄过去)。
+    tcase "task stop 物理删除" sh -c "! grep -qE '^1[[:space:]]' tl2.txt && ! grep -q 'e2e-task-改' tl2.txt"
 
     # 9b. team 增查删
     "$REFLECT_BIN" task team create alpha >/dev/null 2>&1
@@ -276,6 +284,40 @@ cli_modules_sec_ws() {
     tcase "workspace clone --branch 成功" test -f cloned/f.txt
 }
 
+# ════════════════════════════════════════════════════════════════════════
+# 组 12:models(模型清单发现)
+# ════════════════════════════════════════════════════════════════════════
+# 覆盖:`reflect models list|pick` —— 清单**从 provider 接口实时获取**,
+# 「免费」判定走规则。离线场景用 mock provider(无清单端点)→ 明确报错,
+# 不静默编造模型 id。
+cli_modules_models() {
+    make_isolated_env
+    trap cleanup_isolated_env RETURN
+
+    # 12a. 无 provider → 明确报错(不是空清单)
+    "$REFLECT_BIN" models list > mdl.txt 2>&1
+    tcase "models list 无 provider 时报错" grep -q "no active provider" mdl.txt
+
+    # 12b. provider 不支持清单端点 / 端点不可达 → 明确报错 + 退出码 2
+    cat > "$HOME/.reflect/config.toml" <<'EOF'
+[active]
+provider = "openai"
+[openai]
+api_key = "sk-test"
+base_url = "https://models.example.invalid"
+EOF
+    "$REFLECT_BIN" models list > mdl2.txt 2>&1
+    tcase "models list 清单不可达时报错" grep -q "cannot fetch model list" mdl2.txt
+    "$REFLECT_BIN" models list >/dev/null 2>&1
+    tcase "models list 清单不可达时退出码 2" test "$?" -eq 2
+    "$REFLECT_BIN" models pick --free-only >/dev/null 2>&1
+    tcase "models pick 清单不可达时退出码 2" test "$?" -eq 2
+
+    # 12d. --help 列出子命令
+    "$REFLECT_BIN" models --help > mdh.txt 2>&1
+    tcase "models --help 列出 list/pick" sh -c "grep -q 'list' mdh.txt && grep -q 'pick' mdh.txt"
+}
+
 # ── 执行入口 ──────────────────────────────────────────────────────────────
 cli_modules_mcp_lsp
 cli_modules_plugin
@@ -283,6 +325,7 @@ cli_modules_task_team
 cli_modules_pipeline
 cli_modules_discussion
 cli_modules_sec_ws
+cli_modules_models
 
 tfinish "cli_modules.sh" || exit 1
 exit 0

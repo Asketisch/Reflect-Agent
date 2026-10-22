@@ -5,6 +5,7 @@
 #   ./tests/run_all.sh            # 全部
 #   ./tests/run_all.sh functional # 功能覆盖(能力覆盖层 + Rust 参数面 + 双 SDK 绑定层)
 #   ./tests/run_all.sh functional-layer  # 只跑能力覆盖层(Python 打真二进制)
+#   ./tests/run_all.sh live       # 实模型演练层(真实模型;默认 SKIP,需 REFLECT_LIVE=1)
 #   ./tests/run_all.sh rust       # 只跑 Rust 侧
 #   ./tests/run_all.sh sdk-python # 只跑 Python SDK 绑定层
 #   ./tests/run_all.sh sdk-ts     # 只跑 TS SDK 绑定层
@@ -12,7 +13,8 @@
 # `functional` 是 CI 的门禁入口:跳过 cargo test / clippy / fmt / doc
 # (那部分由既有 CI job 覆盖),跑真正的功能覆盖。
 #
-# 全程离线(REFLECT_MODEL=mock)+ 隔离 HOME。退出码 0 = 全部通过。
+# `live` 是**实模型演练层**:用真实模型跑同一条引擎链路,断言协议形状。
+# 默认 SKIP(不发起网络请求)—— 它需要外网与免费额度,不适合当 CI 门禁。
 
 set -u
 
@@ -38,11 +40,12 @@ for s in "${SUITES[@]}"; do
         functional)  RUNNERS=("$HERE/functional/run.sh" "$HERE/rust/run.sh" "$HERE/sdk-python/run.sh" "$HERE/sdk-ts/run.sh")
                      export REFLECT_SKIP_WORKSPACE=1 ;;
         functional-layer) RUNNERS=("$HERE/functional/run.sh") ;;
+        live)        RUNNERS=("$HERE/live/run.sh") ;;
         rust)        RUNNERS=("$HERE/rust/run.sh") ;;
         sdk-python)  RUNNERS=("$HERE/sdk-python/run.sh") ;;
         sdk-ts)      RUNNERS=("$HERE/sdk-ts/run.sh") ;;
         *)
-            echo "未知套件:$s(可选:functional / functional-layer / rust / sdk-python / sdk-ts)" >&2
+            echo "未知套件:$s(可选:functional / functional-layer / live / rust / sdk-python / sdk-ts)" >&2
             exit 2
             ;;
     esac
