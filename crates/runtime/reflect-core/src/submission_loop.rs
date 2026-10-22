@@ -573,7 +573,14 @@ pub async fn submission_loop(
                             Some(question_waiters.clone()),
                             Some(user_input_waiters.clone()),
                             Some(cfg.permission_mode.clone()),
-                        );
+                        )
+                        // 挂上本回合的**回合级**取消令牌:`Op::Interrupt`
+                        // 取消的是它,而 gate 的等待此前只观察会话级令牌
+                        // (调用方 `ToolContext.cancel` 传的是会话级)——
+                        // 于是「agent 正在等审批时按中断」**不解除等待**,
+                        // 回合永远停在审批门上(既没有 turn_aborted 也没有
+                        // turn_complete)。gate 是每回合构造的,挂回合令牌安全。
+                        .with_turn_cancel(turn_cancel.clone());
                         // P2 `yolo-classifier`:把 cfg 的启发式分类器注入 gate。
                         if cfg.yolo_classifier.is_some() {
                             g.set_yolo_classifier(

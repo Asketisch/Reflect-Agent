@@ -52,6 +52,19 @@ pub struct ApprovalGate {
     pub(super) yolo_classifier: Mutex<Option<Arc<dyn reflect_permissions::YoloClassifier>>>,
     /// YOLO 自动批准的置信度阈值(>= 此值才信任 Allow 建议)。默认 0.8。
     pub(super) yolo_threshold: Mutex<f32>,
+    /// 本回合的**回合级**取消令牌(`Op::Interrupt` 取消它)。
+    ///
+    /// ⚠️ 为什么需要它:gate 的等待(`ask_tool` / `ask_hook` /
+    /// `ask_question` / `ask_user`)此前只观察**会话级**令牌
+    /// (调用方 `ToolContext.cancel` 传的是它)。而 `Op::Interrupt` 取消的
+    /// 是**回合级**令牌 —— 于是「agent 正在等审批时按中断」**不会**解除
+    /// 等待,回合**永远不终止**(实测:回合停在 approval_request 上,
+    /// 中断后既没有 turn_aborted 也没有 turn_complete)。
+    ///
+    /// gate 是**每回合**构造的(submission_loop 里),所以把回合令牌挂在
+    /// gate 上是安全的;会话令牌仍由调用方的 `cancel` 参数负责
+    /// (`Op::Shutdown` 的语义)。
+    pub(super) turn_cancel: Option<CancellationToken>,
 }
 
 // 手写 Debug —— `Arc<dyn PermissionResolver>` 没 derive Debug。
@@ -84,6 +97,23 @@ impl std::fmt::Debug for ApprovalGate {
 }
 
 impl ApprovalGate {
+    /// 挂上本回合的**回合级**取消令牌 —— `Op::Interrupt` 取消它。
+    ///
+    /// 挂上之后,「agent 正在等审批时按中断」能真正解除等待(此前只观察
+    /// 会话级令牌,回合会永远停在审批门上)。
+    pub fn with_turn_cancel(mut self, turn_cancel: CancellationToken) -> Self {
+        self.turn_cancel = Some(turn_cancel);
+        self
+    }
+
+    /// 等回合级取消(未挂载时永远 pending)。
+    async fn wait_turn_cancel(&self) {
+        match &self.turn_cancel {
+            Some(t) => t.cancelled().await,
+            None => std::future::pending::<()>().await,
+        }
+    }
+
     pub fn new(event_tx: mpsc::Sender<Event>, sub_id: impl Into<String>) -> Self {
         Self::with_state(
             event_tx,
@@ -145,6 +175,7 @@ impl ApprovalGate {
     ) -> Self {
         Self {
             deny_all: std::sync::atomic::AtomicBool::new(false),
+            turn_cancel: None,
             event_tx,
             sub_id: sub_id.into(),
             waiters,
@@ -361,6 +392,11 @@ impl ApprovalGate {
                 self.waiters.lock().remove(&request_id);
                 ReviewDecision::Deny { reason: "cancelled".into() }
             }
+            // 回合级中断(Op::Interrupt)—— 解除等待,不让回合停在审批门上。
+            _ = self.wait_turn_cancel() => {
+                self.waiters.lock().remove(&request_id);
+                ReviewDecision::Deny { reason: "turn interrupted".into() }
+            }
             res = rx => {
                 match res {
                     Ok(decision) => decision,
@@ -415,6 +451,11 @@ impl ApprovalGate {
             _ = cancel.cancelled() => {
                 self.waiters.lock().remove(&request_id);
                 ReviewDecision::Deny { reason: "cancelled".into() }
+            }
+            // 回合级中断(Op::Interrupt)。
+            _ = self.wait_turn_cancel() => {
+                self.waiters.lock().remove(&request_id);
+                ReviewDecision::Deny { reason: "turn interrupted".into() }
             }
             res = rx => res.unwrap_or(ReviewDecision::Deny {
                 reason: "approval channel dropped".into(),
@@ -504,6 +545,11 @@ impl ApprovalGate {
         tokio::select! {
             biased;
             _ = cancel.cancelled() => {
+                self.question_waiters.lock().remove(&request_id);
+                Err(ToolError::Cancelled)
+            }
+            // 回合级中断(Op::Interrupt)。
+            _ = self.wait_turn_cancel() => {
                 self.question_waiters.lock().remove(&request_id);
                 Err(ToolError::Cancelled)
             }
@@ -666,12 +712,16 @@ impl ApprovalGate {
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => Err("cancelled".into()),
+                // 回合级中断(Op::Interrupt)。
+                _ = self.wait_turn_cancel() => Err("turn interrupted".into()),
                 recv = rx => recv.map_err(|_| "dropped".into()),
             }
         } else {
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => Err("cancelled".into()),
+                // 回合级中断(Op::Interrupt)。
+                _ = self.wait_turn_cancel() => Err("turn interrupted".into()),
                 recv = rx => recv.map_err(|_| "dropped".into()),
                 _sleep = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs)) => {
                     Err(format!("timeout:{timeout_secs}"))
@@ -681,7 +731,7 @@ impl ApprovalGate {
 
         match rx_result {
             Ok(text) => Ok(text),
-            Err(reason) if reason == "cancelled" => {
+            Err(reason) if reason == "cancelled" || reason == "turn interrupted" => {
                 self.user_input_waiters.lock().remove(&request_id);
                 Err(ToolError::Cancelled)
             }
