@@ -10,8 +10,9 @@
 //!   新事件,允许外部 hook 订阅任务生命周期(团队生命周期走 ToolCallEnd 透传)。
 //! - **Coordinator 模式可配置**:258 行 system prompt 拆为 `coordinator_prompt.md` 资源,
 //!   通过 `~/.reflect/config.toml` 的 `[coordinator]` 表覆盖。
-//! - **TodoWrite(V1) 与 Task 系统(V2) 并存**:TodoWrite 走 `ToolContext.metadata["todos"]`
-//!   + TUI 单行渲染,Task* 走 `TaskManager` 持久化。
+//! - **TodoWrite(V1) 与 Task 系统(V2) 并存**:TodoWrite 把清单写进
+//!   **`ToolOutput.metadata["todos"]`**(输出通道),GUI 能展示;但**没有
+//!   组件把它回灌进下一轮的模型上下文** —— 清单「只出不进」,LLM 写完即忘。
 //!
 //! ## 模块组织
 //!
