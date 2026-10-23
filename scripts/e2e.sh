@@ -22,6 +22,10 @@
 # 旧版步骤 3 / 13 的 tui 冒烟已移除 —— 它们恒失败(子命令不存在)却被
 # `|| true` 吞掉,是不产生任何断言的假阳性步骤。
 #
+# 前置依赖:`jq`(步骤 4 / 12 的 JSONL 字段断言用;与 `tests/rust/*.sh`
+# 同一依赖,CI 里由 `apt-get install -y jq` 提供)、`node`(步骤 13 的
+# SDK 冒烟)、`python3` + pytest(步骤 5 / 13 的 SDK 用例)。
+#
 # 每步快速失败。退出码 0 = 全部通过。
 
 set -euo pipefail

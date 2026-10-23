@@ -8,10 +8,10 @@
 
 | 层 | 位置 | 测谁 | 依赖 SDK? | 规模 |
 |---|---|---|---|---|
-| **能力覆盖层**(主) | `tests/functional/` | **Rust 代码在真产物上的行为**(原始 JSONL wire) | ❌ | 51 条 |
+| **能力覆盖层**(主) | `tests/functional/` | **Rust 代码在真产物上的行为**(原始 JSONL wire) | ❌ | 54 条 |
 | CLI 参数面 | `tests/rust/*.sh` | 17 个子命令的参数矩阵与输出契约 | ❌ | 320+ 断言 |
 | SDK 绑定层 | `tests/sdk-python/`、`tests/sdk-ts/` | 两个**客户端自己**的行为 | ✅ | Python 9 条 / TS 5 条 |
-| SDK 单测 | `sdks/*/tests/` | SDK 纯逻辑(mock serve),随包发布 | ✅ | Python 7 / TS 5 条 |
+| SDK 单测 | `sdks/*/tests/` | SDK 纯逻辑(mock serve),随包发布 | ✅ | Python 9 / TS 7 条 |
 | crate 单测 | `crates/**/tests/` | 内部单元与集成 | — | 既有 |
 | **实模型演练层**(可选) | `tests/live/` | **真实模型**下的引擎行为(协议形状) | ❌ | 12 条 |
 
@@ -28,7 +28,7 @@
 
 | 能力域 | 能力覆盖层 | CLI 参数面 | SDK 绑定层 | crate 单测 | 实模型层 |
 |---|---|---|---|---|---|
-| 基础通信(握手/单轮/多轮/事件流/终态) | D1–D5 | cli_core | K1–K2 | ✅ | L1–L4 |
+| 基础通信(握手/单轮/多轮/事件流/终态/工具参数增量) | D1–D5、D9 | cli_core | K1–K2 | ✅ | L1–L4 |
 | 并发与路由 | S1–S3 | — | — | — | — |
 | 内置工具调用 | T1–T2 | tools_drive | — | ✅ | T1–T3 |
 | 远程工具(注册/往返/失败/超时) | T3–T4、X4 | serve_ops | K3、K8 | ✅ | — |
@@ -38,7 +38,7 @@
 | 容错与失败恢复 | X1–X6 | — | — | ✅ | X1 |
 | 持久化(rollout / 截断 / 索引) | P1–P4 | cli_deep(session) | — | ✅ | P1–P2 |
 | 编排(子代理/讨论/任务/团队/流水线/goal) | O1–O5 | cli_modules、cli_deep | — | ✅ | — |
-| CLI 能力面 | C1–C4 | cli_deep(194 断言) | — | — | — |
+| CLI 能力面 | C1–C6 | cli_deep(194 断言) | — | — | — |
 | 模型发现(清单接口 / 免费判定 / 动态 model) | — | models_* | — | ✅ | — |
 
 ## 2. 能力覆盖层明细(`tests/functional/`)
@@ -54,6 +54,11 @@
   `model` / `provider` 维度(v1.x stats 字段)。
 - **D5 终态语义**:turn 类以 `turn_complete` 收尾(其后可能跟一条
   `submission_closed`);非 turn 类只有 `submission_closed`。
+- **D9 工具参数增量**(v1.5 additive 变体):模型生成工具参数期间逐段转发
+  `tool_call_args_delta`;字段级断言 `call_id` + `delta` 非空、分片按到达
+  顺序拼接等于完整参数 JSON、`call_id` 与 `tool_call_begin` 一致、时序在
+  `tool_call_begin` 之后。夹具用 mock 的 `tool_call_delta` 脚本行制造
+  **分片形态**参数下发(整包形态没有 delta 可转发)。
 
 ### S 组 并发与路由(`test_serve.py`)
 - **S1 隔离**:并发提交两条 `user_input` → 两条流的事件 id 各自归属、
@@ -110,18 +115,20 @@ Result + rounds_completed)/ 任务与团队(create → ls)/ 流水线错误路�
 
 ### C 组 CLI 能力面(`test_cli.py`)
 `serve` 三个恢复入口 / `exec` 输出每行是合法 JSON 且含 turn 事件 /
-`session ls` + `show` 报错路径 / `doctor` + `version` 输出契约。
+`session ls` + `show` 报错路径 / `doctor` + `version` 输出契约 /
+`session search` 跨会话全文搜索(命中 / 未命中 / `--json` 字段)/
+`exec` 退出码映射(成功 0 / turn 失败 1 / plan mode 未产出计划 122)。
 
 ## 3. CLI 子命令(17 个,不含 help)
 
 | 子命令 | 冒烟(cli_core/cli_modules) | 深度断言位置 |
 |---|---|---|
-| `exec` | ✅ | cli_deep(exec JSONL 字段级)、tools_drive(全工具驱动)、能力层 C2 |
+| `exec` | ✅ | cli_deep(exec JSONL 字段级)、tools_drive(全工具驱动)、能力层 C2/C6(退出码映射) |
 | `serve` | ✅ | **能力层 19 Op 全量** + serve_ops.sh(FIFO 驱动,逐 op 断言 EventMsg)+ integrations(MCP/bubble/热重载) |
 | `login` | ✅ | cli_deep:4 provider 路径、缺 key 报错、短 key 告警、`--force`、api_key 脱敏 |
 | `mcp` | ✅ | cli_deep:stdio+http 双传输 add/互斥报错/ls/show/remove/`test`(真 mock server 成功+坏 binary 失败)/registry 三路径 |
 | `config` | ✅ | cli_deep:set/unset/ls/show/`--reveal`/非法 key 报错 |
-| `session` | ✅ | cli_deep:双 ID 前缀解析回归(文件名前缀+内部 id 前缀+歧义报错)/rename/export/fork/rm;能力层 P4/C3 |
+| `session` | ✅ | cli_deep:双 ID 前缀解析回归(文件名前缀+内部 id 前缀+歧义报错)/rename/export/fork/rm/search;能力层 P4/C3/C5 |
 | `traces` | ✅ | cli_deep:ls/show 前缀/不存在报错 |
 | `doctor` | ✅ | cli_deep:常规 + `--check-network`(mock provider DNS 失败仍 rc=0);能力层 C4 |
 | `plugin` | ✅ | cli_deep:marketplace add/ls/refresh/remove + 安装 + info/show/enable/disable/uninstall 全链路 |
@@ -182,6 +189,7 @@ Result + rounds_completed)/ 任务与团队(create → ls)/ 流水线错误路�
 | D6 | `tests/` 套件此前从未进 CI,导致**已存在的失败用例**长期未被发现(原 `test_sdk_real_bin.py` 的 interrupt 断言与当前 core 行为不符;`cli_core.sh` 的 `exec --plan-mode` 期望 0 而实际按约定 122;`serve_ops.sh` 期望「不 emit plan_approved」而引擎现在会发;`tools_drive.sh` 的 grep 期望 `./` 前缀而实际无前缀) | 本批次修正前实测失败 | 本批次已修正断言(不改服务端行为),并由 CI job `functional-suite` 收口 |
 | D7 | **bash 工具对被沙箱拒绝的命令仍报成功**:macOS Seatbelt 下越界写被拦下(stderr 含 `Operation not permitted`、文件不落地),但工具输出 `is_error=false`(退出码经 sentinel 回报为 0) | 本地实测 `reflect exec` + bash 越界写;`tests/rust/tools_drive.sh` 的沙箱用例 | 模型看不到失败信号,可能误以为写成功;安全不变量(文件不落地)成立,但错误信号缺失 |
 | D8 | **`InvalidRequest`(400)被归到 `CooldownReason::Auth`**(默认 1 小时冷却) | `crates/runtime/reflect-core/src/graph/nodes/model_call/stream.rs` 的 `build_cooldown_reason` 兜底分支 | 一次 400(如模型不支持 tools)会让该凭据停摆一小时,远超合理范围;本次未改(超出最小改动边界),记此备查 |
+| D10 | **两个 SDK 都未类型化上游的 `tool_call_output_delta`**(v1.4 additive 变体):SDK 走 `UnknownEventMsg` 降级不崩,但 SDK 用户拿不到该事件的类型化形态 | `sdks/python/reflect/protocol.py` 与 `sdks/typescript/src/protocol.ts` 的 `EventMsg` 联合(均无此项);Rust 侧见 `event_msg/tool.rs` | 客户端想消费"长工具输出实时增量"只能自己收窄 `dict`/`Record`;本次只同步了本批新增的 `tool_call_args_delta`(v1.5),`tool_call_output_delta` 仍缺,记此备查 |
 
 ### 实模型层观测到的上游限制(非 Reflect 缺陷)
 
@@ -200,13 +208,13 @@ Result + rounds_completed)/ 任务与团队(create → ls)/ 流水线错误路�
 
 | 文件 | 规模 |
 |---|---|
-| `functional/test_serve.py` | 21 条(D5 + S3 + A13) |
+| `functional/test_serve.py` | 22 条(D6 + S3 + A13) |
 | `functional/test_tools.py` | 6 条(T6) |
 | `functional/test_recovery.py` | 11 条(R5 + X6) |
 | `functional/test_persistence.py` | 4 条(P4) |
 | `functional/test_orchestration.py` | 5 条(O5) |
-| `functional/test_cli.py` | 4 条(C4) |
-| **能力覆盖层合计** | **51 条** |
+| `functional/test_cli.py` | 6 条(C6) |
+| **能力覆盖层合计** | **54 条** |
 | `live/test_live_basic.py` | 4 条(L1–L4) |
 | `live/test_live_tools.py` | 3 条(T1–T3) |
 | `live/test_live_persistence.py` | 3 条(P1–P2、X1) |
