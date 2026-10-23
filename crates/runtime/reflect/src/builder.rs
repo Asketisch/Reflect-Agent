@@ -690,7 +690,7 @@ fn build_registry_from_env(model_spec: &str) -> anyhow::Result<Arc<reflect_llm::
 /// 只认**显式 opt-in**,不作为无 key 时的静默兜底 —— 免得真实 provider
 /// 配错时被悄悄换成假模型。
 fn is_mock_provider(model_spec: &str) -> bool {
-    if let Some(p) = std::env::var("REFLECT_PROVIDER").ok() {
+    if let Ok(p) = std::env::var("REFLECT_PROVIDER") {
         let p = p.trim().to_ascii_lowercase();
         if p == "mock" || p == "fake" {
             return true;
