@@ -282,6 +282,19 @@ class ToolCallBegin(TypedDict):
     child_id: NotRequired[str | None]
 
 
+class ToolCallArgsDelta(TypedDict):
+    """v1.5:模型生成工具参数期间的原始 JSON 片段(逐段转发)。
+
+    与 `tool_call_begin` 的 `call_id` 对应同一通调用;客户端把各片段按
+    到达顺序拼接即得完整参数 JSON。additive 变体 —— 老客户端按未知
+    `type` 忽略即可。
+    """
+
+    type: Literal["tool_call_args_delta"]
+    call_id: str
+    delta: str
+
+
 class ToolCallEnd(TypedDict):
     type: Literal["tool_call_end"]
     call_id: str
@@ -520,6 +533,7 @@ EventMsg = Union[
     ThinkingDelta,
     TokenCount,
     ToolCallBegin,
+    ToolCallArgsDelta,
     ToolCallEnd,
     ToolExecutionRequest,
     ApprovalRequest,

@@ -135,6 +135,7 @@ export type EventMsg =
   | ThinkingDelta
   | TokenCount
   | ToolCallBegin
+  | ToolCallArgsDelta
   | ToolCallEnd
   | ToolExecutionRequest
   | ApprovalRequest
@@ -261,6 +262,19 @@ export interface ToolCallBegin {
   tool_name: string;
   args: Record<string, unknown>;
   child_id?: string | null;
+}
+
+/**
+ * v1.5:模型生成工具参数期间的原始 JSON 片段(逐段转发)。
+ *
+ * 与 `tool_call_begin` 的 `call_id` 对应同一通调用;客户端把各片段按
+ * 到达顺序拼接即得完整参数 JSON。additive 变体 —— 老客户端按未知
+ * `type` 忽略即可。
+ */
+export interface ToolCallArgsDelta {
+  type: 'tool_call_args_delta';
+  call_id: string;
+  delta: string;
 }
 
 export interface ToolCallEnd {

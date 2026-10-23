@@ -75,6 +75,12 @@ function spawnMockServe(): ChildProcessWithoutNullStreams {
         process.stdout.write(JSON.stringify({
           id: sub.id, msg: { type: 'agent_message_delta', delta: 'mock-reply' },
         }) + '\\n');
+        // v1.5 additive 变体:工具参数增量(SDK 应原样透传给客户端)。
+        process.stdout.write(JSON.stringify({
+          id: sub.id, msg: {
+            type: 'tool_call_args_delta', call_id: 'c1', delta: '{"text":"pi',
+          },
+        }) + '\\n');
         process.stdout.write(JSON.stringify({
           id: sub.id, msg: {
             type: 'turn_complete', turn_id: 't', status: 'ok',
@@ -166,6 +172,32 @@ describe('ReflectAgent 协议回路(mock serve 驱动)', () => {
     // 不报错即通过。
     expect(true).toBe(true);
     await customAgent.close().catch(() => {});
+  }, 10_000);
+
+  it('tool_call_args_delta 透传到 turn 事件流(additive 变体)', async () => {
+    // 协议变更是 additive 也必须同步 SDK —— 客户端要能拿到工具参数增量
+    // 做渐进渲染;字段名保持 snake_case,与 Rust serde 一致。
+    const events: EventMsg[] = [];
+    for await (const ev of await agent.submit('foo')) {
+      events.push(ev.msg);
+      if (ev.msg.type === 'turn_complete') break;
+    }
+    const d = events.find((e) => e.type === 'tool_call_args_delta');
+    expect(d).toBeDefined();
+    expect(d).toMatchObject({
+      type: 'tool_call_args_delta',
+      call_id: 'c1',
+      delta: '{"text":"pi',
+    });
+  }, 10_000);
+
+  it('未知事件变体降级不崩', async () => {
+    // 协议新增变体时,SDK 不得因不认识而抛错(按未知 type 降级)。
+    (child.stdout as Readable).push(
+      JSON.stringify({ id: '', msg: { type: 'some_future_event', payload: { x: 1 } } }) + '\n',
+    );
+    // 不抛即通过;再确认 agent 仍可用。
+    expect(await agent.prompt('foo')).toBe('mock-reply');
   }, 10_000);
 
   it('迭代所有 turn 事件类型后正确收尾', async () => {

@@ -76,6 +76,16 @@ rl.on('line', (line) => {
     console.log(JSON.stringify({
       id: sub.id, msg: { type: 'agent_message_delta', delta: 'mock-reply' },
     }));
+    // v1.5 additive 变体:工具参数增量(SDK 应原样透传给客户端)。
+    console.log(JSON.stringify({
+      id: sub.id, msg: {
+        type: 'tool_call_args_delta', call_id: 'c1', delta: '{"text":"pi',
+      },
+    }));
+    // 未知变体:SDK 不得因不认识而抛错(按未知 type 降级)。
+    console.log(JSON.stringify({
+      id: sub.id, msg: { type: 'some_future_event', payload: { x: 1 } },
+    }));
     console.log(JSON.stringify({
       id: sub.id, msg: {
         type: 'turn_complete', turn_id: 't', status: 'ok',
@@ -190,6 +200,30 @@ def test_tool_execution_response_handled(agent: ReflectAgent) -> None:
     assert echo["msg"]["output"]["content"][0]["text"] == "echo:hi"
     assert echo["msg"]["output"]["is_error"] is False
     assert received == {"q": "hi"}
+
+
+def test_tool_call_args_delta_透传到事件流(agent: ReflectAgent) -> None:
+    """v1.5:additive 变体 `tool_call_args_delta` 应原样出现在 turn 事件流里。
+
+    协议变更是 additive 也必须同步 SDK —— 客户端要能拿到工具参数增量做
+    渐进渲染;字段名保持 snake_case,与 Rust serde 一致。
+    """
+    events = list(agent.submit("hi"))
+    types = [ev["msg"]["type"] for ev in events]
+    assert "tool_call_args_delta" in types, f"未见 tool_call_args_delta:{types}"
+    d = next(ev["msg"] for ev in events if ev["msg"]["type"] == "tool_call_args_delta")
+    assert d["call_id"] == "c1", f"call_id 不对:{d}"
+    assert d["delta"] == '{"text":"pi', f"delta 不对:{d}"
+
+
+def test_未知事件变体降级不崩(agent: ReflectAgent) -> None:
+    """协议新增变体时,SDK 不得因不认识而抛错(按未知 type 降级)。"""
+    events = list(agent.submit("hi"))
+    types = [ev["msg"]["type"] for ev in events]
+    assert "some_future_event" in types, f"未知变体应被原样透传:{types}"
+    assert types[-1] == "turn_complete", f"未知变体不应打断收尾:{types}"
+    # agent 仍可用。
+    assert agent.prompt("hi") == "mock-reply"
 
 
 def test_wire_field_names_stable() -> None:
