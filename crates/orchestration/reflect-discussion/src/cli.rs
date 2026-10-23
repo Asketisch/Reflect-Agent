@@ -203,6 +203,49 @@ pub async fn run(config_path: &Path, output: Option<&Path>) -> Result<(), CliErr
 /// 与 DiscussionToolSet 和 LlmContext 共享(LLM 跑完后写回 usage)。
 type ToolsetUsageMap = HashMap<AgentId, Arc<Mutex<Option<TokenUsage>>>>;
 
+/// 按 participant 组装工具表:共享并集 + 每个 participant 一份 per-role 表。
+///
+/// **同名工具多身份共存**:各 participant 的 comm 工具(`send_message` 等)
+/// **名字相同**但 `self_id` 不同。`ToolRegistry` 按名索引,把所有 participant
+/// 的工具注册进同一张表时后者覆盖前者 —— 所有 participant 最终共用最后一个
+/// 身份(消息的 `from` 取决于注册顺序),身份互串。
+///
+/// 这里返回两张表:
+/// - 共享并集:同名项取最后一个,供无 role 覆盖的 spawn 兜底;
+/// - per-role 表:以并集为底(工具集合不丢 —— `allowed_tools` 里的父级工具
+///   仍可解析),再用**本 participant 自己的**工具版本覆盖同名项。
+///
+/// per-role 表经 `SubAgentFactory::set_role_tools(role, ..)` 按 role 注入,
+/// `spawn` 见到 role 有覆盖时从对应表过滤工具。
+fn build_tool_registries(
+    participant_sets: &[(AgentId, DiscussionToolSet)],
+) -> (Arc<ToolRegistry>, Vec<(String, Arc<ToolRegistry>)>) {
+    let parent_tools = Arc::new(ToolRegistry::default());
+    for (_, set) in participant_sets {
+        for name in set.tool_names() {
+            if let Some(t) = set.registry.get(&name) {
+                parent_tools.register(t);
+            }
+        }
+    }
+    let mut role_registries: Vec<(String, Arc<ToolRegistry>)> = Vec::new();
+    for (p, set) in participant_sets {
+        let own = Arc::new(ToolRegistry::default());
+        for name in parent_tools.list() {
+            if let Some(t) = parent_tools.get(&name) {
+                own.register(t);
+            }
+        }
+        for name in set.tool_names() {
+            if let Some(t) = set.registry.get(&name) {
+                own.register(t);
+            }
+        }
+        role_registries.push((p.0.clone(), own));
+    }
+    (parent_tools, role_registries)
+}
+
 /// 尝试构造 LLM-backed orchestrator:provider 可用 + participants 非空 +
 /// 每个 participant 都能注册 DiscussionToolSet + SubAgentFactory 可建。
 ///
@@ -251,7 +294,17 @@ async fn try_build_llm_orchestrator(
     let finished = Arc::new(Mutex::new(false));
     let round_counter = Arc::new(AtomicU32::new(0));
     let toolset_usage = build_toolset_usage(config);
-    let parent_tools = Arc::new(ToolRegistry::default());
+    // review 修复:同名工具多身份共存 ——
+    // 各 participant 的 comm 工具(`send_message` 等)**名字相同**但
+    // `self_id` 不同。注册进同一个按名索引的 registry 时后者覆盖前者,
+    // 所有 participant 最终共用最后一个身份(消息发给谁取决于注册顺序)。
+    //
+    // 改为:每个 participant 一份独立 registry(并集 + 本 participant 自己的
+    // 工具版本覆盖同名项),经 `factory.set_role_tools(role, ...)` 按 role
+    // 注入;`spawn` 见到 role 有覆盖时从对应 registry 过滤工具。
+    //
+    // 第一遍:构造各 participant 的工具集(每个携带自己的 self_id)。
+    let mut participant_sets: Vec<(AgentId, DiscussionToolSet)> = Vec::new();
     for p in &config.participants {
         let slot = toolset_usage
             .get(p)
@@ -267,12 +320,10 @@ async fn try_build_llm_orchestrator(
         if set.verify().is_err() {
             return None;
         }
-        for name in set.tool_names() {
-            if let Some(t) = set.registry.get(&name) {
-                parent_tools.register(t);
-            }
-        }
+        participant_sets.push((p.clone(), set));
     }
+    // 共享表 + per-role 表(见 `build_tool_registries`)。
+    let (parent_tools, role_registries) = build_tool_registries(&participant_sets);
 
     // 3. SubAgentFactory + DiscussionOrchestrator + event_sink
     let factory = Arc::new(SubAgentFactory::new(
@@ -284,6 +335,10 @@ async fn try_build_llm_orchestrator(
         CancellationToken::new(),
         None, // CLI 不开 JSONL 持久化(每个 spawned agent 各自走自己的 session)
     ));
+    // 按 role 注入 participant 专属工具表(见上方「同名工具多身份共存」)。
+    for (role, reg) in role_registries {
+        factory.set_role_tools(&role, reg);
+    }
     // v0.2.4:orchestrator 的 event_sink 把 Collab* 事件送到 sync mpsc,由
     // spawn_collab_stdout_drainer() 启的 OS 线程写到 stdout JSONL。
     // 用 sync mpsc 而非 tokio::sync::mpsc,因为接收端是 OS 线程(StdoutLock !Send)。
@@ -338,6 +393,10 @@ fn build_toolset_usage(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::message_bus::MessageBus;
+    use crate::models::DiscussionId;
+    use crate::tool::DiscussionToolSet;
+    use reflect_tools::ToolContext;
     use std::io::Write;
 
     #[test]
@@ -461,5 +520,96 @@ system_prompt = "x"
             assert!(r.is_none(), "expected None when no provider configured");
         }
         // env 有 provider 时此分支无意义,跳过(测试不失败)。
+    }
+
+    /// 回归:同名工具多身份共存 ——
+    /// 各 participant 的 `send_message` **名字相同**但 `self_id` 不同。
+    /// `ToolRegistry` 按名索引,若所有 participant 的工具都注册进同一张表,
+    /// 后者覆盖前者 → 所有 participant 共用最后一个身份(消息 `from` 全同)。
+    /// per-role 表必须让每个 participant 拿到**自己**那份工具实例。
+    #[tokio::test]
+    async fn per_role_registries_keep_participant_identity() {
+        let participants = vec![AgentId("alice".into()), AgentId("bob".into())];
+        let bus = MessageBus::new(DiscussionId::new(), participants.clone(), 16);
+        let finished = Arc::new(Mutex::new(false));
+        let round = Arc::new(AtomicU32::new(0));
+        let mut sets = Vec::new();
+        for p in &participants {
+            let set = DiscussionToolSet::with_usage(
+                p.clone(),
+                bus.clone(),
+                finished.clone(),
+                round.clone(),
+                Arc::new(Mutex::new(None)),
+            );
+            sets.push((p.clone(), set));
+        }
+        let (_shared, roles) = build_tool_registries(&sets);
+        assert_eq!(roles.len(), 2, "每个 participant 一份 per-role 表");
+
+        // 两个角色的 `send_message` 必须是不同实例(而非共享表里最后注册的那个)。
+        let alice_tool = roles[0]
+            .1
+            .get("send_message")
+            .expect("alice 角色表含 send_message");
+        let bob_tool = roles[1]
+            .1
+            .get("send_message")
+            .expect("bob 角色表含 send_message");
+        assert!(
+            !Arc::ptr_eq(&alice_tool, &bob_tool),
+            "两个角色的 send_message 必须是不同实例,否则身份互串"
+        );
+
+        // 端到端:各自发一条消息,transcript 的 `from` 必须分别是本人。
+        let ctx = ToolContext::for_workspace(std::env::temp_dir());
+        let args = serde_json::json!({ "content": "hi" });
+        alice_tool
+            .execute(ctx.clone(), args.clone())
+            .await
+            .expect("alice 发送成功");
+        bob_tool.execute(ctx, args).await.expect("bob 发送成功");
+        let senders: Vec<String> = bus.transcript().iter().map(|m| m.from.0.clone()).collect();
+        assert!(
+            senders.contains(&"alice".to_string()),
+            "alice 的消息应标 from=alice,实际: {senders:?}"
+        );
+        assert!(
+            senders.contains(&"bob".to_string()),
+            "bob 的消息应标 from=bob,实际: {senders:?}"
+        );
+    }
+
+    /// 回归:per-role 表以共享并集为底 —— `allowed_tools` 里列的父级工具
+    /// 不能因为按 role 隔离而丢失。
+    #[test]
+    fn per_role_registry_keeps_shared_union_tools() {
+        let participants = vec![AgentId("alice".into()), AgentId("bob".into())];
+        let bus = MessageBus::new(DiscussionId::new(), participants.clone(), 16);
+        let finished = Arc::new(Mutex::new(false));
+        let round = Arc::new(AtomicU32::new(0));
+        let mut sets = Vec::new();
+        for p in &participants {
+            let set = DiscussionToolSet::with_usage(
+                p.clone(),
+                bus.clone(),
+                finished.clone(),
+                round.clone(),
+                Arc::new(Mutex::new(None)),
+            );
+            sets.push((p.clone(), set));
+        }
+        let (shared, roles) = build_tool_registries(&sets);
+        let shared_names = shared.list();
+        assert!(!shared_names.is_empty(), "共享并集非空");
+        for (role, reg) in &roles {
+            let names = reg.list();
+            for n in &shared_names {
+                assert!(
+                    names.contains(n),
+                    "role {role} 的表丢了并集里的工具 {n}: {names:?}"
+                );
+            }
+        }
     }
 }
