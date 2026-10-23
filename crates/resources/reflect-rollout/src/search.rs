@@ -139,7 +139,9 @@ fn scan_line(
         b
     };
     let to = {
-        let raw = (pos + needle.len()).saturating_add(opts.context_chars).min(text.len());
+        let raw = (pos + needle.len())
+            .saturating_add(opts.context_chars)
+            .min(text.len());
         let mut e = raw;
         while e < text.len() && !text.is_char_boundary(e) {
             e += 1;
@@ -248,7 +250,12 @@ mod tests {
         let path = dir.join(name);
         let mut f = std::fs::File::create(&path).unwrap();
         let sid = ThreadId::new();
-        writeln!(f, "{}", serde_json::to_string(&RolloutRecord::session_meta(sid, "mock/model")).unwrap()).unwrap();
+        writeln!(
+            f,
+            "{}",
+            serde_json::to_string(&RolloutRecord::session_meta(sid, "mock/model")).unwrap()
+        )
+        .unwrap();
         for t in texts {
             let rec = RolloutRecord::message(
                 TurnId::new(),
@@ -263,7 +270,11 @@ mod tests {
     #[test]
     fn finds_substring_case_insensitive() {
         let dir = tempdir().unwrap();
-        write_session(dir.path(), "a.jsonl", &["hello Reflect World", "other line"]);
+        write_session(
+            dir.path(),
+            "a.jsonl",
+            &["hello Reflect World", "other line"],
+        );
         let hits = search_sessions(dir.path(), "reflect", &SearchOptions::default()).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].role.as_deref(), Some("user"));
@@ -284,7 +295,11 @@ mod tests {
         filetime::set_file_mtime(&new, filetime::FileTime::from_system_time(t_new)).unwrap();
         let hits = search_sessions(dir.path(), "needle", &SearchOptions::default()).unwrap();
         assert_eq!(hits.len(), 2);
-        assert!(hits[0].file.ends_with("new.jsonl"), "最新文件应先扫: {:?}", hits[0].file);
+        assert!(
+            hits[0].file.ends_with("new.jsonl"),
+            "最新文件应先扫: {:?}",
+            hits[0].file
+        );
     }
 
     #[test]

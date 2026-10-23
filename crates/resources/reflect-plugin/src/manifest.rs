@@ -103,10 +103,7 @@ impl std::str::FromStr for PluginDependency {
 
 /// 判断段是否以版本约束符号开头(`^` / `~` / `=` / `>` / `<`)。
 fn starts_with_version_constraint(s: &str) -> bool {
-    matches!(
-        s.chars().next(),
-        Some('^' | '~' | '=' | '>' | '<')
-    )
+    matches!(s.chars().next(), Some('^' | '~' | '=' | '>' | '<'))
 }
 
 impl std::fmt::Display for PluginDependency {

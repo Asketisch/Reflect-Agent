@@ -381,10 +381,12 @@ fn derive_role(agent_name: &str) -> String {
     let replaced = agent_name.replace(':', "_");
     let sanitized: String = replaced
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-            c
-        } else {
-            '_'
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
         })
         .collect();
     // 字符数截断(32 字符,而非 32 字节)。

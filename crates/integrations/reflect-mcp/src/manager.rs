@@ -283,10 +283,7 @@ impl McpConnectionManager {
             let entry = handles.remove(name)?;
             // cancel in-flight calls + 触发 TokioChildProcess DropGuard 杀子进程。
             entry.inner.cancel.cancel();
-            (
-                entry,
-                name.to_string(),
-            )
+            (entry, name.to_string())
         };
         // 锁已释放,事件发送背压不再阻塞 registry。
         let _ = self

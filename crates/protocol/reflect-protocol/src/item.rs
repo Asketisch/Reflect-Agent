@@ -199,8 +199,15 @@ impl PermissionMode {
 pub fn is_edit_tool_name(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "write" | "edit" | "delete" | "delete_file" | "notebook_edit" | "Write" | "Edit"
-            | "Delete" | "NotebookEdit"
+        "write"
+            | "edit"
+            | "delete"
+            | "delete_file"
+            | "notebook_edit"
+            | "Write"
+            | "Edit"
+            | "Delete"
+            | "NotebookEdit"
     )
 }
 

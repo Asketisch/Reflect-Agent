@@ -220,9 +220,7 @@ impl SubAgentFactory {
     /// `parent_tools`。适用于"同名工具、不同实例"的场景(典型:
     /// discussion 每个 participant 的 `send_message` 携带不同 `self_id`)。
     pub fn set_role_tools(&self, role: &str, registry: Arc<ToolRegistry>) {
-        self.role_tools
-            .lock()
-            .insert(role.to_string(), registry);
+        self.role_tools.lock().insert(role.to_string(), registry);
     }
 
     /// 读取指定 role 的工具注册表覆盖(若有)。
@@ -543,9 +541,7 @@ impl SubAgentFactory {
         // review 修复:role 有专属工具注册表时从它过滤(同名工具多身份),
         // 否则从共享的 parent_tools 过滤。
         let role_registry = self.role_tools(&spec.role);
-        let tool_source: &ToolRegistry = role_registry
-            .as_deref()
-            .unwrap_or(&self.parent_tools);
+        let tool_source: &ToolRegistry = role_registry.as_deref().unwrap_or(&self.parent_tools);
         if self.coordinator_mode.load(Ordering::SeqCst) {
             // coordinator 启用:从父 registry 排除 internal tools。
             let worker_registry = build_worker_tool_registry(tool_source);

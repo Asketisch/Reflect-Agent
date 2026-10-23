@@ -463,10 +463,7 @@ pub fn search(query: &str, limit: usize, json: bool) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    println!(
-        "{:<10}  {:<10}  snippet",
-        "session", "role"
-    );
+    println!("{:<10}  {:<10}  snippet", "session", "role");
     for h in &hits {
         // session id 取前 8 位前缀(resume / show 均支持前缀定位)。
         let id_prefix: String = h
@@ -476,7 +473,10 @@ pub fn search(query: &str, limit: usize, json: bool) -> anyhow::Result<()> {
         let role = h.role.as_deref().unwrap_or("-");
         println!("{:<10}  {:<10}  {}", id_prefix, role, h.snippet);
     }
-    println!("\n{} hit(s);用 `reflect session show <id前缀>` 看详情", hits.len());
+    println!(
+        "\n{} hit(s);用 `reflect session show <id前缀>` 看详情",
+        hits.len()
+    );
     Ok(())
 }
 

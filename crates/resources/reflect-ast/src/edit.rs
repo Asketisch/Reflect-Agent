@@ -247,7 +247,7 @@ mod tests {
     fn drop_contained_ranges_dedupes_and_keeps_outermost() {
         let mut ranges = vec![
             ByteRange { start: 0, end: 10 },
-            ByteRange { start: 2, end: 5 }, // ⊆ 第一个
+            ByteRange { start: 2, end: 5 },  // ⊆ 第一个
             ByteRange { start: 0, end: 10 }, // 与第一个相等
             ByteRange { start: 12, end: 20 },
         ];

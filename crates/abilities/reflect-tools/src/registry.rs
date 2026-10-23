@@ -887,7 +887,11 @@ mod tests {
             fn is_concurrency_safe(&self) -> bool {
                 true
             }
-            async fn execute(&self, _: ToolContext, _: serde_json::Value) -> Result<Out, ToolError> {
+            async fn execute(
+                &self,
+                _: ToolContext,
+                _: serde_json::Value,
+            ) -> Result<Out, ToolError> {
                 unreachable!()
             }
         }
@@ -905,9 +909,6 @@ mod tests {
         // Prompt 声明保持原样。
         let r = ToolRegistry::default();
         r.register_with_source_floor(ToolSource::Mcp, Arc::new(Declare(PM::Prompt)));
-        assert_eq!(
-            r.get("declare").unwrap().required_permission(),
-            PM::Prompt
-        );
+        assert_eq!(r.get("declare").unwrap().required_permission(), PM::Prompt);
     }
 }

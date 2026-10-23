@@ -761,11 +761,10 @@ pub async fn submission_loop(
                             if !final_state.turn_content.is_empty()
                                 || !final_state.latest_content.is_empty()
                             {
-                                let mut all_content = std::mem::take(
-                                    &mut final_state.turn_content,
-                                );
+                                let mut all_content = std::mem::take(&mut final_state.turn_content);
                                 all_content.extend(final_state.latest_content.iter().cloned());
-                                let _ = rec.record(RolloutRecord::message(
+                                let _ = rec
+                                    .record(RolloutRecord::message(
                                         turn_id,
                                         MessageRole::Assistant,
                                         serde_json::to_value(&all_content)

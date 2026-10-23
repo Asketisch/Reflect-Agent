@@ -546,7 +546,8 @@ mod tests {
     #[test]
     fn parse_created_emits_message_start() {
         // 真实 wire 格式:{"type": ..., "response": {...}} 嵌套。
-        let v = json!({"type": "response.created", "response": {"id": "resp_123", "model": "gpt-4o"}});
+        let v =
+            json!({"type": "response.created", "response": {"id": "resp_123", "model": "gpt-4o"}});
         let evs = parse_responses_event("response.created", &v);
         assert!(matches!(
             evs[0],

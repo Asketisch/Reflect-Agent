@@ -776,11 +776,7 @@ fn main() -> anyhow::Result<()> {
             SessionAction::Fork { id, branch } => session::fork(&id, branch.as_deref()),
             SessionAction::Rename { id, name } => session::rename(&id, &name),
             SessionAction::Export { id, out } => session::export(&id, out.as_deref()),
-            SessionAction::Search {
-                query,
-                limit,
-                json,
-            } => session::search(&query, limit, json),
+            SessionAction::Search { query, limit, json } => session::search(&query, limit, json),
             SessionAction::Stats { workspace } => session::stats(workspace.as_deref()),
         },
         Command::Traces { action } => match action {

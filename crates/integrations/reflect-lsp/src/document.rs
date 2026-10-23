@@ -55,7 +55,10 @@ impl LspClientInner {
         let synced_mtime: Option<std::time::SystemTime> =
             self.docs.read().get(uri).and_then(|st| st.synced_mtime);
         if let Some(recorded) = synced_mtime {
-            let mtime = fs::metadata(path).await.ok().and_then(|m| m.modified().ok());
+            let mtime = fs::metadata(path)
+                .await
+                .ok()
+                .and_then(|m| m.modified().ok());
             if mtime == Some(recorded) {
                 return Ok(());
             }
