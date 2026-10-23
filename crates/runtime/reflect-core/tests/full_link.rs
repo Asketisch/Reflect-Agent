@@ -454,6 +454,9 @@ async fn full_link_turn_lifecycle_with_tool_loop() {
             EventMsg::SessionConfigured(_) => "session_configured",
             EventMsg::TurnStarted(_) => "turn_started",
             EventMsg::ToolCallBegin(_) => "tool_call_begin",
+            // v1.5:additive 变体 —— 模型生成工具参数期间逐段转发,
+            // 位于 tool_call_begin 与 tool_call_end 之间。
+            EventMsg::ToolCallArgsDelta(_) => "tool_call_args_delta",
             EventMsg::ToolCallEnd(_) => "tool_call_end",
             EventMsg::AgentMessageDelta(_) => "agent_delta",
             EventMsg::TokenCount(_) => "token_count",
@@ -465,6 +468,7 @@ async fn full_link_turn_lifecycle_with_tool_loop() {
         "session_configured",
         "turn_started",
         "tool_call_begin",
+        "tool_call_args_delta",
         "tool_call_end",
         "agent_delta",
         "turn_complete",
