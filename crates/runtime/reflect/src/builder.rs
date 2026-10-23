@@ -280,7 +280,7 @@ impl ReflectBuilder {
     /// 与 `reflect-exec` 路径对齐。如果想用最小 m4 路径,直接通过
     /// `AgentThread::new + AgentConfig::with_m4(default_m4_deps)` 走底层 API。
     pub fn build(self) -> anyhow::Result<Reflect> {
-        let registry = build_registry_from_env()?;
+        let registry = build_registry_from_env(&self.model)?;
         let tools = Arc::new(default_tool_registry());
         // v1.x:先解析 telemetry sink —— self.cancel 随后被移出,部分移动后
         // 不能再整体借用 self。
@@ -330,7 +330,7 @@ impl ReflectBuilder {
     /// - config `[mcp_servers]` 不消费(空 manager 兜底,仅供插件的
     ///   mcp_servers 能力落点)。
     pub async fn build_async(self) -> anyhow::Result<Reflect> {
-        let registry = build_registry_from_env()?;
+        let registry = build_registry_from_env(&self.model)?;
         let tools = Arc::new(default_tool_registry());
         // v1.x:先解析 telemetry sink —— self.cancel 随后被移出。
         let telemetry_sink = self.resolve_telemetry_sink();
@@ -582,14 +582,36 @@ fn build_telemetry_sink(traces_dir: Option<&Path>) -> Option<Arc<TelemetrySink>>
 
 /// 从标准 env 变量构造 `SharedModelRegistry`。与 `reflect_exec::async_main`
 /// 的设置保持一致,这样库的使用者无需直接触碰 exec 的私有 helper。
-fn build_registry_from_env() -> anyhow::Result<Arc<reflect_llm::ModelRegistry>> {
+///
+/// `model_spec`:调用方显式传入的 model spec —— 参与 mock 判定
+/// (`Reflect::builder("mock")` 应当离线可用)。
+fn build_registry_from_env(model_spec: &str) -> anyhow::Result<Arc<reflect_llm::ModelRegistry>> {
     use reflect_llm::{
-        AnthropicClient, AnthropicConfig, CredentialPool, ModelRegistry, OllamaClient,
+        AnthropicClient, AnthropicConfig, CredentialPool, MockClient, ModelRegistry, OllamaClient,
         OllamaConfig, OpenAIClient, OpenAIConfig, PoolEntry,
     };
 
     let registry = Arc::new(ModelRegistry::new());
     let mut any = false;
+    // 离线 mock provider(显式 opt-in,免 key、零网络)——
+    // 判定口径与 `reflect-config` 的 `active_provider_inner` 对齐。
+    //
+    // 此前门面完全不认识 mock:`REFLECT_MODEL=mock` 的 example 与离线集成
+    // 脚本一律撞上「set OPENAI_API_KEY」,离线场景根本跑不起来(e2e 只能
+    // 用 `|| true` 把它吞掉 —— 那正是假阳性)。
+    if is_mock_provider(model_spec) {
+        registry.register_pool(
+            "mock",
+            CredentialPool {
+                entries: vec![PoolEntry {
+                    client: Arc::new(MockClient::from_env()),
+                    label: "default".into(),
+                    weight: 1,
+                }],
+            },
+        );
+        any = true;
+    }
     if let Ok(key) = std::env::var("OPENAI_API_KEY") {
         if !key.is_empty() {
             registry.register_pool(
@@ -651,10 +673,42 @@ fn build_registry_from_env() -> anyhow::Result<Arc<reflect_llm::ModelRegistry>> 
     }
     if !any {
         return Err(anyhow::anyhow!(
-            "Reflect: set OPENAI_API_KEY, ANTHROPIC_API_KEY, or OLLAMA_HOST/OLLAMA_API_KEY"
+            "Reflect: set OPENAI_API_KEY, ANTHROPIC_API_KEY, or OLLAMA_HOST/OLLAMA_API_KEY \
+             (离线场景可显式设 REFLECT_MODEL=mock)"
         ));
     }
     Ok(registry)
+}
+
+/// 判定是否应使用离线 mock provider。
+///
+/// 口径与 `reflect-config` 的 `active_provider_inner` 对齐:
+/// - `REFLECT_PROVIDER=mock` / `fake`;
+/// - `REFLECT_MODEL` 为 `mock` 或 `mock/...`;
+/// - 显式传入的 model spec 为 `mock` 或 `mock/...`。
+///
+/// 只认**显式 opt-in**,不作为无 key 时的静默兜底 —— 免得真实 provider
+/// 配错时被悄悄换成假模型。
+fn is_mock_provider(model_spec: &str) -> bool {
+    if let Some(p) = std::env::var("REFLECT_PROVIDER").ok() {
+        let p = p.trim().to_ascii_lowercase();
+        if p == "mock" || p == "fake" {
+            return true;
+        }
+    }
+    for m in [
+        std::env::var("REFLECT_MODEL").ok(),
+        Some(model_spec.to_string()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let m = m.trim();
+        if m == "mock" || m.starts_with("mock/") {
+            return true;
+        }
+    }
+    false
 }
 
 fn default_tool_registry() -> ToolRegistry {
@@ -741,6 +795,88 @@ mod tests {
         if let Some(v) = prior_anthropic {
             unsafe {
                 std::env::set_var("ANTHROPIC_API_KEY", v);
+            }
+        }
+    }
+
+    /// 回归:门面此前**完全不认识** mock provider —— `Reflect::builder("mock")`
+    /// 在无任何 API key 时报「set OPENAI_API_KEY」,离线场景(e2e 的 5 个
+    /// example、离线集成脚本)根本跑不起来,上游 e2e 只能用 `|| true`
+    /// 把它吞掉。显式 opt-in 的 mock 必须免 key 可用。
+    #[tokio::test]
+    async fn builder_accepts_mock_model_without_api_key() {
+        let _g = env_lock().lock().unwrap();
+        let prior_openai = std::env::var("OPENAI_API_KEY").ok();
+        let prior_anthropic = std::env::var("ANTHROPIC_API_KEY").ok();
+        let prior_provider = std::env::var("REFLECT_PROVIDER").ok();
+        let prior_model = std::env::var("REFLECT_MODEL").ok();
+        unsafe {
+            std::env::remove_var("OPENAI_API_KEY");
+            std::env::remove_var("ANTHROPIC_API_KEY");
+            std::env::remove_var("REFLECT_PROVIDER");
+            std::env::remove_var("REFLECT_MODEL");
+        }
+        let agent = Reflect::builder("mock")
+            .workspace("/tmp")
+            .build()
+            .expect("mock provider 必须免 key 可用");
+        assert_eq!(agent.thread().config().current_model(), "mock");
+        if let Some(v) = prior_openai {
+            unsafe {
+                std::env::set_var("OPENAI_API_KEY", v);
+            }
+        }
+        if let Some(v) = prior_anthropic {
+            unsafe {
+                std::env::set_var("ANTHROPIC_API_KEY", v);
+            }
+        }
+        if let Some(v) = prior_provider {
+            unsafe {
+                std::env::set_var("REFLECT_PROVIDER", v);
+            }
+        }
+        if let Some(v) = prior_model {
+            unsafe {
+                std::env::set_var("REFLECT_MODEL", v);
+            }
+        }
+    }
+
+    /// `is_mock_provider` 的判定口径:只认**显式 opt-in**,
+    /// 普通 model spec 不得被静默换成假模型。
+    #[test]
+    fn mock_provider_detection_is_explicit_only() {
+        let _g = env_lock().lock().unwrap();
+        let prior_provider = std::env::var("REFLECT_PROVIDER").ok();
+        let prior_model = std::env::var("REFLECT_MODEL").ok();
+        unsafe {
+            std::env::remove_var("REFLECT_PROVIDER");
+            std::env::remove_var("REFLECT_MODEL");
+        }
+        assert!(!is_mock_provider("openai/gpt-4o"));
+        assert!(!is_mock_provider("anthropic/claude"));
+        assert!(is_mock_provider("mock"));
+        assert!(is_mock_provider("mock/mock-1"));
+        unsafe {
+            std::env::set_var("REFLECT_PROVIDER", "mock");
+        }
+        assert!(is_mock_provider("openai/gpt-4o"));
+        unsafe {
+            std::env::remove_var("REFLECT_PROVIDER");
+        }
+        unsafe {
+            std::env::set_var("REFLECT_MODEL", "mock");
+        }
+        assert!(is_mock_provider("openai/gpt-4o"));
+        if let Some(v) = prior_provider {
+            unsafe {
+                std::env::set_var("REFLECT_PROVIDER", v);
+            }
+        }
+        if let Some(v) = prior_model {
+            unsafe {
+                std::env::set_var("REFLECT_MODEL", v);
             }
         }
     }
@@ -835,7 +971,7 @@ mod tests {
         drop(_g);
         let t = Arc::new(AgentThread::new(
             AgentConfig::new("openai/gpt-4o", Path::new(".")),
-            build_registry_from_env().unwrap(),
+            build_registry_from_env("openai/gpt-4o").unwrap(),
             Arc::new(default_tool_registry()),
             None,
             None,

@@ -58,7 +58,17 @@ step "3/13 5 examples (mock provider, offline)" \
         set -euo pipefail
         for ex in headless_run custom_tool multi_turn custom_provider hook_listener; do
             echo "--- example: $ex"
-            REFLECT_MODEL=mock cargo run --quiet --release --example "$ex"
+            case "$ex" in
+                # headless_run 需要一个 prompt 参数(见
+                # crates/runtime/reflect/examples/headless_run.rs:缺失即报
+                # "usage: headless_run <prompt>")。`--` 之后的参数透传给 example。
+                headless_run)
+                    REFLECT_MODEL=mock cargo run --quiet --release --example "$ex" -- "hello from e2e"
+                    ;;
+                *)
+                    REFLECT_MODEL=mock cargo run --quiet --release --example "$ex"
+                    ;;
+            esac
         done
     '
 
