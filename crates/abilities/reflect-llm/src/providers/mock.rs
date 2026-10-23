@@ -10,7 +10,11 @@
 //!   - `{"type":"text","text":"..."}` —— 回复一段文本(拆成两个 delta,
 //!     锻炼下游的流式聚合路径);
 //!   - `{"type":"tool_call","name":"...","args":{...}}` —— 发起一次
-//!     工具调用(engine 执行工具后会再次调用模型,即再消耗一行)。
+//!     工具调用(engine 执行工具后会再次调用模型,即再消耗一行));
+//!   - `{"type":"tool_call_delta","name":"...","chunks":["...","..."]}` ——
+//!     同上,但参数**分片**下发(分片形态 provider:Anthropic / OpenAI 的
+//!     「start → 一/多个 delta → stop」)。engine 侧逐段转发
+//!     `tool_call_args_delta` 事件,供客户端渐进渲染工具入参。
 //! - 脚本耗尽或未配置时,回退固定回复 `"Hello from mock LLM!"`。
 //!
 //! 这让「turn 1 调工具、turn 2 收尾文本」之类的多阶段对话可以用一个
@@ -52,6 +56,18 @@ pub enum MockReply {
         name: String,
         #[serde(default)]
         args: serde_json::Value,
+    },
+    /// 发起一次工具调用,参数**分片**下发(分片形态 provider:Anthropic /
+    /// OpenAI 逐段 emit 参数 JSON)。
+    ///
+    /// 与 `ToolCall` 的差别:`ToolUseStart` **不带**参数,参数由若干
+    /// `ToolUseDelta` 分片送来 —— engine 侧走 `args_from_start == false`
+    /// 分支,逐段转发 `tool_call_args_delta` 事件给客户端。
+    ToolCallDelta {
+        name: String,
+        /// 参数 JSON 的分片(按序拼接成完整 JSON)。
+        #[serde(default)]
+        chunks: Vec<String>,
     },
 }
 
@@ -193,6 +209,23 @@ impl ModelClient for MockClient {
                     chunks.push(Ok(ChatEvent::ToolUseDelta(input_json)));
                 }
             }
+            Some(MockReply::ToolCallDelta {
+                name,
+                chunks: parts,
+            }) => {
+                // 分片形态:`ToolUseStart` 不带参数(留空),参数由若干
+                // `ToolUseDelta` 逐段送达 —— 与 Anthropic / OpenAI 的
+                // 「start → 一/多个 delta → stop」一致。engine 侧据此
+                // 逐段转发 `tool_call_args_delta` 给客户端。
+                chunks.push(Ok(ChatEvent::ToolUseStart {
+                    id: format!("toolu_mock_{n}"),
+                    name,
+                    input_json: String::new(),
+                }));
+                for part in parts {
+                    chunks.push(Ok(ChatEvent::ToolUseDelta(part)));
+                }
+            }
             None => push_text_deltas(&mut chunks, DEFAULT_MOCK_REPLY.to_string()),
         }
 
@@ -313,6 +346,18 @@ mod tests {
             MockReply::ToolCall {
                 name: "echo".into(),
                 args: serde_json::json!({"a": 1})
+            }
+        );
+        // 分片形态:参数按 chunks 逐段下发。
+        let delta: MockReply = serde_json::from_str(
+            r#"{"type":"tool_call_delta","name":"echo","chunks":["{\"a\":1","}"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            delta,
+            MockReply::ToolCallDelta {
+                name: "echo".into(),
+                chunks: vec!["{\"a\":1".into(), "}".into()],
             }
         );
         // args 缺省为 null。
