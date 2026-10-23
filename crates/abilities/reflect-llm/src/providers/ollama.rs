@@ -480,6 +480,12 @@ impl From<ChatRequest> for OllamaRequest {
             // Text / None:纯文本,不设置 format。
             _ => None,
         };
+        // review 修复:`max_tokens` 此前被静默丢弃 —— Ollama 的输出上限
+        // 需要 `options.num_predict`。`build_request` 会把 config 的
+        // num_ctx/num_gpu 合并进同一 options 对象。
+        let options = req
+            .max_tokens
+            .map(|n| serde_json::json!({ "num_predict": n }));
         Self {
             model: req.model,
             messages,
@@ -487,7 +493,7 @@ impl From<ChatRequest> for OllamaRequest {
             temperature: req.temperature,
             top_p: req.top_p,
             format,
-            options: None,
+            options,
             keep_alive: None,
             tools,
             stop: req.stop,
@@ -504,14 +510,20 @@ fn build_request(req: &ChatRequest, model: &str, config: &OllamaConfig) -> Ollam
     if let Some(secs) = config.keep_alive_secs {
         body.keep_alive = Some(format_keep_alive(secs));
     }
-    let mut options = serde_json::Map::new();
-    if let Some(n) = config.num_ctx {
-        options.insert("num_ctx".into(), Value::from(n));
-    }
-    if let Some(n) = config.num_gpu {
-        options.insert("num_gpu".into(), Value::from(n));
-    }
-    if !options.is_empty() {
+    // review 修复:此前 config 的 options 会整体覆盖 `OllamaRequest::from`
+    // 写入的 num_predict(来自 max_tokens);改为合并进同一对象。
+    let has_config_options = config.num_ctx.is_some() || config.num_gpu.is_some();
+    if has_config_options {
+        let mut options = match body.options.take() {
+            Some(Value::Object(map)) => map,
+            _ => serde_json::Map::new(),
+        };
+        if let Some(n) = config.num_ctx {
+            options.insert("num_ctx".into(), Value::from(n));
+        }
+        if let Some(n) = config.num_gpu {
+            options.insert("num_gpu".into(), Value::from(n));
+        }
         body.options = Some(Value::Object(options));
     }
     body
@@ -726,6 +738,45 @@ mod tests {
         let body = build_request(&req, "llama3.2", &cfg);
         let v: Value = serde_json::to_value(body).unwrap();
         assert_eq!(v["keep_alive"], "-1");
+    }
+
+    /// 回归:`max_tokens` 此前被静默丢弃 —— Ollama 的输出上限需要
+    /// `options.num_predict`,不映射等于用户设的上限完全无效。
+    #[test]
+    fn max_tokens_maps_to_num_predict() {
+        let mut req = ChatRequest::default();
+        req.max_tokens = Some(1024);
+        let body = OllamaRequest::from(req);
+        let v: Value = serde_json::to_value(body).unwrap();
+        assert_eq!(v["options"]["num_predict"], 1024);
+    }
+
+    /// 回归:config 的 num_ctx/num_gpu 与 max_tokens 推出的 num_predict
+    /// 必须**合并**进同一 options 对象 —— 此前 config 分支整体覆盖了
+    /// options,把 num_predict 冲掉。
+    #[test]
+    fn config_options_merge_with_num_predict() {
+        let mut req = ChatRequest::default();
+        req.max_tokens = Some(1024);
+        let cfg = OllamaConfig {
+            num_ctx: Some(4096),
+            num_gpu: Some(35),
+            ..Default::default()
+        };
+        let body = build_request(&req, "llama3.2", &cfg);
+        let v: Value = serde_json::to_value(body).unwrap();
+        assert_eq!(v["options"]["num_predict"], 1024);
+        assert_eq!(v["options"]["num_ctx"], 4096);
+        assert_eq!(v["options"]["num_gpu"], 35);
+    }
+
+    /// 回归:没有 max_tokens 时不应凭空造出 options 子对象。
+    #[test]
+    fn no_max_tokens_leaves_options_absent() {
+        let req = ChatRequest::default();
+        let body = OllamaRequest::from(req);
+        let v: Value = serde_json::to_value(body).unwrap();
+        assert!(v.get("options").is_none(), "options 不应出现: {v}");
     }
 
     #[test]
