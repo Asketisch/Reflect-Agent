@@ -744,8 +744,10 @@ mod tests {
     /// `options.num_predict`,不映射等于用户设的上限完全无效。
     #[test]
     fn max_tokens_maps_to_num_predict() {
-        let mut req = ChatRequest::default();
-        req.max_tokens = Some(1024);
+        let req = ChatRequest {
+            max_tokens: Some(1024),
+            ..Default::default()
+        };
         let body = OllamaRequest::from(req);
         let v: Value = serde_json::to_value(body).unwrap();
         assert_eq!(v["options"]["num_predict"], 1024);
@@ -756,8 +758,10 @@ mod tests {
     /// options,把 num_predict 冲掉。
     #[test]
     fn config_options_merge_with_num_predict() {
-        let mut req = ChatRequest::default();
-        req.max_tokens = Some(1024);
+        let req = ChatRequest {
+            max_tokens: Some(1024),
+            ..Default::default()
+        };
         let cfg = OllamaConfig {
             num_ctx: Some(4096),
             num_gpu: Some(35),
