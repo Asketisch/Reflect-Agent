@@ -3,7 +3,8 @@
 直接驱动 `reflect serve` 原始 JSONL wire(不经过任何 SDK),断言到**字段级**。
 
 覆盖:
-- D 组 基础通信与事件流:握手 / 单轮事件序列 / 多轮上下文 / token_count / 终态语义;
+- D 组 基础通信与事件流:握手 / 单轮事件序列 / 多轮上下文 / token_count / 终态语义 /
+  工具参数增量事件(`tool_call_args_delta`);
 - S 组 并发与路由:submission 隔离 / 队列串行 / 收尾不变量;
 - A 组 会话状态 Op:user_input+thread_settings / set_effort / 权限模式 / rewind /
   interrupt / compact / goal 模式 / plan 模式 / 四种孤儿回执 / steer /
@@ -126,6 +127,50 @@ def test_D4_token_count_带模型维度(serve_session, mock_script) -> None:
         assert f in tcs[0], f"token_count 缺 {f}"
     # 至少一条带模型维度(模型级统计的入口)。
     assert any(tc.get("model") == "mock/mock-1" for tc in tcs), f"无 model 维度:{tcs}"
+
+
+def test_D9_工具参数增量事件字段完整(serve_session, mock_script) -> None:
+    """模型生成工具参数期间逐段转发 `tool_call_args_delta`(v1.5 additive 变体)。
+
+    依据:protocol/.../event_msg/tool.rs 的 `ToolCallArgsDeltaEvent`
+    (call_id + delta);core/.../model_call/stream.rs 把 LLM 层的
+    `ToolUseDelta` 按进行中的 call_id 转发给客户端。
+
+    mock 用 `tool_call_delta` 脚本行制造**分片形态**参数下发
+    (Anthropic / OpenAI 的「start → 一/多个 delta → stop」)—— 整包形态
+    (参数全在 ToolUseStart 里)没有 delta 可转发,看不到本事件。
+    """
+    require_binary()
+    script = mock_script(
+        [
+            '{"type":"tool_call_delta","name":"echo","chunks":["{\\"text\\":\\"pi","ng\\"}"]}',
+            '{"type":"text","text":"done"}',
+        ]
+    )
+    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+        evs = s.submit({"type": "user_input", "items": [{"type": "text", "text": "调工具"}]})
+    types = msg_types(evs)
+    deltas = [e["msg"] for e in evs if e["msg"]["type"] == "tool_call_args_delta"]
+    assert deltas, f"未见 tool_call_args_delta 事件:{types}"
+    # 字段级:call_id + delta 两个字段都在,且非空。
+    for d in deltas:
+        assert "call_id" in d, f"缺 call_id:{d}"
+        assert "delta" in d, f"缺 delta:{d}"
+        assert d["call_id"], f"call_id 不应为空:{d}"
+        assert d["delta"], f"delta 不应为空:{d}"
+    # 分片按到达顺序拼接 = 完整参数 JSON。
+    joined = "".join(d["delta"] for d in deltas)
+    assert joined == '{"text":"ping"}', f"分片拼接结果={joined!r}"
+    # call_id 与 tool_call_begin 一致(同一调用)。
+    begins = [e["msg"] for e in evs if e["msg"]["type"] == "tool_call_begin"]
+    assert begins, f"未见 tool_call_begin:{types}"
+    assert deltas[0]["call_id"] == begins[0]["call_id"], (
+        f"args_delta 的 call_id 应与 tool_call_begin 一致:{deltas[0]} vs {begins[0]}"
+    )
+    # 时序:增量在 tool_call_begin 之后(客户端先知道有这通调用,再收参数)。
+    assert types.index("tool_call_args_delta") > types.index("tool_call_begin"), (
+        f"args_delta 应在 tool_call_begin 之后:{types}"
+    )
 
 
 def test_D5_终态语义_turn后不再有事件(serve_session, mock_script) -> None:
