@@ -1,17 +1,25 @@
-//! exec 启动期插件挂载与 config reload 同步。
+//! 运行时插件装配 —— 从 `reflect-exec` 下沉而来的启动挂载与 reload 同步。
+//!
+//! 这里只依赖本 crate 与各能力 registry(tools/hooks/mcp/skills/subagent),
+//! 因此 exec / serve / 门面 Builder / Python 绑定可以共用同一套装配入口:
+//! - [`bootstrap_plugins`]:启动期构造 [`PluginRuntime`] 并同步 enabled 列表;
+//! - [`reload_plugins`]:config `[plugins]` 段变更时 diff 同步挂/卸。
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use reflect_hooks::HookEngine;
 use reflect_mcp::McpConnectionManager;
-use reflect_plugin::loader::{LoaderRegistries, register, scan, unregister};
-use reflect_plugin::manifest::PluginManifest;
-use reflect_plugin::state::PluginScope;
-use reflect_plugin::{PluginId, PluginManager, default_plugins_root};
 use reflect_skills::SkillsCatalog;
 use reflect_subagent::SubAgentFactory;
 use reflect_tools::ToolRegistry;
+
+use crate::commands_registry::CommandRegistry;
+use crate::identifier::PluginId;
+use crate::loader::{LoaderRegistries, register, scan, unregister};
+use crate::manifest::PluginManifest;
+use crate::state::PluginScope;
+use crate::{PluginManager, default_plugins_root};
 
 /// 运行时插件状态:manager + 共享 registry + 当前 enabled 集合 +
 /// 可选 event sink(批次二十四 #5:emit `PluginLoaded` 给 JSONL / TUI)。
@@ -51,10 +59,10 @@ impl PluginRuntime {
         let new_set: HashSet<String> = enabled_list.iter().cloned().collect();
 
         for id in self.enabled.difference(&new_set) {
-            if let Ok(pid) = PluginId::parse_user_input(id) {
-                if let Err(e) = unregister(&self.registries, &pid).await {
-                    tracing::warn!(plugin = %id, error = %e, "plugin unregister on reload failed");
-                }
+            if let Ok(pid) = PluginId::parse_user_input(id)
+                && let Err(e) = unregister(&self.registries, &pid).await
+            {
+                tracing::warn!(plugin = %id, error = %e, "plugin unregister on reload failed");
             }
         }
 
@@ -65,6 +73,11 @@ impl PluginRuntime {
         }
 
         self.enabled = new_set;
+    }
+
+    /// 只读访问插件命令注册表 —— 用户输入 `/cmd args` 展开用。
+    pub fn commands(&self) -> Arc<CommandRegistry> {
+        Arc::clone(&self.registries.commands)
     }
 
     async fn enable_one(&self, id_str: &str) -> Result<(), String> {
@@ -127,6 +140,12 @@ impl PluginRuntime {
 
 /// 共享 `Arc<tokio::sync::Mutex<Option<PluginRuntime>>>` 供 reload task 异步更新。
 pub type SharedPluginRuntime = Arc<tokio::sync::Mutex<Option<PluginRuntime>>>;
+
+/// 构造一个"无插件"的空 runtime 句柄 —— 测试 / 不启用插件的调用方
+/// 用它满足参数占位,`expand_plugin_command` 对其直通。
+pub fn empty_plugin_runtime() -> SharedPluginRuntime {
+    Arc::new(tokio::sync::Mutex::new(None))
+}
 
 /// 启动期:构造 runtime 并同步 enabled 列表。`event_tx` 为 `Some` 时,
 /// 每个成功挂载的插件会 emit `PluginLoaded`(批次二十四 #5)。

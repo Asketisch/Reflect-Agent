@@ -1,11 +1,16 @@
 //! `reflect session ...` —— 列 / 看 / 删本地 session。
 //!
-//! v1.x:`ls` / `show` 现在展示每个 session 的累计 token 与 USD 成本
+//! v1.x:`ls` / `show` 展示每个 session 的累计 token 与 USD 成本
 //! (聚合自 JSONL 里的 `RolloutRecord::TokenCount` 记录)。旧 session(jsonl
 //! 无 TokenCount 记录)对应列为 `0` / `--`,不破坏现有展示。
+//!
+//! v1.x 模型级统计:`show` 展示 per-model 用量表;`stats` 跨会话按模型
+//! 汇总(每个模型的使用量一览)。统计统一走
+//! `reflect_rollout::index::session_stats` / `all_model_usage`,CLI 不再
+//! 复刻聚合逻辑。
 
 use anyhow::{Context, anyhow};
-use reflect_protocol::{RolloutRecord, SessionInfo, ThreadId};
+use reflect_protocol::{ModelUsage, RolloutRecord, SessionInfo, SessionStats, ThreadId};
 use reflect_rollout::index::list_sessions;
 use reflect_rollout::path::{default_base, session_path_at};
 // v1.x:接入此前孤儿的 rename/read_name/to_markdown(S5b + S3)。
@@ -14,7 +19,8 @@ use reflect_rollout::index::{read_session_name, rename_session};
 use reflect_rollout::index::{
     find_file_by_session_id, find_files_by_name_prefix, first_line_session_id,
 };
-use reflect_rollout::to_markdown;
+// v1.x:统一统计聚合(替代此前的 CLI 侧复刻)。
+use reflect_rollout::{all_model_usage, index::session_stats, to_markdown};
 use uuid::Uuid;
 
 /// `reflect session ls` —— 列出本地 session(按 started_at desc,limit 默认 20)。
@@ -68,10 +74,10 @@ pub fn ls(limit: usize, model_filter: Option<&str>) -> anyhow::Result<()> {
 }
 
 /// `reflect session show <id>` —— 显示元数据 + 前 5 条消息预览 + 整 session
-/// 累计 token / cost。`id` 可以是完整 UUID 或前 8 字符前缀。
+/// 累计 token / cost + per-model 用量表。`id` 可以是完整 UUID 或前 8 字符前缀。
 ///
-/// v1.x: 新增 `Tokens:` / `Cost:` 两行。整文件 body 已读进内存,顺路聚合
-/// TokenCount 记录(与 `parse_first_session_meta` 同款,零额外 I/O)。
+/// v1.x:统计统一走 `index::session_stats`(全量扫描活跃 + 轮转文件),
+/// 不再 CLI 侧复刻聚合;新增 per-model 表格(每个模型的使用量)。
 pub fn show(id: &str) -> anyhow::Result<()> {
     let base = default_base();
     let (tid, path) = resolve_session_path(&base, id)?;
@@ -82,11 +88,12 @@ pub fn show(id: &str) -> anyhow::Result<()> {
     }
     println!("Path:    {}", path.display());
 
-    // 读前 6 行:SessionMeta + 5 条 RolloutRecord::Message(若存在)。
+    // 读前 20 行:SessionMeta + 消息/压缩预览。
     let content = std::fs::read_to_string(&path).context("read session jsonl")?;
 
-    // v1.x: 整 session 累计 token / cost(全文件 body 已在内存)。
-    let (input_tokens, output_tokens, total_tokens, cost_usd) = aggregate_token_counts(&content);
+    // v1.x:统一统计(活跃 + 轮转文件全扫)。旧 session 无 TokenCount →
+    // 全 0 / None,不破坏展示。
+    let stats = session_stats(&base, tid);
 
     let mut msg_count = 0usize;
     let mut meta_printed = false;
@@ -100,14 +107,8 @@ pub fn show(id: &str) -> anyhow::Result<()> {
                 println!("Model:   {model}");
                 println!("Started: {started}");
                 // v1.x: token / cost 详情行紧跟 meta(在消息预览之前)。
-                println!(
-                    "Tokens:  {} (in {} / out {})",
-                    format_with_thousands(&total_tokens.to_string()),
-                    format_with_thousands(&input_tokens.to_string()),
-                    format_with_thousands(&output_tokens.to_string()),
-                );
-                if let Some(c) = cost_usd {
-                    println!("Cost:    ${:.2}", c);
+                if let Some(s) = &stats {
+                    print_stats_summary(s);
                 }
                 meta_printed = true;
             }
@@ -133,20 +134,201 @@ pub fn show(id: &str) -> anyhow::Result<()> {
     }
     if !meta_printed {
         // 缺失 SessionMeta 的兜底:仍输出 token / cost,避免 CLI 完全无统计。
-        println!(
-            "Tokens:  {} (in {} / out {})",
-            format_with_thousands(&total_tokens.to_string()),
-            format_with_thousands(&input_tokens.to_string()),
-            format_with_thousands(&output_tokens.to_string()),
-        );
-        if let Some(c) = cost_usd {
-            println!("Cost:    ${:.2}", c);
+        if let Some(s) = &stats {
+            print_stats_summary(s);
         }
+    }
+    // v1.x:per-model 用量表(每个模型的使用量)。
+    if let Some(s) = &stats
+        && !s.per_model.is_empty()
+    {
+        println!();
+        print_model_usage_table(&s.per_model);
     }
     if msg_count == 0 {
         println!("(no message records in this session)");
     }
     Ok(())
+}
+
+/// `reflect session stats [--workspace W]` —— 跨会话按模型汇总 token 用量
+/// (v1.x 模型级统计的全局视图:「每个模型的使用量」)。
+///
+/// - 不带 `--workspace`:统计 base 下全部会话(`all_model_usage`);
+/// - 带 `--workspace`:只统计 `SessionMeta.workspace` 匹配的会话
+///   (逐会话 `session_stats` 后按模型合并)。
+pub fn stats(workspace: Option<&str>) -> anyhow::Result<()> {
+    let base = default_base();
+    let usage: Vec<ModelUsage> = match workspace {
+        Some(ws) => {
+            let sessions = list_sessions(&base).context("list_sessions")?;
+            let scoped: Vec<_> = sessions
+                .into_iter()
+                .filter(|s| s.workspace.as_deref() == Some(ws))
+                .collect();
+            if scoped.is_empty() {
+                println!(
+                    "(no sessions found for workspace {ws} under {})",
+                    base.display()
+                );
+                return Ok(());
+            }
+            // 逐会话统计后按模型合并(CLI 侧合并已聚合的数据,不重复扫文件)。
+            let mut merged: Vec<ModelUsage> = Vec::new();
+            for s in &scoped {
+                if let Some(st) = session_stats(&base, s.session_id) {
+                    merge_model_usage(&mut merged, st.per_model);
+                }
+            }
+            merged.sort_by(|a, b| {
+                b.total_tokens
+                    .cmp(&a.total_tokens)
+                    .then_with(|| a.model.cmp(&b.model))
+            });
+            println!(
+                "Model usage across {} session(s) in workspace {ws}:",
+                scoped.len()
+            );
+            merged
+        }
+        None => {
+            let all = all_model_usage(&base);
+            if all.is_empty() {
+                println!("(no token usage recorded under {})", base.display());
+                return Ok(());
+            }
+            let n = list_sessions(&base)?.len();
+            println!("Model usage across {n} session(s):");
+            all
+        }
+    };
+    print_model_usage_table(&usage);
+    // 总计行。
+    let total_calls: u64 = usage.iter().map(|m| m.calls).sum();
+    let total_in: u64 = usage.iter().map(|m| m.input_tokens).sum();
+    let total_out: u64 = usage.iter().map(|m| m.output_tokens).sum();
+    let total_cached: u64 = usage.iter().map(|m| m.cached_tokens).sum();
+    let total_tokens: u64 = usage.iter().map(|m| m.total_tokens).sum();
+    let total_cost: Option<f64> = {
+        let mut sum = 0.0;
+        let mut present = false;
+        for m in &usage {
+            if let Some(c) = m.cost_usd {
+                sum += c;
+                present = true;
+            }
+        }
+        present.then_some(sum)
+    };
+    println!(
+        "{:<40}  {:>6}  {:>12}  {:>12}  {:>12}  {:>14}  {:>10}",
+        "TOTAL",
+        total_calls,
+        format_with_thousands(&total_in.to_string()),
+        format_with_thousands(&total_out.to_string()),
+        format_with_thousands(&total_cached.to_string()),
+        format_with_thousands(&total_tokens.to_string()),
+        match total_cost {
+            Some(c) => format!("${:.2}", c),
+            None => String::from("--"),
+        },
+    );
+    Ok(())
+}
+
+/// 打印会话级统计摘要(Tokens / Cost / 工具调用 / 压缩 / 缓存命中)。
+fn print_stats_summary(s: &SessionStats) {
+    println!(
+        "Tokens:  {} (in {} / out {})",
+        format_with_thousands(&s.total_tokens.to_string()),
+        format_with_thousands(&s.input_tokens.to_string()),
+        format_with_thousands(&s.output_tokens.to_string()),
+    );
+    if let Some(c) = s.cost_usd {
+        println!("Cost:    ${:.2}", c);
+    }
+    if s.tool_calls > 0 || s.compactions > 0 {
+        println!(
+            "Tools:   {} call(s), {} compaction(s)",
+            s.tool_calls, s.compactions
+        );
+    }
+    // v1.x:压缩节省的 token(before 之和 - after 之和;旧记录无字段 → 0)。
+    let saved = s.compaction_tokens_saved();
+    if saved > 0 {
+        println!(
+            "Compact: saved {} token(s) ({} → {})",
+            format_with_thousands(&saved.to_string()),
+            format_with_thousands(&s.compaction_before_tokens.to_string()),
+            format_with_thousands(&s.compaction_after_tokens.to_string()),
+        );
+    }
+    // v1.x:记忆读写审计计数(无记录时不显示)。
+    if s.memory_reads > 0 || s.memory_writes > 0 {
+        println!(
+            "Memory:  {} read(s), {} write(s)",
+            s.memory_reads, s.memory_writes
+        );
+    }
+    if let Some(rate) = s.cache_hit_rate()
+        && rate > 0.0
+    {
+        println!(
+            "Cache:   {:.1}% hit ({} cached)",
+            rate * 100.0,
+            s.cached_tokens
+        );
+    }
+}
+
+/// 打印 per-model 用量表(列宽与 `stats` 的总计行对齐)。
+fn print_model_usage_table(usage: &[ModelUsage]) {
+    println!("Per-model usage:");
+    println!(
+        "  {:<38}  {:>6}  {:>12}  {:>12}  {:>12}  {:>14}  {:>10}",
+        "model", "calls", "input", "output", "cached", "total", "cost"
+    );
+    for m in usage {
+        let model = truncate(&m.model, 38);
+        let cost = match m.cost_usd {
+            Some(c) => format!("${:.2}", c),
+            None => String::from("--"),
+        };
+        println!(
+            "  {:<38}  {:>6}  {:>12}  {:>12}  {:>12}  {:>14}  {:>10}",
+            model,
+            m.calls,
+            format_with_thousands(&m.input_tokens.to_string()),
+            format_with_thousands(&m.output_tokens.to_string()),
+            format_with_thousands(&m.cached_tokens.to_string()),
+            format_with_thousands(&m.total_tokens.to_string()),
+            cost,
+        );
+    }
+}
+
+/// 把 `src` 的 per-model 用量合并进 `dst`(按 model 键累加)。
+/// `stats --workspace` 的逐会话合并用;同模型跨会话累加。
+fn merge_model_usage(dst: &mut Vec<ModelUsage>, src: Vec<ModelUsage>) {
+    for m in src {
+        match dst.iter_mut().find(|d| d.model == m.model) {
+            Some(d) => {
+                d.calls += m.calls;
+                d.input_tokens += m.input_tokens;
+                d.output_tokens += m.output_tokens;
+                d.cached_tokens += m.cached_tokens;
+                d.cache_write_tokens += m.cache_write_tokens;
+                d.total_tokens += m.total_tokens;
+                // cost 存在性:任一带价即带价,求和。
+                match (d.cost_usd, m.cost_usd) {
+                    (Some(a), Some(b)) => d.cost_usd = Some(a + b),
+                    (None, Some(b)) => d.cost_usd = Some(b),
+                    (a, None) => d.cost_usd = a,
+                }
+            }
+            None => dst.push(m),
+        }
+    }
 }
 
 /// `reflect session rm <id> [--yes]` —— 删除一个 session 文件。`--yes` 跳过确认。
@@ -546,43 +728,6 @@ fn format_with_thousands(s: &str) -> String {
     out.chars().rev().collect()
 }
 
-/// v1.x: 扫描 JSONL body,聚合 `RolloutRecord::TokenCount` 记录的 token
-/// 与 cost。返回 `(input, output, total, cost_usd)`。`cost_usd` 仅当至少
-/// 一条记录带 `Some(c)` 时为 `Some(sum)`,否则 `None`。
-///
-/// 与 `reflect_rollout::index::aggregate_token_counts` 同款逻辑;CLI 侧
-/// 复刻一份避免把内部 helper 提升为 pub API。
-fn aggregate_token_counts(body: &str) -> (u64, u64, u64, Option<f64>) {
-    let mut input_tokens: u64 = 0;
-    let mut output_tokens: u64 = 0;
-    let mut total_tokens: u64 = 0;
-    let mut cost_sum: f64 = 0.0;
-    let mut cost_present = false;
-    for line in body.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Ok(rec) = serde_json::from_str::<RolloutRecord>(trimmed) else {
-            continue;
-        };
-        if let RolloutRecord::TokenCount {
-            usage, cost_usd, ..
-        } = rec
-        {
-            input_tokens = input_tokens.saturating_add(usage.input_tokens as u64);
-            output_tokens = output_tokens.saturating_add(usage.output_tokens as u64);
-            total_tokens = total_tokens.saturating_add(usage.total_tokens as u64);
-            if let Some(c) = cost_usd {
-                cost_sum += c;
-                cost_present = true;
-            }
-        }
-    }
-    let cost_usd = cost_present.then_some(cost_sum);
-    (input_tokens, output_tokens, total_tokens, cost_usd)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -648,60 +793,110 @@ mod tests {
         assert_eq!(format_with_thousands("1234567"), "1,234,567");
     }
 
-    // ── v1.x:TokenCount 聚合(CLI 侧复刻) ────────────────────────────
+    // ── v1.x:统一统计(替代 CLI 侧复刻的 aggregate_token_counts) ─────────
 
     /// 构造一行 `TokenCount` JSONL(原始 JSON 字符串,避免测试依赖 chrono
     /// 直接构造 `RolloutRecord::TokenCount { at: DateTime }`)。
-    fn token_count_line_json(input: u32, output: u32, total: u32, cost_usd: Option<f64>) -> String {
+    /// `model` / `provider` 可选(v1.x 模型级统计字段)。
+    fn token_count_line_json(
+        input: u32,
+        output: u32,
+        total: u32,
+        cost_usd: Option<f64>,
+        model: Option<&str>,
+    ) -> String {
         let cost_field = match cost_usd {
             Some(c) => format!(r#","cost_usd":{c}"#),
             None => String::new(),
         };
+        let model_field = match model {
+            Some(m) => format!(r#","model":"{m}","provider":"openai""#),
+            None => String::new(),
+        };
         format!(
-            r#"{{"type":"token_count","turn_id":"00000000-0000-0000-0000-00000000000{n}","usage":{{"input_tokens":{input},"output_tokens":{output},"cached_tokens":0,"cache_write_tokens":0,"total_tokens":{total}}},"at":"2026-07-31T00:00:00Z"{cost_field}}}"#,
+            r#"{{"type":"token_count","turn_id":"00000000-0000-0000-0000-00000000000{n}","usage":{{"input_tokens":{input},"output_tokens":{output},"cached_tokens":0,"cache_write_tokens":0,"total_tokens":{total}}},"at":"2026-07-31T00:00:00Z"{cost_field}{model_field}}}"#,
             n = input % 10,
         )
     }
 
-    /// `aggregate_token_counts` 聚合多条 TokenCount 的 usage 与 cost。
+    /// `session_stats` 聚合多条 TokenCount 的 usage 与 cost(含 per-model)。
     #[test]
-    fn aggregate_token_counts_sums_usage_and_cost() {
-        let mut body = String::from(
-            r#"{"type":"session_meta","session_id":"00000000-0000-0000-0000-000000000001","model":"m","started_at":"2026-07-31T00:00:00Z"}"#,
+    fn session_stats_sums_usage_and_cost() {
+        use crate::test_home::lock_home;
+        let tmp = tmpdir();
+        let _guard = lock_home(tmp.path());
+        let tid = Uuid::new_v4();
+        let dir = tmp
+            .path()
+            .join(".reflect")
+            .join("sessions")
+            .join("2026")
+            .join("07")
+            .join("31");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{tid}.jsonl"));
+        let mut body = format!(
+            "{{\"type\":\"session_meta\",\"session_id\":\"{tid}\",\"model\":\"openai/gpt-4o\",\"started_at\":\"2026-07-31T12:00:00Z\"}}\n"
         );
-        body.push('\n');
         for (i, o, t, c) in [
             (1000u32, 200u32, 1200u32, Some(0.01f64)),
             (200, 50, 250, Some(0.008)),
             (300, 100, 400, Some(0.0054)),
         ] {
-            body.push_str(&token_count_line_json(i, o, t, c));
+            body.push_str(&token_count_line_json(i, o, t, c, Some("openai/gpt-4o")));
             body.push('\n');
         }
-        let (inp, out, tot, cost) = aggregate_token_counts(&body);
-        assert_eq!(inp, 1500);
-        assert_eq!(out, 350);
-        assert_eq!(tot, 1850);
-        let cost = cost.expect("cost present");
+        fs::write(&path, body).unwrap();
+
+        let base = default_base();
+        let stats = session_stats(&base, ThreadId(tid)).expect("stats");
+        assert_eq!(stats.input_tokens, 1500);
+        assert_eq!(stats.output_tokens, 350);
+        assert_eq!(stats.total_tokens, 1850);
+        let cost = stats.cost_usd.expect("cost present");
         assert!((cost - 0.0234).abs() < 1e-9, "cost: {cost}");
+        // per-model:三条记录同模型 → 一个条目。
+        assert_eq!(stats.per_model.len(), 1);
+        assert_eq!(stats.per_model[0].model, "openai/gpt-4o");
+        assert_eq!(stats.per_model[0].calls, 3);
     }
 
     /// 旧 jsonl(无 TokenCount)→ 全 0 / None,向后兼容。
     #[test]
-    fn aggregate_token_counts_zero_for_old_rollout() {
-        let body = "{\"type\":\"session_meta\",\"session_id\":\"00000000-0000-0000-0000-000000000001\",\"model\":\"m\",\"started_at\":\"2026-07-31T00:00:00Z\"}\n{\"type\":\"message\",\"role\":\"user\",\"content\":\"hi\"}\n";
-        let (inp, out, tot, cost) = aggregate_token_counts(body);
-        assert_eq!(inp, 0);
-        assert_eq!(out, 0);
-        assert_eq!(tot, 0);
-        assert_eq!(cost, None);
+    fn session_stats_zero_for_old_rollout() {
+        use crate::test_home::lock_home;
+        let tmp = tmpdir();
+        let _guard = lock_home(tmp.path());
+        let tid = Uuid::new_v4();
+        let dir = tmp
+            .path()
+            .join(".reflect")
+            .join("sessions")
+            .join("2026")
+            .join("07")
+            .join("31");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{tid}.jsonl"));
+        fs::write(
+            &path,
+            format!("{{\"type\":\"session_meta\",\"session_id\":\"{tid}\",\"model\":\"m\",\"started_at\":\"2026-07-31T12:00:00Z\"}}\n{{\"type\":\"message\",\"role\":\"user\",\"content\":\"hi\"}}\n"),
+        )
+        .unwrap();
+
+        let base = default_base();
+        let stats = session_stats(&base, ThreadId(tid)).expect("stats");
+        assert_eq!(stats.input_tokens, 0);
+        assert_eq!(stats.output_tokens, 0);
+        assert_eq!(stats.total_tokens, 0);
+        assert_eq!(stats.cost_usd, None);
+        assert!(stats.per_model.is_empty());
     }
 
     /// `show()` / `ls()` 在含 TokenCount 记录的 session 上不 panic,且
     /// `list_sessions` 聚合出正确的累计值。`show()` / `ls()` 内部用
     /// `default_base()` 读 `$HOME`,故这里用 `lock_home` 把 HOME 指到
-    /// tmpdir(stdout 渲染正确性由 `format_with_thousands` /
-    /// `aggregate_token_counts` 单测覆盖,避免引入 stdout-capture 依赖)。
+    /// tmpdir(stdout 渲染正确性由 `format_with_thousands` 单测覆盖,
+    /// 避免引入 stdout-capture 依赖)。
     #[test]
     fn session_show_and_ls_run_on_token_count_session() {
         use crate::test_home::lock_home;
@@ -721,7 +916,13 @@ mod tests {
         let mut body = format!(
             "{{\"type\":\"session_meta\",\"session_id\":\"{tid}\",\"model\":\"openai/gpt-4o\",\"started_at\":\"2026-07-31T12:00:00Z\"}}\n"
         );
-        body.push_str(&token_count_line_json(1500, 350, 1850, Some(0.0234)));
+        body.push_str(&token_count_line_json(
+            1500,
+            350,
+            1850,
+            Some(0.0234),
+            Some("openai/gpt-4o"),
+        ));
         body.push('\n');
         fs::write(&path, body).unwrap();
 
@@ -737,5 +938,37 @@ mod tests {
         // ls() / show() 不 panic(解析整文件 + 渲染 meta / tokens / cost 行)。
         ls(20, None).unwrap();
         show(&tid.to_string()).unwrap();
+    }
+
+    /// `merge_model_usage` 按模型键累加跨会话用量。
+    #[test]
+    fn merge_model_usage_accumulates_by_model() {
+        let mk = |model: &str, calls: u64, total: u64, cost: Option<f64>| ModelUsage {
+            model: model.to_string(),
+            provider: None,
+            calls,
+            input_tokens: total,
+            output_tokens: 0,
+            cached_tokens: 0,
+            cache_write_tokens: 0,
+            total_tokens: total,
+            cost_usd: cost,
+        };
+        let mut dst = vec![mk("openai/gpt-4o", 2, 100, Some(0.01))];
+        merge_model_usage(
+            &mut dst,
+            vec![
+                mk("openai/gpt-4o", 3, 200, Some(0.02)),
+                mk("anthropic/claude", 1, 500, None),
+            ],
+        );
+        assert_eq!(dst.len(), 2);
+        let gpt = dst.iter().find(|m| m.model == "openai/gpt-4o").unwrap();
+        assert_eq!(gpt.calls, 5);
+        assert_eq!(gpt.total_tokens, 300);
+        assert!((gpt.cost_usd.unwrap() - 0.03).abs() < 1e-9);
+        let claude = dst.iter().find(|m| m.model == "anthropic/claude").unwrap();
+        assert_eq!(claude.calls, 1);
+        assert_eq!(claude.cost_usd, None);
     }
 }

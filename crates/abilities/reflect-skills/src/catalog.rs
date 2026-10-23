@@ -45,6 +45,8 @@ pub const ALWAYS_ON_TOOLS: &[&str] = &[
     "EnterPlanMode",
     "ExitPlanMode",
     "PlanWrite",
+    // v1.4 D3:渐进披露第三级 —— 附属资源按需读取,常驻可见。
+    "read_skill_resource",
 ];
 
 /// 可用 skill 与当前激活 skill 集合的线程安全 catalog
@@ -79,12 +81,7 @@ impl SkillsCatalog {
         Self {
             skills: RwLock::new(Vec::new()),
             activated: RwLock::new(HashSet::new()),
-            always_on: RwLock::new(
-                ALWAYS_ON_TOOLS
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect(),
-            ),
+            always_on: RwLock::new(ALWAYS_ON_TOOLS.iter().map(|s| s.to_string()).collect()),
             allowed_skills: RwLock::new(None),
         }
     }
@@ -302,6 +299,7 @@ mod tests {
             body: "body".into(),
             plugin_id: None,
             when_paths: vec![],
+            version: None,
         }
     }
 
@@ -361,10 +359,7 @@ mod tests {
     fn add_always_on_tools_visible_in_active_tool_names() {
         let cat = SkillsCatalog::new();
         assert!(!cat.active_tool_names().contains("call_explorer"));
-        cat.add_always_on_tools(vec![
-            "call_explorer".to_string(),
-            "call_writer".to_string(),
-        ]);
+        cat.add_always_on_tools(vec!["call_explorer".to_string(), "call_writer".to_string()]);
         let active = cat.active_tool_names();
         assert!(active.contains("call_explorer"));
         assert!(active.contains("call_writer"));

@@ -21,6 +21,11 @@ pub struct RoutingSection {
     pub compact: SpecSlotConfig,
     #[serde(default)]
     pub subagent: SpecSlotConfig,
+    /// 单轮 LLM 调用的最大尝试次数(含同凭证重试 / 冷却 / failover)。
+    /// 缺省用 `RoutingPolicy::default()` 的 16;调小(如 10)可限制最坏
+    /// 情况下的空转时长。
+    #[serde(default)]
+    pub max_attempts: Option<u32>,
 }
 
 /// 单角色 slot 配置。

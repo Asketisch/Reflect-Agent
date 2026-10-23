@@ -32,6 +32,15 @@ pub struct ChatRequest {
     pub metadata: HashMap<String, String>,
     #[serde(default)]
     pub stop: Vec<String>,
+    /// v1.4 B1:结构化输出格式。`None`(默认)= 纯文本(历史行为);
+    /// `Some` = 请求 provider 按 JSON 语义约束输出,各 client 负责映射:
+    /// - OpenAI Chat Completions → `response_format` 参数;
+    /// - OpenAI Responses → `text.format`;
+    /// - Anthropic → 强制 `structured_output` 工具调用,流侧解包参数为
+    ///   文本(对上层透明);
+    /// - Ollama → `format` 字段("json" 或 schema 对象)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<ResponseFormat>,
 }
 
 impl Default for ChatRequest {
@@ -48,8 +57,37 @@ impl Default for ChatRequest {
             cache_control: Vec::new(),
             metadata: HashMap::new(),
             stop: Vec::new(),
+            response_format: None,
         }
     }
+}
+
+/// v1.4 B1:结构化输出格式声明。
+///
+/// `JsonSchema` 是强约束(provider 按 schema 严格生成);`JsonObject`
+/// 是弱约束(只保证输出是合法 JSON 对象,不保证字段结构)。`Text`
+/// 显式声明纯文本(等价于 `None`,供需要显式表达的调用方使用)。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ResponseFormat {
+    Text,
+    /// 仅保证输出为合法 JSON 对象。
+    JsonObject,
+    /// 按 JSON Schema 严格生成。
+    JsonSchema {
+        /// schema 名称(OpenAI `json_schema.name` 必填;Anthropic 侧作
+        /// 为强制工具的说明文本)。
+        name: String,
+        /// JSON Schema 定义(原样透传给 provider)。
+        schema: Value,
+        /// 是否启用严格模式(不允许额外字段;provider 不支持时忽略)。
+        #[serde(default = "default_strict")]
+        strict: bool,
+    },
+}
+
+fn default_strict() -> bool {
+    true
 }
 
 // ── 消息 ────────────────────────────────────────────────────────────────
@@ -296,6 +334,7 @@ mod tests {
     #[test]
     fn chat_request_serde_roundtrip() {
         let req = ChatRequest {
+            response_format: None,
             model: "gpt-4o".into(),
             messages: vec![ChatMessage::User(UserContent {
                 blocks: vec![ContentBlock::text("hi")],

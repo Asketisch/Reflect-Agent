@@ -117,7 +117,23 @@ pub struct AgentConfig {
     /// v1.2 P1:目标模式 controller(参考 zcode `/goal` 设计)。
     /// `None` = 目标模式未激活;`/goal <obj>` 时由 submission_loop 构造。
     /// turn 结束后 `on_turn_end` 自校验,未完成则推 steering 续作。
-    pub goal: Option<Arc<reflect_goal::GoalController>>,
+    ///
+    /// **共享槽**(`Arc<RwLock<..>>`):`AgentConfig` 会被 clone 进 submission
+    /// loop(`let cfg_c = cfg.clone()`),普通字段在 clone 上改**回不到**
+    /// `AgentThread` —— 此前目标模式的 enter/exit 只活在 loop 的副本里,
+    /// 线程侧永远看不到 controller,GUI 也因此只能靠前端投影猜「目标模式
+    /// 是否活跃」。共享槽让线程侧能读到**权威**状态
+    /// (`AgentThread::goal_snapshot()`)。
+    pub goal: Arc<RwLock<Option<Arc<reflect_goal::GoalController>>>>,
+    /// 会话级「当前 todo 清单」槽 —— 渲染好的紧凑文本(注入给模型)。
+    ///
+    /// `TodoWrite` 把清单写进 `ToolOutput.metadata.todos` —— 那是**输出
+    /// 通道**:GUI 能展示,但没有任何组件把它**回灌进模型上下文**,于是
+    /// 清单「只出不进」,LLM 写完即忘。
+    ///
+    /// 本槽(`Arc` → 跨 `AgentConfig` 的 clone 共享,跨回合存活)由
+    /// `tool_exec` 写、`pre_loop` 读并注入进 core prompt。
+    pub todos_slot: Arc<RwLock<Option<String>>>,
     /// v1.x 功能 7:token plan 配额追踪器。`None` = 无 credential 声明配额
     /// (向后兼容);`Some` = `model_call` 累计 usage,耗尽触发 cooldown 切换。
     pub quota_tracker: Option<SharedQuotaTracker>,
@@ -160,6 +176,20 @@ pub struct AgentConfig {
     /// 默认 `None`;`Clone` 共享同一把 `RwLock`,与 `permission_mode`
     /// 镜像。
     pub last_abort_reason: Arc<RwLock<Option<AbortReason>>>,
+    /// v1.4 A1:子代理运行注册表(在飞子代理的取消令牌表)。
+    ///
+    /// `None`(默认)= 本线程不追踪子代理(测试 / 纯库使用),
+    /// `Op::Interrupt { child_id }` 定向分支在此情况下退化为 warn;
+    /// `Some` = 注册表由调用方创建后同时注入本配置与 `SubAgentFactory`
+    /// (两者共享同一 `Arc`),`spawn` 登记、`SpawnedChild` 终态注销。
+    /// `Clone` 走 `Arc`,所有副本共享同一张表。
+    pub subagent_runtime: Option<Arc<crate::subagent_registry::SubagentRuntimeRegistry>>,
+    /// v1.4 C1:本线程自己的子代理状态槽(仅当本线程是某个父会话 spawn
+    /// 的子代理时为 `Some`,由工厂在 spawn 时注入)。子代理的
+    /// submission_loop / tool_exec 在关键节点(回合结束、工具开始/结束)
+    /// 向槽写快照,父会话经状态中心查询 —— 读取方永不阻塞子代理。
+    /// `None` = 主会话 / 测试(不自报告)。
+    pub subagent_status: Option<Arc<crate::subagent_registry::SubagentStatusSlot>>,
 }
 
 impl Default for AgentConfig {
@@ -190,12 +220,15 @@ impl AgentConfig {
             context_window_overrides: Arc::new(RwLock::new(HashMap::new())),
             force_compact_next: Arc::new(RwLock::new(false)),
             telemetry: None,
-            goal: None,
+            goal: Arc::new(RwLock::new(None)),
+            todos_slot: Arc::new(RwLock::new(None)),
             quota_tracker: None,
             tool_env: HashMap::new(),
             session_id: None,
             preload_messages: Arc::new(RwLock::new(Vec::new())),
             last_abort_reason: Arc::new(RwLock::new(None)),
+            subagent_runtime: None,
+            subagent_status: None,
         }
     }
 
@@ -350,6 +383,18 @@ impl AgentConfig {
     /// 用。生产代码不需要这条路径 (`reflect-exec` 自己 wire Ctrl-C)。
     pub fn with_cancel(mut self, cancel: CancellationToken) -> Self {
         self.cancel = cancel;
+        self
+    }
+
+    /// v1.4 A1:注入子代理运行注册表。调用方(exec bootstrap)创建一个
+    /// `Arc<SubagentRuntimeRegistry>` 后,同时传给本方法与
+    /// `SubAgentFactory::set_runtime_registry`,让 `Op::Interrupt
+    /// { child_id }` 能定向路由到在飞子代理。
+    pub fn with_subagent_runtime(
+        mut self,
+        registry: Arc<crate::subagent_registry::SubagentRuntimeRegistry>,
+    ) -> Self {
+        self.subagent_runtime = Some(registry);
         self
     }
 

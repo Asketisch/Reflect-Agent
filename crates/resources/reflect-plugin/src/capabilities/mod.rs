@@ -125,3 +125,13 @@ pub struct CapabilityError {
     pub capability: &'static str,
     pub message: String,
 }
+
+/// 展开能力声明里的 `${PLUGIN_ROOT}` 占位符为插件安装目录绝对路径。
+///
+/// 插件安装后会被复制到 `~/.reflect/plugins/cache/...`,manifest 里写的
+/// 相对路径不再成立;命令 / hook / MCP server 的可执行入口因此约定用
+/// `${PLUGIN_ROOT}` 引用插件内文件(对齐 Claude Code 的
+/// `${CLAUDE_PLUGIN_ROOT}` 约定)。
+pub(crate) fn expand_plugin_root(s: &str, plugin_root: &std::path::Path) -> String {
+    s.replace("${PLUGIN_ROOT}", &plugin_root.to_string_lossy())
+}

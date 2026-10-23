@@ -6,6 +6,7 @@ use crate::item::{
     PlanApprovalChoice, ReasoningEffortMirror, ReviewDecision, ThreadSettingsOverrides, ToolOutput,
     UserInputItem,
 };
+use crate::op_prompt::PromptAction;
 use crate::question::AskUserAnswer;
 
 /// 用户或系统发起的操作。
@@ -131,6 +132,15 @@ pub enum Op {
     /// `NodeContext.goal`,停止自动续作。
     ExitGoalMode,
 
+    /// v1.6.1:提示词层管理(`/prompt` slash,TUI/GUI 选择提示词)。
+    ///
+    /// `action = List` 查询当前可用层与生效层,应答为
+    /// `EventMsg::PromptList`;`action = Switch` 运行中重扫提示词库
+    /// (用户改了 `.reflect/prompts/*.md` 后让改动即时生效),应答为
+    /// `EventMsg::PromptSwitched`。两者都只动进程级提示词库,不改
+    /// model spec —— 提示词按模型自动匹配,刷新的是「层文件集」。
+    PromptCommand { action: PromptAction },
+
     /// v1.3 SDK:客户端(serve 模式)注册跨语言自定义工具。
     ///
     /// 工具的**实现留在客户端进程**(Python / TS 函数):core 侧为每个
@@ -143,6 +153,31 @@ pub enum Op {
     /// v1.3 SDK:客户端对 `EventMsg::ToolExecutionRequest` 的回执,
     /// `call_id` 与请求配对,`output` 为本地执行结果。
     ToolExecutionResponse { call_id: String, output: ToolOutput },
+
+    /// v1.4 A2:回合中途转向 —— 对正在跑的回合投喂补充指示或参考资料,
+    /// 引擎把它 push 进会话转向队列,由下一次 `pre_loop`(通常是
+    /// ToolExec → PreLoop 回环入口)收割注入为用户消息。
+    ///
+    /// 与 `UserInput` 的区别:`UserInput` 开新 turn;`Steer` 不打断当前
+    /// turn,消息在「下一个安全点」进入模型上下文 —— 实现「边跑边改
+    /// 需求」。`Now` 优先级是用户中途说话(纯文本直入);`Attachment`
+    /// 是参考资料(以 `<system-reminder>` 包裹注入,不冒充直接指令)。
+    /// 无在飞 turn 时消息留在队列,下一个 `UserInput` turn 边界合并
+    /// (既有行为)。
+    Steer {
+        #[serde(default)]
+        priority: crate::item::SteeringPriorityMirror,
+        items: Vec<UserInputItem>,
+    },
+
+    /// v1.4 C1:查询子代理状态(状态中心快照)。`child_id = None` 列出
+    /// 全部在飞 + 近期终态子代理;`Some(id)` 只查指定子代理(未知 id 返回
+    /// 空列表)。应答为 `EventMsg::SubagentStatus`(per-turn 通道 + 会话
+    /// 扇出双路送达)。
+    QuerySubagents {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        child_id: Option<String>,
+    },
 }
 
 /// v1.3 SDK:客户端注册的自定义工具声明(spec 由客户端提供,
@@ -186,8 +221,11 @@ impl Op {
             Op::CyclePermissionMode => "cycle_permission_mode",
             Op::EnterGoalMode { .. } => "enter_goal_mode",
             Op::ExitGoalMode => "exit_goal_mode",
+            Op::PromptCommand { .. } => "prompt_command",
             Op::RegisterTools { .. } => "register_tools",
             Op::ToolExecutionResponse { .. } => "tool_execution_response",
+            Op::Steer { .. } => "steer",
+            Op::QuerySubagents { .. } => "query_subagents",
         }
     }
 }
@@ -320,6 +358,26 @@ mod tests {
                 _ => panic!("wrong variant"),
             }
             assert_eq!(op.discriminant(), "set_effort");
+        }
+    }
+
+    #[test]
+    fn serde_roundtrip_prompt_command() {
+        // v1.6.1:Op::PromptCommand { action } —— `/prompt` slash 的协议
+        // 载体。List 与 Switch 两个变体都要覆盖。
+        for (action, tag) in [
+            (crate::op_prompt::PromptAction::List, "list"),
+            (
+                crate::op_prompt::PromptAction::Switch { layer: None },
+                "switch",
+            ),
+        ] {
+            let op = Op::PromptCommand { action };
+            let json = serde_json::to_string(&op).unwrap();
+            assert!(json.contains(r#""type":"prompt_command""#), "got: {json}");
+            assert!(json.contains(tag), "got: {json}");
+            let back: Op = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.discriminant(), "prompt_command");
         }
     }
 
@@ -487,6 +545,26 @@ mod tests {
                 assert_eq!(verify_command, None);
                 assert_eq!(token_budget, None);
             }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    /// v1.4 C1:QuerySubagents serde —— child_id 缺省 → None。
+    #[test]
+    fn serde_roundtrip_query_subagents() {
+        let op = Op::QuerySubagents { child_id: None };
+        let json = serde_json::to_string(&op).unwrap();
+        assert!(json.contains(r#""type":"query_subagents""#), "got: {json}");
+        let back: Op = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.discriminant(), "query_subagents");
+
+        let op2 = Op::QuerySubagents {
+            child_id: Some("c-9".into()),
+        };
+        let json2 = serde_json::to_string(&op2).unwrap();
+        let back2: Op = serde_json::from_str(&json2).unwrap();
+        match back2 {
+            Op::QuerySubagents { child_id } => assert_eq!(child_id.as_deref(), Some("c-9")),
             other => panic!("wrong variant: {other:?}"),
         }
     }

@@ -72,6 +72,33 @@ impl PyReflectBuilder {
         }
     }
 
+    #[pyo3(signature = (enabled=None))]
+    /// 启用插件挂载(`build` 时生效)。
+    ///
+    /// - `enabled=None`(默认):按 `~/.reflect/config.toml` 的
+    ///   `[plugins].enabled_plugins`;
+    /// - `enabled=["demo", ...]`:显式启用列表,忽略 config。
+    ///
+    /// 插件的 skills / agents / MCP servers / shell hooks / slash 命令
+    /// 在构建后挂载到共享 registry;未安装的 id 仅跳过,不报错。
+    fn plugins(&self, enabled: Option<Vec<String>>) -> Self {
+        Self {
+            inner: self.inner.clone().with_plugins(enabled),
+        }
+    }
+
+    #[pyo3(signature = (dir))]
+    /// v1.6:额外提示词目录(按模型匹配的外置提示词库)。
+    ///
+    /// 目录下 `*.md` 文件按文件名分层:`default.md` / `<厂商>.md` /
+    /// `<精确模型名>.md`,每个文件用 `## key` 分节。同名层以本目录
+    /// 优先于 `~/.reflect/prompts/`。
+    fn prompts_dir(&self, dir: String) -> Self {
+        Self {
+            inner: self.inner.clone().with_prompts_dir(dir),
+        }
+    }
+
     /// 返回当前 builder 配置快照(不触发 LLM / 网络)。
     fn describe(&self) -> (String, String, bool, bool) {
         (
@@ -83,35 +110,24 @@ impl PyReflectBuilder {
     }
 
     /// 构建 `Reflect` 实例(需要 `OPENAI_API_KEY` 等 env)。
-    fn build(&self) -> PyResult<PyReflect> {
+    ///
+    /// 走 `build_async` 完整装配 —— 真实 HookEngine + 插件挂载。Python 侧
+    /// 无异步上下文,与 `run` 同款:释放 GIL 后在临时 current-thread
+    /// tokio runtime 上 `block_on`。
+    fn build<'py>(&self, py: Python<'py>) -> PyResult<PyReflect> {
         let builder = self.inner.clone();
-        // review 修复(P1):`AgentThread::new` 内部 `tokio::spawn(submission_loop)`
-        // 需要活跃的 tokio runtime 上下文,纯 Python 宿主永远没有 → build() 直接
-        // panic(PanicException)。用进程级共享 runtime 提供上下文;若调用方已
-        // 处于 runtime 上下文(嵌入式 Rust 宿主),则直接构建。
-        let agent = if tokio::runtime::Handle::try_current().is_ok() {
-            builder.build()
-        } else {
-            shared_runtime().block_on(async { builder.build() })
-        }
-        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        // `detach` 即旧版的 `allow_threads`:释放 GIL 后执行闭包,闭包返回
+        // 时重新拿回 GIL(pyo3 0.26 起 `allow_threads` 更名为 `detach`)。
+        let agent = py
+            .detach(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
+                rt.block_on(builder.build_async())
+            })
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         Ok(PyReflect { inner: agent })
     }
-}
-
-/// 进程级共享 tokio runtime(multi-thread)。
-///
-/// `AgentThread::new` 的 `tokio::spawn` 与后续 `block_on` 都跑在它上面。
-/// `OnceLock` 保证全进程只建一个;Python 宿主多次 build / run 复用同一
-/// runtime,worker 线程随进程退出回收。
-fn shared_runtime() -> &'static tokio::runtime::Runtime {
-    static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
-    RT.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("failed to start shared tokio runtime for reflect-py")
-    })
 }
 
 /// 已构建的 Reflect 句柄。提供 `run(prompt)` 同步调用 + `cancel_token`。
@@ -152,18 +168,9 @@ impl PyReflect {
         // 释放 GIL 跑异步 turn —— 在工作线程上 spawn 一个 current-thread
         // tokio runtime,阻塞到 turn 终结。Python 主线程在此期间可继续
         // 处理其他任务(若启用子线程)。
-        let result = py.allow_threads(move || run_turn_blocking(agent, prompt));
+        let result = py.detach(move || run_turn_blocking(agent, prompt));
         match result {
-            Ok(r) => {
-                // review 修复:docstring 承诺"失败抛 RuntimeError",此前 LLM
-                // 错误只体现为 `status="error:..."` 的正常返回。按文档把
-                // error 状态映射为异常(`incomplete` 等非终态仍按结果返回,
-                // 供调用方自行判断)。
-                if r.status.starts_with("error:") {
-                    return Err(PyRuntimeError::new_err(r.status));
-                }
-                PyRunResult::from(r).into_bound_py_any(py)
-            }
+            Ok(r) => PyRunResult::from(r).into_bound_py_any(py),
             Err(e) => Err(PyRuntimeError::new_err(e.to_string())),
         }
     }
@@ -172,10 +179,12 @@ impl PyReflect {
 /// 阻塞跑完整轮 turn。返回 `RunResult`。
 fn run_turn_blocking(agent: reflect::Reflect, prompt: String) -> anyhow::Result<RunResult> {
     let started_at = Instant::now();
-    // review 修复:此前每次调用新建 current-thread runtime,而 build 时
-    // submission_loop 已 spawn 到别处,该 runtime 驱动不了它。统一跑在
-    // 进程级共享 runtime 上(build 与 run 同一 runtime,任务可达)。
-    let rt = shared_runtime();
+    // 构造当前线程 runtime。Reflect 内部 `submission_loop` 已是 `tokio::spawn`,
+    // 必须在某个 tokio runtime 上下文中运行;这里提供 current_thread runtime
+    // 即足够(future 链短,IO 主要走网络)。
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     let sub = Submission::user_input(&prompt);
     let outcome = rt.block_on(async move {
         let mut stream = agent.submit(sub).await;

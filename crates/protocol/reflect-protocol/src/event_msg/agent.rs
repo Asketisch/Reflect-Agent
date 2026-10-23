@@ -56,4 +56,10 @@ pub struct TokenCountEvent {
     /// `"default"`)。同 `provider` 字段的兼容策略。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_label: Option<String>,
+    /// v1.x 模型级 token 统计:本轮实际命中的模型 spec(如 `"openai/gpt-4o"`)。
+    /// 与 `provider` 同兼容策略:`#[serde(default, skip_serializing_if)]`
+    /// 双向兼容 —— 旧 consumer 解析时填 `None`,序列化时缺省。TUI / GUI
+    /// 据此实时按模型展示用量。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }

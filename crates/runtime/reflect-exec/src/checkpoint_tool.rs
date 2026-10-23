@@ -5,12 +5,18 @@
 //! - `CheckpointTool`:action ∈ {create, list}。`create` 跑
 //!   `git_auto_commit` 拍快照 + 写 `RolloutRecord::Checkpoint`;
 //!   `list` 读当前 session JSONL 的所有 checkpoint。
-//! - `RewindTool`:action = rewind。`git_reset_hard` 到目标 sha + 写
-//!   `RolloutRecord::Rewind`。**High 风险**(丢弃未提交变更),走 Prompt
+//! - `RewindTool`:action = rewind,`scope` 三档:
+//!   `workspace`(默认,`git_reset_hard` 到目标 sha,只动文件)、
+//!   `conversation`(把 rollout 截断到 checkpoint 所在 turn 之前 ——
+//!   经 `reflect_rollout::index::truncate_session_after_turn`,备份 +
+//!   原子重写;引擎每轮从 rollout 回放重建历史,截断后下一 turn 自然
+//!   从更短历史回放)、`both`(两者同时)。**High 风险**,走 Prompt
 //!   审批 + `gate.ask_tool`(镜像 AstTool 的 Deny→is_error 路径)。
 //!
-//! 取舍(对齐 gap doc):**只回退工作区文件**,不截断会话历史。会话 JSONL
-//! append-only,rewind 只追加 marker;LLM 从工具输出得知工作区已回退。
+//! 取舍:v1.2 只回退工作区文件(会话 JSONL append-only);v1.5 起补齐
+//! `conversation` 作用域 —— 截断以 checkpoint 记录的 `turn_id` 为边界,
+//! 截断点之后的记录进入 `.bak` 备份,rewind marker 紧跟截断点追加
+//! (append-only 语义不破坏)。
 
 use async_trait::async_trait;
 use reflect_protocol::{PermissionMode, ToolError, ToolOutput};
@@ -177,8 +183,10 @@ impl Tool for RewindTool {
     }
 
     fn description(&self) -> &str {
-        "把工作区文件树回滚到指定 checkpoint sha,丢弃此后所有未提交变更和未跟踪文件。\
-         对话历史保留,只有文件回滚。`sha` 来自 `checkpoint create/list` 的结果。"
+        "回退到指定 checkpoint。`scope` 三档:`workspace`(默认,仅把文件树 \
+         git reset 到 sha,丢弃未提交变更)、`conversation`(仅把对话历史 \
+         截断到 checkpoint 所在 turn 之前,文件不动)、`both`(两者同时)。\
+         `sha` 来自 `checkpoint create/list`,省略时自动定位最近的 checkpoint。"
     }
 
     fn parameters_schema(&self) -> Value {
@@ -187,10 +195,14 @@ impl Tool for RewindTool {
             "properties": {
                 "sha": {
                     "type": "string",
-                    "description": "Target checkpoint sha to restore (from checkpoint create/list)."
+                    "description": "Target checkpoint sha to restore (from checkpoint create/list). Omit to auto-locate the most recent checkpoint."
+                },
+                "scope": {
+                    "type": "string",
+                    "enum": ["workspace", "conversation", "both"],
+                    "description": "workspace = files only (default); conversation = truncate conversation history only; both = both."
                 }
             },
-            "required": ["sha"],
             "additionalProperties": false
         })
     }
@@ -200,18 +212,36 @@ impl Tool for RewindTool {
     }
 
     fn required_permission(&self) -> PermissionMode {
-        // High 风险:丢弃未提交变更。整体走 Prompt。
+        // High 风险:丢弃未提交变更 / 截断对话。整体走 Prompt。
         PermissionMode::Prompt
     }
 
     async fn execute(&self, ctx: ToolContext, args: Value) -> Result<ToolOutput, ToolError> {
         let workspace = ctx.workspace_path();
+        // 作用域解析:默认 workspace(向后兼容旧调用 —— 只回滚文件)。
+        let rewind_files = matches!(
+            args.get("scope").and_then(|v| v.as_str()),
+            None | Some("workspace") | Some("both")
+        );
+        let rewind_conversation = matches!(
+            args.get("scope").and_then(|v| v.as_str()),
+            Some("conversation") | Some("both")
+        );
+        if !rewind_files && !rewind_conversation {
+            return Err(ToolError::InvalidArgs {
+                message: format!(
+                    "rewind: unknown scope '{}' (expected workspace | conversation | both)",
+                    args.get("scope").and_then(|v| v.as_str()).unwrap_or("")
+                ),
+            });
+        }
+
         // v1.x:sha 缺失时 fallback 到 `find_checkpoint_for_turn` —— 回退到当前
         // turn 对应的最近 checkpoint。此前 `find_checkpoint_for_turn` 是孤儿
         // (实现完整但零调用者),LLM 丢失/记错 sha 时 rewind 直接失败。现在
         // LLM 可以省略 sha 走自动定位,或传 sha 走精确匹配。
-        let sha = match args.get("sha").and_then(|v| v.as_str()) {
-            Some(s) if !s.is_empty() => s.to_string(),
+        let (sha, checkpoint_turn) = match args.get("sha").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => (s.to_string(), find_checkpoint_turn_by_sha(&ctx, s)),
             _ => {
                 // 无 sha → 按当前 turn_id 查最近 checkpoint。
                 let base = reflect_rollout::path::default_base();
@@ -220,7 +250,10 @@ impl Tool for RewindTool {
                     ctx.session_id,
                     &ctx.turn_id,
                 ) {
-                    Some(found) => found,
+                    Some(found) => {
+                        let turn = find_checkpoint_turn_by_sha(&ctx, &found);
+                        (found, turn)
+                    }
                     None => {
                         return Err(ToolError::InvalidArgs {
                             message: "rewind: no 'sha' provided and no checkpoint found for current turn; run `checkpoint create` first or pass an explicit sha".into(),
@@ -230,8 +263,21 @@ impl Tool for RewindTool {
             }
         };
 
-        // 校验 sha 合法(给出清晰错误而非让 git reset 报晦涩 stderr)。
-        if !is_valid_commit(&workspace, &sha) {
+        // conversation / both 需要 checkpoint 记录里的 turn_id 作为截断
+        // 边界;sha 对应的 checkpoint 记录不在当前 session 文件中时无法
+        // 定位,显式报错(而不是静默只回滚文件)。
+        if rewind_conversation && checkpoint_turn.is_none() {
+            return Err(ToolError::InvalidArgs {
+                message: format!(
+                    "rewind: scope '{scope}' requires the checkpoint record for sha `{sha}` in the \
+                     current session (to locate the conversation boundary), but none was found",
+                    scope = args.get("scope").and_then(|v| v.as_str()).unwrap_or(""),
+                ),
+            });
+        }
+
+        // 文件回退目标校验(仅 scope 涉及文件时)。
+        if rewind_files && !is_valid_commit(&workspace, &sha) {
             return Err(ToolError::InvalidArgs {
                 message: format!(
                     "rewind: '{sha}' is not a valid commit in {}",
@@ -240,8 +286,8 @@ impl Tool for RewindTool {
             });
         }
 
-        // 审批:rewind 丢弃未提交变更,在 execute 前显式 ask_tool(镜像
-        // AstTool 的 mutation 路径)。Deny → is_error 返回,不抛 Err。
+        // 审批:rewind 丢弃未提交变更 / 截断对话,在 execute 前显式 ask_tool
+        // (镜像 AstTool 的 mutation 路径)。Deny → is_error 返回,不抛 Err。
         if let Some(gate) = ctx.approval.as_ref() {
             let approved = gate
                 .ask_tool(
@@ -254,7 +300,7 @@ impl Tool for RewindTool {
             if !matches!(approved, reflect_protocol::ReviewDecision::Approve) {
                 return Ok(ToolOutput {
                     content: vec![reflect_protocol::ContentBlock::Text {
-                        text: format!("Rewind to `{sha}` was not approved; workspace unchanged."),
+                        text: format!("Rewind to `{sha}` was not approved; nothing changed."),
                     }],
                     is_error: true,
                     metadata: serde_json::json!({
@@ -267,28 +313,90 @@ impl Tool for RewindTool {
             }
         }
 
+        // ── 文件回退(workspace / both)─────────────────────────────────
         let from_sha = git_current_sha(&workspace).unwrap_or_else(|_| "unknown".into());
-        git_reset_hard(&workspace, &sha)?;
-        // best-effort 写 Rewind 记录。
-        if let Err(e) = write_rewind_record(&ctx, &sha, &from_sha) {
-            tracing::warn!(error = %e, "rewind: failed to persist rollout record (git reset still done)");
+        if rewind_files {
+            git_reset_hard(&workspace, &sha)?;
         }
-        let text = format!(
-            "Workspace rewound from `{from_sha}` to `{sha}`. Uncommitted changes and untracked \
-             files since then were discarded. Conversation history is preserved."
-        );
+
+        // ── 对话回退(conversation / both)──────────────────────────────
+        // 截断 checkpoint 所在 turn(含)之后的 rollout:引擎每轮从 rollout
+        // 回放重建历史,截断后下一个 turn 自然从更短的历史回放。
+        // 失败不致命:文件已回退(或未动),warn 后继续,输出中注明。
+        let mut dropped_messages = 0usize;
+        let mut conversation_note = String::new();
+        if rewind_conversation {
+            let target = checkpoint_turn.expect("checked above");
+            match truncate_conversation(&ctx, &target) {
+                Ok(dropped) => {
+                    dropped_messages = dropped;
+                    conversation_note = format!(
+                        " Conversation truncated: {dropped} message record(s) after the \
+                         checkpoint turn were removed (a .bak backup was kept)."
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "rewind: conversation truncate failed");
+                    conversation_note =
+                        format!(" Conversation truncation failed: {e:#} (history unchanged).");
+                }
+            }
+        }
+
+        // best-effort 写 Rewind 记录 —— 注意 conversation / both 作用域下
+        // 此记录**紧跟截断点之后**追加,不会复活被丢弃的历史,且让下一轮
+        // 回放看到「曾在此处回退」的审计轨迹。
+        if let Err(e) = write_rewind_record(&ctx, &sha, &from_sha) {
+            tracing::warn!(error = %e, "rewind: failed to persist rollout record (rewind itself still done)");
+        }
+        let files_part = if rewind_files {
+            format!(
+                "Workspace rewound from `{from_sha}` to `{sha}`. Uncommitted changes and \
+                 untracked files since then were discarded."
+            )
+        } else {
+            "Workspace files left untouched (scope=conversation).".to_string()
+        };
+        let text = format!("{files_part}{conversation_note}");
         Ok(ToolOutput {
             content: vec![reflect_protocol::ContentBlock::Text { text }],
             is_error: false,
             metadata: serde_json::json!({
                 "action": "rewind",
+                "scope": args.get("scope").and_then(|v| v.as_str()).unwrap_or("workspace"),
                 "target_sha": sha,
                 "from_sha": from_sha,
+                "dropped_messages": dropped_messages,
                 "approved": true,
             }),
             elapsed_ms: 0,
         })
     }
+}
+
+/// 在 session JSONL 里按 sha 反查 checkpoint 记录的 `turn_id`
+/// (conversation 作用域的截断边界)。
+fn find_checkpoint_turn_by_sha(ctx: &ToolContext, sha: &str) -> Option<reflect_protocol::TurnId> {
+    list_checkpoint_records(ctx)
+        .into_iter()
+        .find_map(|r| match r {
+            reflect_protocol::RolloutRecord::Checkpoint {
+                turn_id, sha: s, ..
+            } if s == sha => Some(turn_id),
+            _ => None,
+        })
+}
+
+/// conversation 作用域的 rollout 截断。复用 `rollout_ctx` 的 base/session
+/// 定位(与 checkpoint/rewind 记录写入同源),委托
+/// `reflect_rollout::index::truncate_session_after_turn`(备份 + 原子重写)。
+fn truncate_conversation(
+    ctx: &ToolContext,
+    to_turn: &reflect_protocol::TurnId,
+) -> Result<usize, String> {
+    let (base, sid) = rollout_ctx(ctx).ok_or("rollout context unavailable")?;
+    reflect_rollout::index::truncate_session_after_turn(&base, sid, Some(to_turn))
+        .map_err(|e| e.to_string())
 }
 
 // ── rollout record 写入(best-effort,无 recorder / session 时跳过)────
@@ -344,8 +452,12 @@ fn list_checkpoint_records(ctx: &ToolContext) -> Vec<reflect_protocol::RolloutRe
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reflect_protocol::{ReviewDecision, ThreadId};
+    use reflect_protocol::{ReviewDecision, RolloutRecorder as _, ThreadId};
     use reflect_tools::ToolContext;
+
+    /// 改 `REFLECT_ROLLOUT_BASE` env 的用例必须持有的进程级锁(env 是
+    /// 进程全局,并行用例共享)。
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[allow(clippy::field_reassign_with_default)] // workspace 须经 set_workspace method,无法在 literal 内设置
     fn tmp_repo_ctx() -> (ToolContext, std::path::PathBuf) {
@@ -463,5 +575,162 @@ mod tests {
         assert!(!out.is_error);
         // ReviewDecision 引入仅用于文档化 deny 变体名,避免 unused import。
         let _ = ReviewDecision::Approve;
+    }
+
+    /// conversation 作用域端到端:checkpoint 之后的历史被截断,文件不动。
+    /// 需要 `REFLECT_ROLLOUT_BASE` 指向临时目录(rollout_ctx 读 env),
+    /// 以共享的 ENV_LOCK 串行化避免污染同进程并行用例。
+    #[tokio::test]
+    async fn rewind_conversation_scope_truncates_rollout() {
+        let _g = ENV_LOCK.lock().await;
+        let (ctx, dir) = tmp_repo_ctx();
+        let rollout_base = tempfile::tempdir().unwrap();
+        // SAFETY:测试进程内以 ENV_LOCK 串行化,用例结束即恢复。
+        unsafe { std::env::set_var("REFLECT_ROLLOUT_BASE", rollout_base.path()) };
+
+        // 造 session 文件:SessionMeta + checkpoint 之前的 1 条历史。
+        let w = reflect_rollout::JsonlRolloutWriter::new(rollout_base.path(), ctx.session_id);
+        w.record(reflect_protocol::RolloutRecord::session_meta(
+            ctx.session_id,
+            "mock",
+        ))
+        .await
+        .unwrap();
+        let pre_turn = reflect_protocol::TurnId::new();
+        w.record(reflect_protocol::RolloutRecord::message(
+            pre_turn,
+            reflect_protocol::MessageRole::User,
+            serde_json::json!("hi"),
+        ))
+        .await
+        .unwrap();
+
+        // checkpoint(git commit v1)→ 之后追加 2 条历史 + 文件修改。
+        std::fs::write(dir.join("a.txt"), "v1").unwrap();
+        let cp = CheckpointTool
+            .execute(ctx.clone(), serde_json::json!({"action":"create"}))
+            .await
+            .unwrap();
+        let sha = cp.metadata["sha"].as_str().unwrap().to_string();
+        let post_turn = reflect_protocol::TurnId::new();
+        w.record(reflect_protocol::RolloutRecord::message(
+            post_turn,
+            reflect_protocol::MessageRole::Assistant,
+            serde_json::json!("work"),
+        ))
+        .await
+        .unwrap();
+        w.record(reflect_protocol::RolloutRecord::message(
+            post_turn,
+            reflect_protocol::MessageRole::Assistant,
+            serde_json::json!("more"),
+        ))
+        .await
+        .unwrap();
+        std::fs::write(dir.join("a.txt"), "modified").unwrap();
+
+        // rewind scope=conversation:文件保持 modified,rollout 截断到
+        // checkpoint turn 之前(2 条 post 消息 + checkpoint 记录被丢弃)。
+        let sid = ctx.session_id;
+        let out = RewindTool
+            .execute(ctx, serde_json::json!({"scope":"conversation","sha": sha}))
+            .await
+            .unwrap();
+        assert!(!out.is_error, "output: {:?}", out.metadata);
+        assert_eq!(out.metadata["dropped_messages"], 2);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+            "modified",
+            "conversation scope must not touch files"
+        );
+
+        // session 文件:SessionMeta + 1 条 pre 消息 + 截断后追加的 Rewind
+        // marker;checkpoint 记录与 post 消息均已不在。
+        let path = reflect_rollout::index::find_session_path(rollout_base.path(), sid)
+            .expect("session file must exist");
+        let body = std::fs::read_to_string(&path).unwrap();
+        // 注意不能断言 `!body.contains(&sha)`:截断后追加的 Rewind marker
+        // 自身携带 target_sha。改断言 checkpoint 类型行已消失。
+        assert!(
+            !body.contains("\"type\":\"checkpoint\""),
+            "checkpoint record must be truncated out: {body}"
+        );
+        assert!(
+            body.contains("\"type\":\"rewind\""),
+            "rewind marker kept: {body}"
+        );
+        let msgs = body
+            .lines()
+            .filter(|l| l.contains("\"type\":\"message\""))
+            .count();
+        assert_eq!(msgs, 1, "only the pre-checkpoint message survives: {body}");
+
+        // 恢复 env,避免泄漏到其它并行用例。
+        // SAFETY:同上,ENV_LOCK 保护下恢复。
+        unsafe { std::env::remove_var("REFLECT_ROLLOUT_BASE") };
+    }
+
+    /// both 作用域:文件回滚 + 对话截断同时发生。
+    #[tokio::test]
+    async fn rewind_both_scope_restores_files_and_truncates_history() {
+        let _g = ENV_LOCK.lock().await;
+        let (ctx, dir) = tmp_repo_ctx();
+        let rollout_base = tempfile::tempdir().unwrap();
+        // SAFETY:ENV_LOCK 串行化。
+        unsafe { std::env::set_var("REFLECT_ROLLOUT_BASE", rollout_base.path()) };
+
+        let w = reflect_rollout::JsonlRolloutWriter::new(rollout_base.path(), ctx.session_id);
+        w.record(reflect_protocol::RolloutRecord::session_meta(
+            ctx.session_id,
+            "mock",
+        ))
+        .await
+        .unwrap();
+        std::fs::write(dir.join("a.txt"), "original").unwrap();
+        let cp = CheckpointTool
+            .execute(ctx.clone(), serde_json::json!({"action":"create"}))
+            .await
+            .unwrap();
+        let sha = cp.metadata["sha"].as_str().unwrap().to_string();
+        let post_turn = reflect_protocol::TurnId::new();
+        w.record(reflect_protocol::RolloutRecord::message(
+            post_turn,
+            reflect_protocol::MessageRole::Assistant,
+            serde_json::json!("later"),
+        ))
+        .await
+        .unwrap();
+        std::fs::write(dir.join("a.txt"), "modified").unwrap();
+        let sid = ctx.session_id;
+
+        let out = RewindTool
+            .execute(ctx, serde_json::json!({"scope":"both","sha": sha}))
+            .await
+            .unwrap();
+        assert!(!out.is_error, "output: {:?}", out.metadata);
+        assert_eq!(out.metadata["dropped_messages"], 1);
+        // 文件恢复。
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+            "original"
+        );
+        // 对话截断。
+        let path = reflect_rollout::index::find_session_path(rollout_base.path(), sid).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(!body.contains("\"type\":\"checkpoint\""));
+        assert!(!body.contains("later"), "post-checkpoint history dropped");
+
+        // SAFETY:ENV_LOCK 保护下恢复。
+        unsafe { std::env::remove_var("REFLECT_ROLLOUT_BASE") };
+    }
+
+    /// 未知 scope 显式报错。
+    #[tokio::test]
+    async fn rewind_unknown_scope_errors() {
+        let (ctx, _dir) = tmp_repo_ctx();
+        let err = RewindTool
+            .execute(ctx, serde_json::json!({"scope":"everything"}))
+            .await;
+        assert!(err.is_err());
     }
 }

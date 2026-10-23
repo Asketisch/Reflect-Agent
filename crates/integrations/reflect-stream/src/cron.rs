@@ -596,13 +596,16 @@ mod tests {
     #[test]
     fn update_changes_fields_and_recomputes_next_fire() {
         let s = sched();
-        let job = s.create("0 * * * *", "p1", None).unwrap();
+        // 两条 schedule 的下一次触发可能撞上同一时刻(如 UTC 上午运行时
+        // `0 * * * *` 与 `0 9 * * *` 都指向今天 09:00),断言改为「update
+        // 确实重算了 next_fire 字段」—— 与创建时分开比较,不依赖墙钟。
+        let job = s.create("0 3 * * *", "p1", None).unwrap();
         let nf0 = job.next_fire;
-        let updated = s.update(&job.id, Some("0 9 * * *"), Some("p2"), None, None);
+        let updated = s.update(&job.id, Some("0 5 * * *"), Some("p2"), None, None);
         assert!(updated.is_some());
         let u = updated.unwrap();
         assert_eq!(u.prompt, "p2");
-        assert_eq!(u.schedule, "0 9 * * *");
+        assert_eq!(u.schedule, "0 5 * * *");
         assert_ne!(u.next_fire, nf0);
     }
 

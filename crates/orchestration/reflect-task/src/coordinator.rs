@@ -155,7 +155,16 @@ impl CoordinatorConfig {
     pub fn from_env_or_config(cfg: &reflect_config::CoordinatorSection) -> Self {
         let enabled = cfg.enabled.unwrap_or_else(is_coordinator_enabled);
 
-        // system prompt:config 路径覆盖默认。
+        // system prompt:config 路径覆盖默认。v1.6:默认文案外置为
+        // 提示词库 `coordinator.system` section(可按模型覆盖),
+        // `DEFAULT_COORDINATOR_PROMPT`(include_str 的 md 资产)保留作
+        // 库缺失时的回落 —— 两处措辞同源,修改须同步。
+        let default_prompt = || {
+            reflect_prompt::library()
+                .resolve("")
+                .get_or("coordinator.system", DEFAULT_COORDINATOR_PROMPT)
+                .to_string()
+        };
         let system_prompt = if let Some(path) = cfg.system_prompt_path.as_ref() {
             match std::fs::read_to_string(path) {
                 Ok(s) if !s.trim().is_empty() => {
@@ -168,16 +177,16 @@ impl CoordinatorConfig {
                 Ok(_) => {
                     warn!(path = %path.display(),
                         "coordinator: config system_prompt_path 指向空文件,使用默认");
-                    DEFAULT_COORDINATOR_PROMPT.to_string()
+                    default_prompt()
                 }
                 Err(e) => {
                     warn!(path = %path.display(), error = %e,
                         "coordinator: 读 system_prompt_path 失败,使用默认");
-                    DEFAULT_COORDINATOR_PROMPT.to_string()
+                    default_prompt()
                 }
             }
         } else {
-            DEFAULT_COORDINATOR_PROMPT.to_string()
+            default_prompt()
         };
 
         // max_workers:config > env > 默认。末尾 clamp 到 [1, MAX_WORKERS_CAP]

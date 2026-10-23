@@ -29,6 +29,7 @@ pub mod cooldown;
 pub mod credential;
 pub mod error;
 pub mod event;
+pub mod model_catalog;
 pub mod policy;
 pub mod providers;
 pub mod quota;
@@ -41,6 +42,7 @@ pub use cooldown::{CooldownEntry, CooldownReason};
 pub use credential::Credential;
 pub use error::LlmError;
 pub use event::ChatEvent;
+pub use model_catalog::{DEFAULT_ALWAYS_FREE, DEFAULT_FREE_ID_PATTERNS, FreeModelRules, ModelInfo};
 pub use policy::{Role, RoutingPolicy, SpecSlot};
 pub use providers::{
     AnthropicClient, AnthropicConfig, DEFAULT_MOCK_MODEL, DEFAULT_MOCK_REPLY, ENV_MOCK_SCRIPT,
@@ -53,6 +55,6 @@ pub use quota::{CredentialKey, QuotaConfig, QuotaSource, QuotaTracker, SharedQuo
 pub use registry::{CredentialPool, ModelRegistry, NextClient, PoolEntry, SharedModelRegistry};
 pub use request::{
     AssistantContent, CacheBreak, CacheControl, CacheControlKind, CacheTtl, ChatMessage,
-    ChatRequest, ContentBlock, ReasoningEffort, SystemBlock, SystemBlocks, ThinkingConfig,
-    ToolCallRequest, ToolResult, ToolSpec, UserContent,
+    ChatRequest, ContentBlock, ReasoningEffort, ResponseFormat, SystemBlock, SystemBlocks,
+    ThinkingConfig, ToolCallRequest, ToolResult, ToolSpec, UserContent,
 };

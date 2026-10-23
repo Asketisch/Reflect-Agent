@@ -1,7 +1,7 @@
 //! EventMsg —— core 可 emit 的全部事件的标签联合类型。
 //!
 //! v0 有 17 个变体。后续新增变体是 additive、非破坏性的(serde 增量化)。
-//! M1/M2 暂不提供 `ToolCallOutputDelta`(推迟到 v1)。
+//! v1.4 A3 提供 `ToolCallOutputDelta`(工具输出流式增量,原推迟项落地)。
 //! M6 新增 `ApprovalRequest`(与 `Op::ToolApproval` / `Op::HookApproval` 配对)。
 //! M7 新增 `ConfigReloaded`。
 //! M10/v0.2.4 新增 `CollabStarted` / `CollabMessage` / `CollabFinished`,
@@ -23,6 +23,7 @@ mod mcp;
 mod plan;
 mod plugin;
 mod routing;
+mod subagent;
 mod tool;
 mod turn;
 
@@ -32,7 +33,7 @@ pub use collab::{CollabFinishedEvent, CollabMessageEvent, CollabStartedEvent};
 pub use compaction::{
     ContextCompactedEvent, ContextCompactedStrategy, ErrorEvent, StreamErrorEvent, TriedCredential,
 };
-pub use config::ConfigReloadedEvent;
+pub use config::{ConfigReloadedEvent, PromptListEvent, PromptSwitchedEvent};
 pub use lsp::{LspServerFailedEvent, LspServerStartedEvent};
 pub use mcp::{
     McpServerFailedEvent, McpServerStartedEvent, McpToolInvokedEvent, McpTransportMirror,
@@ -43,8 +44,13 @@ pub use plan::{
 };
 pub use plugin::{PluginLoadedEvent, QuotaExhaustedEvent};
 pub use routing::{RoutingEvent, RoutingEventKind};
+pub use subagent::{
+    SubagentProgressEvent, SubagentProgressKind, SubagentRunStateMirror, SubagentStatusEvent,
+    SubagentStatusSnapshot,
+};
 pub use tool::{
-    ToolCallArgsDeltaEvent, ToolCallBeginEvent, ToolCallEndEvent, ToolExecutionRequestEvent,
+    ToolCallArgsDeltaEvent, ToolCallBeginEvent, ToolCallEndEvent, ToolCallOutputDeltaEvent,
+    ToolExecutionRequestEvent,
 };
 pub use turn::{
     AbortReason, TokenUsage, TurnAbortedEvent, TurnCompleteEvent, TurnRewoundEvent,
@@ -83,15 +89,25 @@ pub enum EventMsg {
     /// Token 用量快照(通常在 turn 结束时 emit)。
     TokenCount(TokenCountEvent),
 
-    // 工具(3)
+    // 工具(4;v1.4 A3 新增 ToolCallOutputDelta / v1.5 新增 ToolCallArgsDelta)
     ToolCallBegin(ToolCallBeginEvent),
     /// v1.5:流式工具参数增量(模型生成 tool_use 参数期间逐段转发,
     /// `call_id` 与后续 `ToolCallBegin` 的工具对应;新增变体 = additive 兼容)。
     ToolCallArgsDelta(ToolCallArgsDeltaEvent),
     ToolCallEnd(ToolCallEndEvent),
+    /// v1.4 A3:工具输出流式增量 —— 长工具(构建 / 测试)执行期间逐段
+    /// 上报 stdout/stderr,客户端实时可见;最终完整输出仍以
+    /// `ToolCallEnd` 为准(增量只是预览,不做脱敏)。
+    ToolCallOutputDelta(ToolCallOutputDeltaEvent),
     /// v1.3 SDK:请求客户端执行其注册的远程自定义工具(实现留在客户端
     /// 进程,core 只做转发与等待)。回执走 `Op::ToolExecutionResponse`。
     ToolExecutionRequest(ToolExecutionRequestEvent),
+
+    // 子代理可观测(2;v1.4 C1)—— 进度推送 + 状态查询应答
+    /// 子代理中间进度(父级 CallSubAgentTool 转发:助手文本 / 工具开始 / 结束)。
+    SubagentProgress(SubagentProgressEvent),
+    /// `Op::QuerySubagents` 的状态快照应答。
+    SubagentStatus(SubagentStatusEvent),
 
     // 审批(1;M6)
     /// 工具或 hook 正等待用户审批。客户端应当用与 `request_id` 匹配的
@@ -208,6 +224,13 @@ pub enum EventMsg {
     /// v1.x 功能 7:某 credential 的 token plan 配额耗尽,已对该 credential
     /// 触发 cooldown 并切到下一个 plan。TUI 据此显示切换提示。
     QuotaExhausted(QuotaExhaustedEvent),
+
+    // 提示词层(2;v1.6.1)—— `/prompt` slash 的查询与重扫应答
+    /// `Op::PromptCommand { action: List }` 的应答:可用层 + 生效层。
+    /// TUI/GUI 的提示词选择 overlay 据此渲染。
+    PromptList(PromptListEvent),
+    /// `Op::PromptCommand { action: Switch }` 的应答:提示词库已重扫。
+    PromptSwitched(PromptSwitchedEvent),
 }
 
 impl EventMsg {
@@ -228,6 +251,9 @@ impl EventMsg {
             EventMsg::ToolCallBegin(_) => "tool_call_begin",
             EventMsg::ToolCallArgsDelta(_) => "tool_call_args_delta",
             EventMsg::ToolCallEnd(_) => "tool_call_end",
+            EventMsg::ToolCallOutputDelta(_) => "tool_call_output_delta",
+            EventMsg::SubagentProgress(_) => "subagent_progress",
+            EventMsg::SubagentStatus(_) => "subagent_status",
             EventMsg::ToolExecutionRequest(_) => "tool_execution_request",
             EventMsg::ApprovalRequest(_) => "approval_request",
             EventMsg::AskUserQuestion(_) => "ask_user_question",
@@ -255,6 +281,8 @@ impl EventMsg {
             EventMsg::PluginLoaded(_) => "plugin_loaded",
             EventMsg::Routing(_) => "routing",
             EventMsg::QuotaExhausted(_) => "quota_exhausted",
+            EventMsg::PromptList(_) => "prompt_list",
+            EventMsg::PromptSwitched(_) => "prompt_switched",
         }
     }
 }
@@ -627,6 +655,39 @@ mod tests {
         });
         let j = serde_json::to_string(&ev_none).unwrap();
         assert!(!j.contains("cost_usd"), "None must be skipped, got: {j}");
+    }
+
+    #[test]
+    fn token_count_with_model_roundtrip() {
+        // v1.x 模型级统计:`model` 字段 Some/None 两个分支 roundtrip,
+        // None 时序列化省略(与 provider / credential_label 同策略)。
+        let ev = EventMsg::TokenCount(TokenCountEvent {
+            input_tokens: 100,
+            output_tokens: 20,
+            cached_tokens: 0,
+            cache_write_tokens: 0,
+            total_tokens: 120,
+            cost_usd: None,
+            model: Some("openai/gpt-4o".into()),
+            ..Default::default()
+        });
+        let j = serde_json::to_string(&ev).unwrap();
+        assert!(j.contains(r#""model":"openai/gpt-4o""#), "got: {j}");
+        let back: EventMsg = serde_json::from_str(&j).unwrap();
+        match back {
+            EventMsg::TokenCount(e) => {
+                assert_eq!(e.model.as_deref(), Some("openai/gpt-4o"));
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+
+        // None 分支:序列化时省略。
+        let ev_none = EventMsg::TokenCount(TokenCountEvent {
+            total_tokens: 0,
+            ..Default::default()
+        });
+        let j = serde_json::to_string(&ev_none).unwrap();
+        assert!(!j.contains("\"model\""), "None must be skipped, got: {j}");
     }
 
     #[test]

@@ -358,6 +358,25 @@ impl ModelRegistry {
         }
     }
 
+    /// 列出某 provider 池内的**全部** client —— 不按 cooldown 过滤,
+    /// 也**不**动轮询游标。
+    ///
+    /// 供模型清单发现这类只读探测使用:清单是 provider 级的事实,不该被
+    /// 「某条凭据正在冷却」挡住(冷却只该影响推理请求的派位)。
+    pub fn all_clients(&self, provider: &str) -> Vec<NextClient> {
+        let pools = self.pools.read();
+        let Some(pool) = pools.get(provider) else {
+            return Vec::new();
+        };
+        pool.entries
+            .iter()
+            .map(|e| NextClient {
+                client: e.client.clone(),
+                label: e.label.clone(),
+            })
+            .collect()
+    }
+
     /// 列出某 provider 下当前不在 cooldown 的 client,供 TUI `/status` /
     /// `healthy_clients` 等只读接口用。
     pub fn healthy_clients(&self, spec: &str) -> Vec<NextClient> {
@@ -823,7 +842,12 @@ mod tests {
             pool(vec![entry("minimax", 1), entry("backup", 1)]),
         );
         r.set_preferred("anthropic", "minimax");
-        r.mark_cooldown("anthropic", "minimax", Duration::from_secs(60), CooldownReason::Auth);
+        r.mark_cooldown(
+            "anthropic",
+            "minimax",
+            Duration::from_secs(60),
+            CooldownReason::Auth,
+        );
 
         assert_eq!(r.next_for("anthropic/x", &[]).unwrap().label, "backup");
         assert_eq!(r.next_for("anthropic/x", &[]).unwrap().label, "backup");

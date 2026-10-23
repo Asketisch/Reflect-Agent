@@ -125,6 +125,20 @@ pub fn smart_prune(
     for i in keep_start..n {
         pinned.insert(i);
     }
+    // 0.7:扩展保留窗口以保住每对 tool_use ↔ tool_result。
+    //
+    // 此前这里**没有**调用 `expand_keep_window_to_preserve_pairs`(只有
+    // microcompact 调了)。尾部窗口 `keep_start` 正好切在一个 assistant
+    // `tool_use` / `Tool` 结果对中间时,phase 2 的丢弃循环会把 assistant
+    // 消息丢掉却留下 `Tool` 结果(或反之),产出半截配对 —— provider 会以
+    // HTTP 400 拒绝这种请求。这是激进压缩后间歇性报错最可能的来源。
+    //
+    // 与 microcompact 对齐:把 `expanded..keep_start` 一并 pin 住。
+    let expanded =
+        crate::tool_pair::expand_keep_window_to_preserve_pairs(&after_phase1, keep_start);
+    for i in expanded..keep_start {
+        pinned.insert(i);
+    }
 
     // 遍历旧下标(不在固定集合、不在 keep_recent),丢弃最旧者。
     let mut removed_count = 0;
@@ -519,6 +533,96 @@ mod tests {
         };
         let (_, was_truncated) = truncate_assistant_in_place(a, 600);
         assert!(!was_truncated);
+    }
+
+    // ── 0.7 回归:phase 2 必须保住 tool 配对 ───────────────────────
+
+    /// 构造一个 assistant(tool_use)+ Tool 结果对。
+    fn tool_pair(prefix: &str, ids: &[&str]) -> Vec<ChatMessage> {
+        vec![
+            ChatMessage::Assistant(reflect_llm::AssistantContent {
+                text: Some(format!("{prefix} calling")),
+                tool_calls: ids
+                    .iter()
+                    .map(|id| reflect_llm::ToolCallRequest {
+                        id: (*id).to_string(),
+                        name: "bash".into(),
+                        arguments: serde_json::json!({"cmd": "ls"}),
+                    })
+                    .collect(),
+                thinking: None,
+            }),
+            make_tool_result(ids[0], &"y".repeat(200)),
+        ]
+    }
+
+    fn filler(tag: &str) -> ChatMessage {
+        ChatMessage::User(UserContent {
+            blocks: vec![ContentBlock::text("z".repeat(300) + tag)],
+        })
+    }
+
+    /// 回归(0.7):phase 2 在任何 `keep_recent` 下都不得产出半截配对。
+    ///
+    /// 修复前 phase 2 用 `keep_start = n - keep_recent` 直接 pin 尾部,
+    /// **没有**调用 `expand_keep_window_to_preserve_pairs`(只有
+    /// microcompact 调了)。当 `keep_start` 正好落在一个 assistant(tool_use)
+    /// 与它的 `Tool` 结果之间时,assistant 不在固定集合 → 被丢弃,而 Tool
+    /// 结果在 keep_recent 内被保留 → 半截配对 → provider HTTP 400。
+    ///
+    /// 这里**扫遍所有 keep_recent**:不同取值会把窗口边界放到消息列表的
+    /// 不同位置,总有一次会切在配对中间 —— 不需要手算边界该落在哪。
+    #[test]
+    fn phase2_preserves_tool_pairs_for_every_keep_recent() {
+        // 布局:System + [assistant(c1)|Tool(c1)] + 6 条可丢弃长消息 = 9 条。
+        let mut msgs = vec![ChatMessage::System("sys".into())];
+        msgs.extend(tool_pair("first", &["c1"]));
+        for i in 0..6 {
+            msgs.push(filler(&i.to_string()));
+        }
+        let n = msgs.len();
+        assert_eq!(n, 9, "布局应符合预期");
+
+        for keep_recent in 1..n {
+            let cfg = SmartPruneConfig {
+                trigger_tokens: 200,
+                target_tokens: 50,
+                keep_recent,
+                ..Default::default()
+            };
+            let (out, r) = smart_prune(msgs.clone(), &cfg);
+            crate::tool_pair::assert_pairs_intact(&out);
+            // 至少有一个取值应当真的丢弃了消息,否则这个测试是空转。
+            if r.removed_count > 0 {
+                assert!(r.was_compacted);
+            }
+        }
+    }
+
+    /// 回归(0.7):多对 + 激进丢弃下同样不得出现半截配对。
+    /// 扫 keep_recent 保证窗口边界能落在任意一对中间。
+    #[test]
+    fn phase2_preserves_tool_pairs_under_aggressive_drop() {
+        let mut msgs = vec![ChatMessage::System("sys".into())];
+        // 8 个完整对,每对后面夹一条可丢弃长消息。
+        for i in 0..8 {
+            msgs.extend(tool_pair(&format!("p{i}"), &[&format!("c{i}")]));
+            msgs.push(filler(&i.to_string()));
+        }
+        let n = msgs.len();
+        let mut saw_removal = false;
+        for keep_recent in 1..n {
+            let cfg = SmartPruneConfig {
+                trigger_tokens: 500,
+                target_tokens: 100,
+                keep_recent,
+                ..Default::default()
+            };
+            let (out, r) = smart_prune(msgs.clone(), &cfg);
+            crate::tool_pair::assert_pairs_intact(&out);
+            saw_removal |= r.removed_count > 0;
+        }
+        assert!(saw_removal, "测试空转:没有任何取值真的丢弃了消息");
     }
 
     #[test]

@@ -39,5 +39,7 @@ pub mod model;
 pub mod parser;
 
 pub use merge::merge_with_toml;
-pub use model::{AgentDefError, AgentDefinition, DEFAULT_AGENT_NAME, MODEL_INHERIT};
+pub use model::{
+    AgentDefError, AgentDefinition, DEFAULT_AGENT_NAME, MODEL_INHERIT, SystemPromptSource,
+};
 pub use parser::{load_agents_dir, parse_agent_md, parse_agent_str};

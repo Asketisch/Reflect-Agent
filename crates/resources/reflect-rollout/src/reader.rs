@@ -94,6 +94,8 @@ mod tests {
                 strategy: "microcompact".into(),
                 removed_count: 5,
                 summary: "<summary>...</summary>".into(),
+                before_tokens: 0,
+                after_tokens: 0,
             },
             RolloutRecord::Fork {
                 parent_session_id: sid,

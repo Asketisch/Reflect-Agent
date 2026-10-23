@@ -83,7 +83,7 @@ pub async fn run_team_pipeline_with_team(
     cancel: CancellationToken,
 ) -> Result<PipelineReport, crate::PipelineError> {
     let team_arc = Arc::new(team);
-    let pipeline = Pipeline::from_toml(TEAM_PIPELINE_TOML, |label, _| {
+    let pipeline = Pipeline::from_toml(TEAM_PIPELINE_TOML, |label, _runner, _| {
         Some(match label {
             PRESET_PLANNER_NAME => {
                 Arc::new(planner_node(label, (*team_arc).clone())) as Arc<dyn crate::NodeRunner>
@@ -154,7 +154,7 @@ mod tests {
 
     #[tokio::test]
     async fn team_pipeline_toml_parses_four_nodes() {
-        let p = Pipeline::from_toml(TEAM_PIPELINE_TOML, |label, _| {
+        let p = Pipeline::from_toml(TEAM_PIPELINE_TOML, |label, _runner, _| {
             Some(
                 Arc::new(TeamNodeRunner::new(label, dummy_team(), "{{topic}}"))
                     as Arc<dyn crate::NodeRunner>,

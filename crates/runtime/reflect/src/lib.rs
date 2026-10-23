@@ -50,13 +50,13 @@ pub use reflect_llm::{
 
 // ── 协议(Protocol)───────────────────────────────────────────────────────
 pub use reflect_protocol::{
-    AbortReason, AgentMessage, AgentMessageDelta, ApprovalKind, ApprovalPolicy,
-    ApprovalRequestEvent, ContentBlock, ContextCompactedEvent, ContextCompactedStrategy,
-    ErrorEvent, Event, EventMsg, MessageRole, NullRecorder, Op, ProtocolError, ReviewDecision,
-    RiskLevel, RolloutRecord, RolloutRecorder, SandboxPolicy, SessionConfiguredEvent, SessionInfo,
-    StreamErrorEvent, Submission, ThreadId, TokenCountEvent, TokenUsage, ToolCallBeginEvent,
-    ToolCallEndEvent, ToolOutput, TurnAbortedEvent, TurnCompleteEvent, TurnId, TurnStartedEvent,
-    TurnStatus, UserInputItem,
+    AbortReason, AgentMessage, AgentMessageDelta, ApprovalKind, ApprovalRequestEvent, ContentBlock,
+    ContextCompactedEvent, ContextCompactedStrategy, ErrorEvent, Event, EventMsg, MessageRole,
+    ModelUsage, NullRecorder, Op, PromptAction, PromptListEvent, PromptSwitchedEvent,
+    ProtocolError, ReviewDecision, RiskLevel, RolloutRecord, RolloutRecorder, SandboxPolicy,
+    SessionConfiguredEvent, SessionInfo, SessionStats, StreamErrorEvent, Submission, ThreadId,
+    TokenCountEvent, TokenUsage, ToolCallBeginEvent, ToolCallEndEvent, ToolOutput,
+    TurnAbortedEvent, TurnCompleteEvent, TurnId, TurnStartedEvent, TurnStatus, UserInputItem,
 };
 
 // ── Tools ──────────────────────────────────────────────────────────────────
@@ -80,11 +80,32 @@ pub use reflect_skills::SkillsCatalog;
 // ── Agent definitions(新暴露)──────────────────────────────────────────────
 pub use reflect_agent_def::AgentDefinition;
 
+// ── Prompts(按模型匹配的外置提示词库,v1.6)──────────────────────────────
+// TUI / GUI 下游经此消费:.reflect/prompts/*.md 的发现、加载、按模型
+// 三级回退(default → 厂商 → 精确模型名)与进程级初始化。
+pub use reflect_prompt::{PromptLibrary, PromptSet, init_library, library, split_spec};
+
 // ── Compact(新暴露)─────────────────────────────────────────────────────────
 pub use reflect_compact::Compactor;
 
 // ── Rollout(新暴露)─────────────────────────────────────────────────────────
 pub use reflect_rollout::JsonlRolloutWriter;
+// v1.x 读取侧:SDK 消费者(TUI / GUI)不依赖 reflect-cli 即可查询历史会话
+// —— 列表、按 id 定位、回放、markdown 导出、按模型统计。
+pub use reflect_rollout::index::{
+    find_file_by_session_id, find_session_path, list_sessions, list_sessions_in_workspace,
+};
+pub use reflect_rollout::{all_model_usage, replay, replay_path, session_stats, to_markdown};
+
+// ── Telemetry(v1.x 新暴露)────────────────────────────────────────────────
+// 数据记录 SDK 化:写入侧 `TelemetrySink` 由 `ReflectBuilder::with_telemetry`
+// 注入(默认按 `[telemetry]` config 自动构造);读取侧 API 让 TUI / GUI
+// 直接查询 model-io 全文(含 system prompt / 工具名 / usage)与 span 日志。
+pub use reflect_telemetry::{
+    LangfuseConfig, LangfuseExporter, Level, ModelIoRecord, ModelRef, SpanStatus, TelemetrySink,
+    TraceEvent, UsageSnapshot, list_model_io_files, list_span_log_files, read_model_io_file,
+    read_span_log_file, resolve_traces_dir,
+};
 
 // ── Subagent(新暴露)───────────────────────────────────────────────────────
 pub use reflect_subagent::{CallSubAgentTool, DataTransferConfig, SubAgentFactory, SubAgentSpec};

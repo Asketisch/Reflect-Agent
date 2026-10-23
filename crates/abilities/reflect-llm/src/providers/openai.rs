@@ -18,6 +18,7 @@ use crate::capabilities::Capabilities;
 use crate::client::ModelClient;
 use crate::error::LlmError;
 use crate::event::ChatEvent;
+use crate::model_catalog::ModelInfo;
 use crate::request::{
     ChatMessage, ChatRequest, ContentBlock, ReasoningEffort, ThinkingConfig, ToolSpec,
 };
@@ -101,10 +102,16 @@ impl ModelClient for OpenAIClient {
         let mut req = self
             .http
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.config.api_key))
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream")
             .body(body.to_string());
+
+        // `api_key` 为空时**不**发 Authorization 头:免 Key 的 OpenAI 兼容
+        // 端点(免费模型池)对「空 Bearer」宽容、对「非空无效 token」严格,
+        // 少发一个头更稳。与 Ollama provider 的既有做法一致。
+        if !self.config.api_key.is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", self.config.api_key));
+        }
 
         if cancel.is_cancelled() {
             return Err(LlmError::Cancelled);
@@ -122,6 +129,127 @@ impl ModelClient for OpenAIClient {
 
         Ok(Box::pin(stream_sse(response, cancel)))
     }
+
+    /// R0-1:拉取 OpenAI 兼容的模型清单(`GET {base}/v1/models`)。
+    async fn list_models(
+        &self,
+        cancel: CancellationToken,
+    ) -> Result<Option<Vec<ModelInfo>>, LlmError> {
+        let base = self
+            .config
+            .base_url
+            .as_deref()
+            .unwrap_or(DEFAULT_BASE_URL)
+            .trim_end_matches('/');
+        let url = format!("{base}/v1/models");
+
+        let mut req = self.http.get(&url).header("Accept", "application/json");
+        // 清单端点同样尊重「空 key 不发头」的约定(免 Key 端点)。
+        if !self.config.api_key.is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", self.config.api_key));
+        }
+
+        if cancel.is_cancelled() {
+            return Err(LlmError::Cancelled);
+        }
+
+        let response = req.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            // 端点不存在(404/405)→ 该 provider 没有清单能力,诚实降级为 None;
+            // 其余状态是真实故障,上报错误。
+            if status == reqwest::StatusCode::NOT_FOUND
+                || status == reqwest::StatusCode::METHOD_NOT_ALLOWED
+            {
+                return Ok(None);
+            }
+            let status_code = status.as_u16();
+            let headers = response.headers().clone();
+            let text = response.text().await.unwrap_or_default();
+            return Err(classify_status(status_code, &text, &headers));
+        }
+
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|e| LlmError::Internal(format!("model listing parse failed: {e}")))?;
+        Ok(Some(parse_model_listing(&body)))
+    }
+}
+
+/// 解析 OpenAI 兼容的模型清单响应(`{"object":"list","data":[...]}`)。
+///
+/// ⚠️ 各家端点披露的字段差别很大,这里按「能取到什么就取什么」的顺序探测:
+/// - 上下文窗口:`context_window` → `context_length` → `top_provider.context_length`;
+/// - 免费标记:`isFree` → `pricing` 全零 → `None`(交给规则判);
+/// - 思考档位:`x_ofm_efforts`。
+///
+/// `openai.rs` 与 `responses.rs` 共用本函数,避免两处解析漂移。
+pub(crate) fn parse_model_listing(body: &Value) -> Vec<ModelInfo> {
+    let Some(data) = body.get("data").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    data.iter()
+        .filter_map(|entry| {
+            let id = entry.get("id").and_then(Value::as_str)?;
+            if id.is_empty() {
+                return None;
+            }
+            Some(ModelInfo {
+                id: id.to_string(),
+                context_window: extract_context_window(entry),
+                is_free: extract_is_free(entry),
+                efforts: entry
+                    .get("x_ofm_efforts")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    }),
+                owned_by: entry
+                    .get("owned_by")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            })
+        })
+        .collect()
+}
+
+/// 从清单条目里取上下文窗口(三种字段形态依次探测)。
+fn extract_context_window(entry: &Value) -> Option<u32> {
+    let candidates = [
+        entry.get("context_window"),
+        entry.get("context_length"),
+        entry
+            .get("top_provider")
+            .and_then(|tp| tp.get("context_length")),
+    ];
+    for candidate in candidates.into_iter().flatten() {
+        if let Some(v) = candidate.as_u64() {
+            if v > 0 && v <= u32::MAX as u64 {
+                return Some(v as u32);
+            }
+        }
+    }
+    None
+}
+
+/// 从清单条目里取免费标记:显式 `isFree` 优先,其次 `pricing` 全零。
+///
+/// `pricing` 全零是「这条线路不花钱」的另一种表述(免费池常这么标),
+/// 与显式标记同等的权威性 —— 两者冲突时以 `isFree` 为准。
+fn extract_is_free(entry: &Value) -> Option<bool> {
+    if let Some(flag) = entry.get("isFree").and_then(Value::as_bool) {
+        return Some(flag);
+    }
+    let pricing = entry.get("pricing")?;
+    let prompt = pricing.get("prompt").and_then(Value::as_str)?;
+    let completion = pricing.get("completion").and_then(Value::as_str)?;
+    // 价格字段是字符串("0" / "0.00" / "0.000");非零一律视为收费。
+    let is_zero = |raw: &str| raw.trim().parse::<f64>().map(|v| v == 0.0).unwrap_or(false);
+    Some(is_zero(prompt) && is_zero(completion))
 }
 
 fn classify_status(status: u16, body: &str, headers: &reqwest::header::HeaderMap) -> LlmError {
@@ -206,6 +334,54 @@ fn parse_chunk(v: &Value) -> Vec<ChatEvent> {
     let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("");
     let model = v.get("model").and_then(|x| x.as_str()).unwrap_or("");
 
+    // R2:错误可能**在流里**下发 —— HTTP 仍是 200,但某一帧是
+    // `data: {"error":{...}}`。
+    //
+    // 实测(dsh-our-free-model 本地网关 / OpenCode 车道):地区门与配额用尽
+    // 就是这个形状。该帧既无 `choices` 也无 `usage`,此前被整块丢弃 →
+    // 上层收到一条「成功但零内容」的流,turn 以 `success` + 0 token 收场,
+    // **真实错误被静默吞掉**(用户只看到「助手没说话」,没有任何错误提示)。
+    //
+    // 这里显式产出 Error 事件,让错误沿既有的错误通路冒泡:
+    // - 载荷自报限流(`code` / `type` 含 rate)→ `RateLimited` → 冷却 +
+    //   failover(换凭据/换模型重来),与 HTTP 429 的语义一致;
+    // - 其余 → `Provider{status: 200}` —— HTTP 层确实是 200,错误是流里
+    //   带回来的;`status < 500` 让重试矩阵判 GiveUp(地区门换凭据也没用,
+    //   不做无谓重试)。
+    if let Some(err) = v.get("error") {
+        if err.is_object() {
+            let message = err
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("provider returned an in-stream error")
+                .to_string();
+            let tag = err
+                .get("code")
+                .and_then(Value::as_str)
+                .or_else(|| err.get("type").and_then(Value::as_str))
+                .unwrap_or("");
+            let is_rate = tag.to_lowercase().contains("rate")
+                || message.to_lowercase().contains("rate limit")
+                || message.to_lowercase().contains("quota");
+            let full = if tag.is_empty() || message.contains(tag) {
+                message
+            } else {
+                format!("{tag}: {message}")
+            };
+            out.push(ChatEvent::Error(if is_rate {
+                LlmError::RateLimited {
+                    retry_after_ms: 1000,
+                }
+            } else {
+                LlmError::Provider {
+                    status: 200,
+                    message: full,
+                }
+            }));
+            return out;
+        }
+    }
+
     if !id.is_empty() || !model.is_empty() {
         out.push(ChatEvent::MessageStart {
             id: id.to_string(),
@@ -251,7 +427,15 @@ fn parse_chunk(v: &Value) -> Vec<ChatEvent> {
                 // reasoning_content:DeepSeek / Qwen / 部分 OpenAI o-series 兼容端点
                 // 用此字段流式输出思考过程(区别于正文 content)。此前被忽略,
                 // 导致这些模型的 reasoning 在 provider 层就已丢失。
-                if let Some(rc) = delta.get("reasoning_content").and_then(|x| x.as_str()) {
+                //
+                // R1:另一批兼容端点(免费模型池实测:OpenRouter / Kilo 系)用
+                // `delta.reasoning` 承载同一语义。两者并存时 `reasoning_content`
+                // 优先;都没有则不产出 ThinkingDelta。
+                let reasoning = delta
+                    .get("reasoning_content")
+                    .and_then(|x| x.as_str())
+                    .or_else(|| delta.get("reasoning").and_then(|x| x.as_str()));
+                if let Some(rc) = reasoning {
                     if !rc.is_empty() {
                         out.push(ChatEvent::ThinkingDelta(rc.to_string()));
                     }
@@ -317,6 +501,28 @@ pub struct OpenAIRequest {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<String>,
+    /// v1.4 B1:结构化输出(`response_format` 参数)。`None` 不序列化,
+    /// 与历史请求体逐字节一致。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<Value>,
+}
+
+/// v1.4 B1:`ResponseFormat` → OpenAI `response_format` wire 形态。
+/// `Text` 映射为 `{"type":"text"}`(显式纯文本);`None` 完全省略。
+pub(crate) fn openai_response_format(rf: &crate::request::ResponseFormat) -> Value {
+    use crate::request::ResponseFormat;
+    match rf {
+        ResponseFormat::Text => serde_json::json!({"type": "text"}),
+        ResponseFormat::JsonObject => serde_json::json!({"type": "json_object"}),
+        ResponseFormat::JsonSchema {
+            name,
+            schema,
+            strict,
+        } => serde_json::json!({
+            "type": "json_schema",
+            "json_schema": {"name": name, "schema": schema, "strict": strict}
+        }),
+    }
 }
 
 impl From<ChatRequest> for OpenAIRequest {
@@ -359,6 +565,7 @@ impl From<ChatRequest> for OpenAIRequest {
             stop: req.stop,
             stream: true,
             reasoning_effort,
+            response_format: req.response_format.as_ref().map(openai_response_format),
         }
     }
 }
@@ -476,6 +683,177 @@ mod tests {
     use crate::request::{SystemBlocks, UserContent};
 
     #[test]
+    fn 清单解析_取id与上下文窗口() {
+        let body = serde_json::json!({
+            "object": "list",
+            "data": [
+                {"id": "cohere/north-mini-code:free", "context_length": 256000, "owned_by": "kilo"},
+                {"id": "a-model", "top_provider": {"context_length": 1000000}}
+            ]
+        });
+        let list = parse_model_listing(&body);
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].id, "cohere/north-mini-code:free");
+        assert_eq!(list[0].context_window, Some(256000));
+        assert_eq!(list[0].owned_by.as_deref(), Some("kilo"));
+        assert_eq!(list[1].context_window, Some(1000000));
+    }
+
+    #[test]
+    fn 清单解析_显式免费标记优先() {
+        let body = serde_json::json!({
+            "data": [
+                {"id": "x-free", "isFree": true},
+                {"id": "y-paid", "isFree": false},
+                {"id": "z-pricing-zero", "pricing": {"prompt": "0", "completion": "0"}},
+                {"id": "w-pricing-paid", "pricing": {"prompt": "3", "completion": "15"}},
+                {"id": "v-no-marker"}
+            ]
+        });
+        let list = parse_model_listing(&body);
+        assert_eq!(list[0].is_free, Some(true));
+        assert_eq!(list[1].is_free, Some(false));
+        assert_eq!(list[2].is_free, Some(true));
+        assert_eq!(list[3].is_free, Some(false));
+        assert_eq!(list[4].is_free, None);
+    }
+
+    #[test]
+    fn 清单解析_空data返回空列表() {
+        let body = serde_json::json!({"object": "list"});
+        assert!(parse_model_listing(&body).is_empty());
+    }
+
+    #[test]
+    fn 清单解析_读思考档位菜单() {
+        let body = serde_json::json!({
+            "data": [{"id": "m", "x_ofm_efforts": ["none", "low", "high"]}]
+        });
+        let list = parse_model_listing(&body);
+        assert_eq!(
+            list[0].efforts.as_deref(),
+            Some(["none".to_string(), "low".to_string(), "high".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn 思考字段回落_读delta_reasoning() {
+        // R1:部分兼容端点(免费模型池)用 `reasoning` 而非 `reasoning_content`。
+        let chunk = serde_json::json!({
+            "choices": [{"index": 0, "delta": {"reasoning": "thinking..."}}]
+        });
+        let events = parse_chunk(&chunk);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ChatEvent::ThinkingDelta(s) if s == "thinking..."))
+        );
+    }
+
+    /// R2:错误帧(`data: {"error":{...}}`)必须变成 Error 事件 ——
+    /// 此前整块被丢弃,turn 会以「success + 0 token」收场,真实错误静默丢失。
+    #[test]
+    fn 流内错误帧_产出error事件() {
+        let chunk = serde_json::json!({
+            "error": {
+                "message": "This model is not available in your country",
+                "type": "server_error"
+            }
+        });
+        let events = parse_chunk(&chunk);
+        let err = events
+            .iter()
+            .find_map(|e| match e {
+                ChatEvent::Error(e) => Some(e),
+                _ => None,
+            })
+            .expect("错误帧必须产出 Error 事件");
+        match err {
+            LlmError::Provider { status, message } => {
+                assert_eq!(*status, 200, "HTTP 层确实是 200 —— 错误在流里");
+                assert!(
+                    message.contains("not available in your country"),
+                    "{message}"
+                );
+            }
+            other => panic!("期望 Provider 错误,得到 {other:?}"),
+        }
+        // 不得同时产出正文 —— 错误帧不是内容帧。
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, ChatEvent::ContentDelta(_) | ChatEvent::ThinkingDelta(_)))
+        );
+    }
+
+    /// R2:流内错误帧自报限流时,语义对齐 HTTP 429 —— 走冷却 + failover。
+    #[test]
+    fn 流内错误帧_限流语义对齐429() {
+        let chunk = serde_json::json!({
+            "error": {
+                "message": "Free usage limit reached.",
+                "type": "rate_limit_error",
+                "code": "RATE_LIMIT"
+            }
+        });
+        let events = parse_chunk(&chunk);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ChatEvent::Error(LlmError::RateLimited { .. })))
+        );
+    }
+
+    /// 普通 chunk 不带 `error` 字段时,行为不变(不误伤)。
+    #[test]
+    fn 普通chunk不受流内错误处理影响() {
+        let chunk = serde_json::json!({
+            "id": "x", "model": "m",
+            "choices": [{"index": 0, "delta": {"content": "hi"}}]
+        });
+        let events = parse_chunk(&chunk);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ChatEvent::ContentDelta(s) if s == "hi"))
+        );
+        assert!(!events.iter().any(|e| matches!(e, ChatEvent::Error(_))));
+    }
+
+    #[test]
+    fn 思考字段_两者并存时reasoning_content优先() {
+        let chunk = serde_json::json!({
+            "choices": [{"index": 0, "delta": {
+                "reasoning_content": "primary",
+                "reasoning": "secondary"
+            }}]
+        });
+        let events = parse_chunk(&chunk);
+        let deltas: Vec<&String> = events
+            .iter()
+            .filter_map(|e| match e {
+                ChatEvent::ThinkingDelta(s) => Some(s),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deltas.len(), 1, "只应产出一条思考增量:{deltas:?}");
+        assert_eq!(deltas[0], "primary");
+    }
+
+    #[test]
+    fn 思考字段_都没有时不产出思考事件() {
+        let chunk = serde_json::json!({
+            "choices": [{"index": 0, "delta": {"content": "hi"}}]
+        });
+        let events = parse_chunk(&chunk);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, ChatEvent::ThinkingDelta(_)))
+        );
+    }
+
+    #[test]
     fn base64_roundtrip_known_values() {
         assert_eq!(base64_encode(b""), "");
         assert_eq!(base64_encode(b"f"), "Zg==");
@@ -489,6 +867,7 @@ mod tests {
     #[test]
     fn openai_request_basic() {
         let req = ChatRequest {
+            response_format: None,
             model: "gpt-4o".into(),
             messages: vec![ChatMessage::User(UserContent {
                 blocks: vec![ContentBlock::text("hi")],
@@ -605,6 +984,7 @@ mod tests {
     #[test]
     fn openai_request_body_has_no_cache_control() {
         let req = ChatRequest {
+            response_format: None,
             model: "gpt-4o".into(),
             messages: vec![ChatMessage::User(UserContent {
                 blocks: vec![ContentBlock::text("hi")],
@@ -640,5 +1020,50 @@ mod tests {
             !body.contains("cache_control"),
             "OpenAI 出站 body 不应含 cache_control,wire 是 no-op;got: {body}"
         );
+    }
+    // ── v1.4 B1:response_format 映射 ─────────────────────────────
+
+    #[test]
+    fn openai_response_format_none_omitted() {
+        let req = ChatRequest {
+            model: "gpt-4o".into(),
+            messages: vec![ChatMessage::User(UserContent {
+                blocks: vec![crate::request::ContentBlock::text("hi")],
+            })],
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(OpenAIRequest::from(req)).unwrap();
+        assert!(
+            wire.get("response_format").is_none(),
+            "无 response_format 时不得序列化该字段: {wire}"
+        );
+    }
+
+    #[test]
+    fn openai_response_format_json_object_mapping() {
+        let req = ChatRequest {
+            model: "gpt-4o".into(),
+            response_format: Some(crate::ResponseFormat::JsonObject),
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(OpenAIRequest::from(req)).unwrap();
+        assert_eq!(wire["response_format"]["type"], "json_object");
+    }
+
+    #[test]
+    fn openai_response_format_json_schema_mapping() {
+        let req = ChatRequest {
+            model: "gpt-4o".into(),
+            response_format: Some(crate::ResponseFormat::JsonSchema {
+                name: "answer".into(),
+                schema: serde_json::json!({"type": "object", "properties": {}}),
+                strict: true,
+            }),
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(OpenAIRequest::from(req)).unwrap();
+        assert_eq!(wire["response_format"]["type"], "json_schema");
+        assert_eq!(wire["response_format"]["json_schema"]["name"], "answer");
+        assert_eq!(wire["response_format"]["json_schema"]["strict"], true);
     }
 }

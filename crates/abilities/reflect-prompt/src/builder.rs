@@ -67,18 +67,13 @@ pub fn append_active_mode_section(core: &mut String, mode: reflect_protocol::Per
     if !matches!(mode, reflect_protocol::PermissionMode::Plan) {
         return;
     }
-    // 把段插在 `## Plan Mode`(PLAN_MODE_HEADER)段之后、`## Agent Memory`
-    // 段之前 —— 顺序保证 LLM 看到的是「先知道 Plan mode 规则 → 再知道
-    // 现在我处于 Plan mode → 再注入 agent 记忆」。找到 PLAN_MODE_HEADER
-    // 段末尾(下一个 `## ` 开头或字符串结尾)作插入点。
-    const SECTION: &str = "## Active Mode\n\
-        You are currently in Plan mode (read-only — `write` / `edit` are hidden from your tool list). \
-        Research the codebase, then use the `PlanWrite` tool to write your complete plan as full \
-        Markdown to the plan file (path shown in the per-turn reminder below). Once the plan file \
-        is written, call `ExitPlanMode` to request user approval — it reads the plan from the file. \
-        Do not call `ExitPlanMode` before writing the plan file. Do not keep researching once you \
-        can articulate the plan. Do NOT call `EnterPlanMode` — you are already in Plan mode; calling \
-        it again will trigger a redundant confirmation popup and a tool-denied error.\n";
+    // v1.6:段文案外置为 `runtime.active-mode` section(含 `## Active Mode`
+    // 标题),可经 `.reflect/prompts/*.md` 按模型覆盖;缺失时回落编译期
+    // 内嵌默认(provider-independent 措辞,避免各 provider 措辞漂移)。
+    let section = crate::library()
+        .resolve("")
+        .get_or("runtime.active-mode", "## Active Mode\nYou are currently in Plan mode (read-only — `write` / `edit` are hidden from your tool list). Research the codebase, then use the `PlanWrite` tool to write your complete plan as full Markdown to the plan file (path shown in the per-turn reminder below). Once the plan file is written, call `ExitPlanMode` to request user approval — it reads the plan from the file. Do not call `ExitPlanMode` before writing the plan file. Do not keep researching once you can articulate the plan. Do NOT call `EnterPlanMode` — you are already in Plan mode; calling it again will trigger a redundant confirmation popup and a tool-denied error.\n")
+        .to_string();
     let plan_start = core
         .find(PLAN_MODE_HEADER)
         .expect("compose_core 一定先注入 PLAN_MODE_HEADER,这里不应缺失");
@@ -88,10 +83,10 @@ pub fn append_active_mode_section(core: &mut String, mode: reflect_protocol::Per
         .find("\n## ")
         .map(|rel| plan_start + PLAN_MODE_HEADER.len() + rel + 1)
         .unwrap_or_else(|| core.len());
-    let mut new = String::with_capacity(core.len() + SECTION.len());
+    let mut new = String::with_capacity(core.len() + section.len());
     new.push_str(&core[..insert_pos]);
     new.push('\n');
-    new.push_str(SECTION);
+    new.push_str(&section);
     if insert_pos < core.len() {
         new.push('\n');
         new.push_str(&core[insert_pos..]);

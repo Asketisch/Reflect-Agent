@@ -22,10 +22,13 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use thiserror::Error;
 use tokio::task::JoinSet;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::message_bus::MessageBus;
-use crate::models::{AgentId, DiscussionConfig, DiscussionMessage, DiscussionResult, MessageKind};
+use crate::models::{
+    AgentId, DiscussionConfig, DiscussionMessage, DiscussionResult, JudgeCallback, JudgeVerdict,
+    MessageKind,
+};
 use crate::orchestrator::OrchestratorEvent;
 
 /// 调度循环错误。
@@ -50,13 +53,27 @@ pub enum RuntimeError {
 /// 会被 `DiscussionToolSet` 共享,comm_tools 在 `execute()` 时 `load` 后
 /// 写入 `DiscussionMessage.round`,保证 transcript 里的消息带正确的轮次
 /// 标记(`consensus_window > 1` 的跨轮共识检测依赖于此)。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DiscussionRuntime {
     pub config: DiscussionConfig,
     pub bus: MessageBus,
     /// 共享轮次计数器(v0.2.3+);同 `DiscussionToolSet::round` 必须为同一
     /// `Arc<AtomicU32>` 实例,否则 comm_tools 读不到 runtime 写入的轮次。
     pub round_counter: Arc<AtomicU32>,
+    /// v1.4 C3:裁判回调。`Some` 时每轮结束调它出结构化裁决 —— `agreed`
+    /// 才算共识(自报 Consensus 只是裁判的参考信号);`None`(默认)走
+    /// 纯自报共识的历史行为。裁判故障(回调 Err)时回退自报共识检测,
+    /// 不中断讨论。
+    pub judge: Option<std::sync::Arc<JudgeCallback>>,
+}
+
+impl std::fmt::Debug for DiscussionRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DiscussionRuntime")
+            .field("config", &self.config)
+            .field("has_judge", &self.judge.is_some())
+            .finish()
+    }
 }
 
 impl DiscussionRuntime {
@@ -69,7 +86,15 @@ impl DiscussionRuntime {
             config,
             bus,
             round_counter,
+            judge: None,
         }
+    }
+
+    /// v1.4 C3:挂载裁判回调(链式)。`config.judge = true` 时由
+    /// orchestrator 用工厂构造 LLM 裁判闭包后经本方法注入。
+    pub fn with_judge(mut self, judge: std::sync::Arc<JudgeCallback>) -> Self {
+        self.judge = Some(judge);
+        self
     }
 
     /// 兼容构造:起一个全新的 `Arc<AtomicU32>` 作为轮次计数器(适合单测、
@@ -115,7 +140,10 @@ impl DiscussionRuntime {
                     break 'outer;
                 }
             }
-            if self.check_consensus(round, &mut last_consensus) {
+            if self
+                .run_judge_or_self_consensus(round, &mut last_consensus)
+                .await
+            {
                 return Ok(DiscussionResult::Consensus {
                     final_round: round,
                     summary: last_consensus.clone(),
@@ -191,7 +219,10 @@ impl DiscussionRuntime {
                 while set.join_next().await.is_some() {}
                 break 'outer;
             }
-            if self.check_consensus(round, &mut last_consensus) {
+            if self
+                .run_judge_or_self_consensus(round, &mut last_consensus)
+                .await
+            {
                 return Ok(DiscussionResult::Consensus {
                     final_round: round,
                     summary: last_consensus.clone(),
@@ -212,6 +243,63 @@ impl DiscussionRuntime {
             .into_iter()
             .filter(|m| m.recipients.is_empty() || m.recipients.contains(agent))
             .collect()
+    }
+
+    /// v1.4 C3:每轮结束的共识判定入口。裁判挂载时:每轮都调裁判出裁决
+    /// —— `agreed` 才算共识;未达成时把 blockers 作为裁判消息注入 bus
+    /// (下一轮所有 participant 可见),引导收敛;裁判故障时回退自报
+    /// 共识检测并 warn。未挂载裁判:纯自报共识(历史行为)。
+    async fn run_judge_or_self_consensus(&self, round: u32, last_summary: &mut String) -> bool {
+        if let Some(judge) = self.judge.as_ref() {
+            match judge(round, self.bus.transcript()).await {
+                Ok(v) if v.agreed => {
+                    *last_summary = v.summary;
+                    return true;
+                }
+                Ok(v) => {
+                    self.inject_judge_blockers(round, &v).await;
+                    return false;
+                }
+                Err(e) => {
+                    // 裁判故障:warn 后回退自报共识(保守 —— 不让裁判的
+                    // 意外失败把讨论拖满 max_rounds)。
+                    warn!(round, error = %e, "judge failed; falling back to self-reported consensus");
+                }
+            }
+        }
+        self.check_consensus(round, last_summary)
+    }
+
+    /// v1.4 C3:把裁判的分歧摘要 + blockers 注入 bus(广播,下一轮所有
+    /// participant 的 snapshot 都能看到)。发送者用保留 id `__judge__`
+    /// (bus 不校验发送者是否为 participant,广播会自动排除发送者自身)。
+    async fn inject_judge_blockers(&self, round: u32, v: &JudgeVerdict) {
+        if v.blockers.is_empty() && v.summary.is_empty() {
+            return;
+        }
+        let mut content = format!("[judge] {}", v.summary);
+        if !v.blockers.is_empty() {
+            content.push_str("\n待解决:");
+            for b in &v.blockers {
+                content.push_str(&format!("\n- {b}"));
+            }
+        }
+        if let Err(e) = self
+            .bus
+            .route(DiscussionMessage {
+                id: Default::default(),
+                discussion_id: self.bus.discussion_id(),
+                from: AgentId("__judge__".into()),
+                kind: MessageKind::Utterance,
+                content,
+                recipients: vec![],
+                round,
+                token_usage: Default::default(),
+            })
+            .await
+        {
+            warn!(round, error = %e, "judge blockers inject failed");
+        }
     }
 
     /// 共识检测:扫 transcript,统计"在最近 `consensus_window` 轮内,所有
@@ -319,6 +407,7 @@ mod tests {
             consensus_window,
             max_rounds,
             mailbox_capacity: 8,
+            judge: false,
         };
         let bus = MessageBus::new(
             DiscussionId::new(),
@@ -838,5 +927,142 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // ── v1.4 C3:裁判模式 ────────────────────────────────────────
+
+    use crate::models::JudgeVerdict as JV;
+
+    fn judge_runtime(
+        cfg: DiscussionConfig,
+        bus: MessageBus,
+        judge: Arc<JudgeCallback>,
+    ) -> DiscussionRuntime {
+        DiscussionRuntime::with_default_round(cfg, bus).with_judge(judge)
+    }
+
+    /// 裁决 agreed=true → Consensus(summary 来自裁决)。
+    #[tokio::test]
+    async fn judge_agreed_returns_consensus() {
+        let (cfg, bus) = mk_config(DiscussionMode::Sequential, 3, 1);
+        let rt = judge_runtime(
+            cfg,
+            bus,
+            Arc::new(move |_round, _t| {
+                Box::pin(async move {
+                    Ok(JV {
+                        agreed: true,
+                        summary: "方案A胜出".into(),
+                        blockers: vec![],
+                    })
+                })
+            }),
+        );
+        let r = rt
+            .run_sequential(noop_prompt_for, noop_on_event)
+            .await
+            .unwrap();
+        assert!(
+            matches!(r, DiscussionResult::Consensus { final_round: 0, ref summary } if summary == "方案A胜出"),
+            "got: {r:?}"
+        );
+    }
+
+    /// 裁决未达成 → blockers 注入 bus(下一轮 snapshot 可见);持续拒绝
+    /// 则跑满 max_rounds 返回 NoConsensus。
+    #[tokio::test]
+    async fn judge_blockers_injected_each_round() {
+        let (cfg, bus) = mk_config(DiscussionMode::Sequential, 2, 0); // window=0 关自报
+        let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let calls_c = calls.clone();
+        let bus_c = bus.clone();
+        let rt = judge_runtime(
+            cfg,
+            bus,
+            Arc::new(move |round, transcript| {
+                let calls = calls_c.clone();
+                let bus = bus_c.clone();
+                Box::pin(async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    // 每轮结束时 transcript 里都应有上一轮注入的裁判消息。
+                    if round > 0 {
+                        assert!(
+                            transcript.iter().any(|m| m.from.0 == "__judge__"),
+                            "round {round} 的 transcript 应含上轮 judge 消息"
+                        );
+                    }
+                    let _ = bus; // route 由 runtime 内部完成
+                    Ok(JV {
+                        agreed: false,
+                        summary: "仍有分歧".into(),
+                        blockers: vec!["成本未定".into()],
+                    })
+                })
+            }),
+        );
+        let r = rt
+            .run_sequential(noop_prompt_for, noop_on_event)
+            .await
+            .unwrap();
+        assert!(
+            matches!(r, DiscussionResult::NoConsensus { .. }),
+            "got: {r:?}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "每轮各调一次裁判");
+        // 最终 transcript 含注入的 blockers。
+        let t = rt.bus.transcript();
+        assert!(t.iter().any(|m| m.content.contains("成本未定")));
+    }
+
+    /// 裁决故障(Err)→ 回退自报共识:全员自报仍能达成。
+    #[tokio::test]
+    async fn judge_failure_falls_back_to_self_consensus() {
+        let (cfg, bus) = mk_config(DiscussionMode::Sequential, 3, 1);
+        {
+            let b = bus.clone();
+            for a in &["a", "b", "c"] {
+                b.route(DiscussionMessage {
+                    id: Default::default(),
+                    discussion_id: b.discussion_id(),
+                    from: AgentId((*a).into()),
+                    kind: MessageKind::Consensus,
+                    content: "agree".into(),
+                    recipients: vec![],
+                    round: 0,
+                    token_usage: Default::default(),
+                })
+                .await
+                .unwrap();
+            }
+        }
+        let rt = judge_runtime(
+            cfg,
+            bus,
+            Arc::new(|_round, _t| Box::pin(async { Err("judge llm down".to_string()) })),
+        );
+        let r = rt
+            .run_sequential(noop_prompt_for, noop_on_event)
+            .await
+            .unwrap();
+        assert!(
+            matches!(r, DiscussionResult::Consensus { .. }),
+            "got: {r:?}"
+        );
+    }
+
+    /// JudgeVerdict::parse:纯 JSON / fence 包裹 / 噪声夹带 / 缺字段。
+    #[test]
+    fn judge_verdict_parse_variants() {
+        let v = JV::parse(r#"{"agreed":true,"summary":"ok"}"#).unwrap();
+        assert!(v.agreed);
+        let v =
+            JV::parse("```json\n{\"agreed\":false,\"summary\":\"x\",\"blockers\":[\"a\"]}\n```")
+                .unwrap();
+        assert!(!v.agreed);
+        assert_eq!(v.blockers, vec!["a".to_string()]);
+        let v = JV::parse("判断如下:{\"agreed\":true,\"summary\":\"s\"} 以上").unwrap();
+        assert!(v.agreed);
+        assert!(JV::parse("no json").is_err());
+        assert!(JV::parse(r#"{"summary":"no agreed"}"#).is_err());
     }
 }

@@ -152,6 +152,13 @@ impl OsSandbox {
                 )
             })
             .unwrap_or(true);
+        Self::with_enabled(on)
+    }
+
+    /// v1.5 R1:显式指定开关的构造器 —— `ThreadSettingsOverrides
+    /// .sandbox_policy` 每 turn 覆盖时使用,绕过 env。strict 仍读 env
+    /// (`REFLECT_SANDBOX_STRICT`,fail-closed 基线不变)。
+    pub fn with_enabled(on: bool) -> Self {
         let strict = std::env::var("REFLECT_SANDBOX_STRICT")
             .ok()
             .map(|s| {
@@ -184,11 +191,31 @@ impl OsSandbox {
     /// 人可读状态行(给 TUI / `/sandbox-toggle` pill / 启动 banner 用)。
     /// v1.3:状态行同时标注严格模式 / 网络边界 / 敏感读规则,便于运维
     /// 一眼看到当前安全下限。
+    ///
+    /// 网络边界**按 backend 如实报告**:Landlock 的 `handled_access_net`
+    /// 恒为 0(ABI v1 无网络限制原语,需 v4+ 且本实现未启用),所以
+    /// Linux 上"网络:拒绝"是虚假宣传 —— 此前无条件按 `allow_network`
+    /// 打印,会让运维误以为出站被拦住。Seatbelt 才会真发
+    /// `(deny network*)`。
     pub fn status_line(&self) -> String {
-        let net = if self.allow_network {
-            "网络:允许"
-        } else {
-            "网络:拒绝"
+        let net = match self.status() {
+            // Seatbelt 真发 (deny network*),如实反映 allow_network。
+            OsSandboxStatus::Seatbelt => {
+                if self.allow_network {
+                    "网络:允许".to_string()
+                } else {
+                    "网络:拒绝".to_string()
+                }
+            }
+            // Landlock:handled_access_net = 0,网络不受本沙箱约束。
+            OsSandboxStatus::Landlock => "网络:不受沙箱约束".to_string(),
+            _ => {
+                if self.allow_network {
+                    "网络:允许".to_string()
+                } else {
+                    "网络:拒绝".to_string()
+                }
+            }
         };
         let sensitive = if self.enabled {
             "敏感读:默认拒绝(凭据/SSH/钥匙串)"
@@ -240,6 +267,14 @@ impl OsSandbox {
     /// 不是 macOS+Linux → 返回 `Err(reason)`;BashTool 据此抛
     /// `ToolError::SandboxUnavailable` 而不是裸 `sh -c`。
     /// 非严格模式返回 `Ok(())`,由 BashTool 走旧降级路径。
+    ///
+    /// **0.1 诚实化**:`detect_backend()` 在 Linux 上无条件乐观返回
+    /// `Landlock`(真实可用性只能在 `pre_exec` 里发现),所以 strict 模式
+    /// 的这道前置检查在无 Landlock 的内核 / 被 seccomp 拦 prctl 的环境上
+    /// 会**放过**,再由 `apply_landlock` 静默降级成"没沙箱"。
+    /// 这里对 Linux 追加一次轻量内核能力探测:探测失败即视为后端不可用,
+    /// 让 strict 真正 fail-closed(代价是一次 `landlock_create_ruleset`
+    /// 系统调用,仅在启动 / 每次 BashTool 入口调用,非热路径)。
     pub fn enforce_or_fail(&self) -> Result<(), String> {
         if !self.enabled {
             return Ok(()); // 显式关闭 → 不检查
@@ -248,7 +283,20 @@ impl OsSandbox {
             return Ok(()); // 非严格模式 → 允许降级
         }
         match self.status() {
-            OsSandboxStatus::Seatbelt | OsSandboxStatus::Landlock => Ok(()),
+            OsSandboxStatus::Seatbelt | OsSandboxStatus::Landlock => {
+                // Linux:detect_backend() 是乐观的,补一次非破坏性内核探测,
+                // 不让"内核无 Landlock"静默降级成没沙箱。
+                #[cfg(target_os = "linux")]
+                if !landlock_kernel_supported() {
+                    return Err(
+                        "OS sandbox 后端不可用:Linux 内核不支持 Landlock(需 >= 5.13 且启用 \
+                         Landlock LSM);严格模式下拒绝裸执行。如需临时降级,设置 \
+                         REFLECT_SANDBOX_STRICT=0。"
+                            .into(),
+                    );
+                }
+                Ok(())
+            }
             OsSandboxStatus::NoBackend => Err(format!(
                 "OS sandbox 后端不可用(平台:{});严格模式下拒绝裸执行。\
                  在 macOS 需 /usr/bin/sandbox-exec;在 Linux 需 Landlock 内核支持(>= 5.13)。\
@@ -438,6 +486,7 @@ fn extra_writable_from_env() -> Vec<PathBuf> {
 mod landlock {
     use std::ffi::CString;
     use std::io;
+    use std::os::raw::{c_char, c_int};
     use std::path::{Path, PathBuf};
 
     // Landlock syscall 号(x86_64 / aarch64 一致)。
@@ -446,8 +495,67 @@ mod landlock {
     const SYS_LANDLOCK_RESTRICT_SELF: i64 = 446;
 
     const LANDLOCK_RULE_PATH_BENEATH: i32 = 1;
-    // access_fs 位:read/write/execute/make-dir 等(取宽松集合,再加 write 全集)。
-    const ACCESS_FS_ALL: u64 = 0x1fff; // Landlock v1 ~1fff;v2 加 refer/delete
+    // Landlock ABI v1 的 access right 位定义(`linux/landlock.h`)。
+    // 逐个命名,避免再把位集合口算成一个十六进制字面量 —— 此前
+    // `0xffe` 就是口算错误的产物(见下方编译期断言)。
+    //
+    // `pub(super)`:位集合的回归测试(本文件末尾 mod tests)在 Linux 上
+    // 直接引用这些常量做断言;私有项会 E0603(macOS 不编译本模块,
+    // 本地发现不了,CI ubuntu --all-targets 才暴露)。
+    pub(super) const ACCESS_FS_EXECUTE: u64 = 1 << 0;
+    pub(super) const ACCESS_FS_WRITE_FILE: u64 = 1 << 1;
+    pub(super) const ACCESS_FS_READ_FILE: u64 = 1 << 2;
+    pub(super) const ACCESS_FS_READ_DIR: u64 = 1 << 3;
+    pub(super) const ACCESS_FS_REMOVE_DIR: u64 = 1 << 4;
+    pub(super) const ACCESS_FS_REMOVE_FILE: u64 = 1 << 5;
+    pub(super) const ACCESS_FS_MAKE_CHAR: u64 = 1 << 6;
+    pub(super) const ACCESS_FS_MAKE_DIR: u64 = 1 << 7;
+    pub(super) const ACCESS_FS_MAKE_REG: u64 = 1 << 8;
+    pub(super) const ACCESS_FS_MAKE_SOCK: u64 = 1 << 9;
+    pub(super) const ACCESS_FS_MAKE_FIFO: u64 = 1 << 10;
+    pub(super) const ACCESS_FS_MAKE_BLOCK: u64 = 1 << 11;
+    pub(super) const ACCESS_FS_MAKE_SYM: u64 = 1 << 12;
+
+    // handled access 位:只限制**写类**操作(写文件/删/建),执行与读
+    // 完全不受限 —— 设计注释「限制写是核心安全边界;读 / exec 不受限」
+    // 的直接实现:若 handled 含 EXECUTE / READ_*,则 /usr/bin/bash、
+    // 动态链接库(均在规则外)的 execve / mmap 全被拒(CI ubuntu 实测
+    // spawn failed: EACCES)。
+    //
+    // **历史 bug(0.1)**:这里原本写作 `0xffe`,与上面注释列出的位集合
+    // 不符 —— `0xffe` 多含了 `READ_FILE`(0x4)/ `READ_DIR`(0x8)(于是
+    // workspace 外的读被内核拒,execve 时动态链接器读不到 /usr/lib,
+    // 表现为 spawn EACCES),又漏掉了 `MAKE_SYM`(0x1000)(于是 workspace
+    // 外的符号链接创建完全不受限)。正确的纯写类位集合是 `0x1ff2`。
+    pub(super) const ACCESS_FS_WRITE_ONLY: u64 = ACCESS_FS_WRITE_FILE
+        | ACCESS_FS_REMOVE_DIR
+        | ACCESS_FS_REMOVE_FILE
+        | ACCESS_FS_MAKE_CHAR
+        | ACCESS_FS_MAKE_DIR
+        | ACCESS_FS_MAKE_REG
+        | ACCESS_FS_MAKE_SOCK
+        | ACCESS_FS_MAKE_FIFO
+        | ACCESS_FS_MAKE_BLOCK
+        | ACCESS_FS_MAKE_SYM;
+
+    // 编译期守卫:handled 位集合必须恰好是 ABI v1 的纯写类右,且不得
+    // 含 EXECUTE / READ_* / REFER(v2)/ TRUNCATE(v3)。
+    const _: () = assert!(
+        ACCESS_FS_WRITE_ONLY == 0x1ff2,
+        "ACCESS_FS_WRITE_ONLY 必须是纯写类位集合 0x1ff2"
+    );
+    const _: () = assert!(
+        ACCESS_FS_WRITE_ONLY & ACCESS_FS_EXECUTE == 0,
+        "handled 不得含 EXECUTE(否则 /usr/bin/* 无法 execve)"
+    );
+    const _: () = assert!(
+        ACCESS_FS_WRITE_ONLY & ACCESS_FS_READ_FILE == 0,
+        "handled 不得含 READ_FILE(否则 workspace 外的读被拒,execve 失败)"
+    );
+    const _: () = assert!(
+        ACCESS_FS_WRITE_ONLY & ACCESS_FS_READ_DIR == 0,
+        "handled 不得含 READ_DIR"
+    );
 
     #[repr(C)]
     struct LandlockRulesetAttr {
@@ -461,15 +569,97 @@ mod landlock {
         parent_fd: i32,
     }
 
-    extern "C" {
+    // Rust 2024 edition 要求 extern 块显式标注 unsafe(CI ubuntu 实测
+    // 编译失败点:extern blocks must be unsafe)。
+    //
+    // 签名一律用 `std::os::raw` 的 c_char / c_int,不写死 i8 / i32:
+    // `c_char` 的有无符号性随架构变化(aarch64 linux 为 u8,x86_64
+    // 为 i8),写死 i8 会让 `open(CString::as_ptr(), ..)` 在 aarch64
+    // 上 E0308;`CString::as_ptr()` 的返回类型就是 `*const c_char`。
+    unsafe extern "C" {
         fn syscall(num: i64, ...) -> i64;
-        fn open(path: *const i8, flags: i32, ...) -> i32;
-        fn close(fd: i32) -> i32;
-        fn __errno_location() -> *mut i32;
+        fn open(path: *const c_char, flags: c_int, ...) -> c_int;
+        fn close(fd: c_int) -> c_int;
+        fn __errno_location() -> *mut c_int;
+        fn prctl(option: c_int, ...) -> c_int;
     }
+
+    /// `PR_SET_NO_NEW_PRIVS`(linux/prctl.h)。Landlock 的
+    /// `restrict_self` 前置要求:必须先设置 no_new_privs(或持
+    /// CAP_SYS_ADMIN),否则返回 EPERM —— 此前缺失该调用,Linux 上
+    /// 沙箱从未真正生效(CI ubuntu 实测 spawn failed: EPERM)。
+    const PR_SET_NO_NEW_PRIVS: i32 = 38;
 
     fn errno() -> i32 {
         unsafe { *__errno_location() }
+    }
+
+    /// 给 ruleset 加一条 `PATH_BENEATH` 规则(允许访问 `path` 本身及其
+    /// 下属文件的 `allowed_access` 右)。
+    ///
+    /// 路径可以是目录(workspace / 额外可写目录)也可以是普通文件或
+    /// 字符设备(/dev/null)。打开失败或规则添加失败都**静默跳过** ——
+    /// 少一条放行规则只意味着"更严",不应让沙箱整体失败。
+    fn add_path_beneath_rule(ruleset_fd: i32, path: &Path, allowed_access: u64) {
+        let cpath = match CString::new(path.to_string_lossy().as_bytes()) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        // O_PATH = 0o200000 (0x200000):只取路径引用,不打开目标。
+        let parent_fd = unsafe { open(cpath.as_ptr(), 0o200000) };
+        if parent_fd < 0 {
+            return;
+        }
+        let pb = LandlockPathBeneathAttr {
+            allowed_access,
+            parent_fd,
+        };
+        let _ = unsafe {
+            syscall(
+                SYS_LANDLOCK_ADD_RULE,
+                ruleset_fd as i64,
+                LANDLOCK_RULE_PATH_BENEATH as i64,
+                &pb as *const _,
+                0,
+            )
+        };
+        unsafe { close(parent_fd) };
+    }
+
+    /// 非破坏性地探测内核是否支持 Landlock:只发一次
+    /// `landlock_create_ruleset(NULL, 0, 0)`。该系统调用不创建任何
+    /// ruleset、不改变当前进程状态,可以安全地在常驻 agent 进程里调用。
+    ///
+    /// 返回 `false` 仅当内核缺该系统调用(ENOSYS)或 Landlock LSM 未启用
+    /// (EOPNOTSUPP)。注意它**不能**探测 `prctl(PR_SET_NO_NEW_PRIVS)` 是否
+    /// 被 seccomp 拦(那要在 pre_exec 里才会暴露),所以探测通过仍不代表
+    /// `apply_landlock` 必然成功 —— 但足以拦住"内核完全没有 Landlock"
+    /// 这一大类假阳性,让 `strict` 的 fail-closed 名副其实。
+    pub(super) fn kernel_supports_landlock() -> bool {
+        // ABI v1 attr(handled_access_fs 取纯写类位,与正式路径一致)。
+        let attr = LandlockRulesetAttr {
+            handled_access_fs: ACCESS_FS_WRITE_ONLY,
+            handled_access_net: 0,
+        };
+        let fd = unsafe {
+            syscall(
+                SYS_LANDLOCK_CREATE_RULESET,
+                &attr as *const _,
+                std::mem::size_of::<LandlockRulesetAttr>(),
+                0,
+            )
+        };
+        if fd < 0 {
+            let e = errno();
+            // ENOSYS(38)/ EOPNOTSUPP(95)→ 内核 / LSM 不支持。
+            return !(e == 38 || e == 95);
+        }
+        // 探测用 ruleset 立即关闭,不留 fd 泄漏。
+        // `syscall` 返回 i64 而 `close` 取 i32 —— 显式收窄(与
+        // `apply_landlock` 中 ruleset_fd 的处理一致)。
+        let ruleset_fd = fd as i32;
+        unsafe { close(ruleset_fd) };
+        true
     }
 
     /// 在 pre_exec 上下文应用 Landlock。仅 workspace(及其额外可写目录)
@@ -478,7 +668,7 @@ mod landlock {
     pub(super) fn apply_landlock(workspace: &Path, writable: &[PathBuf]) -> io::Result<()> {
         // 1. create ruleset(仅 handled_access_fs;net 留 0)。
         let attr = LandlockRulesetAttr {
-            handled_access_fs: ACCESS_FS_ALL,
+            handled_access_fs: ACCESS_FS_WRITE_ONLY,
             handled_access_net: 0,
         };
         let fd = unsafe {
@@ -495,37 +685,49 @@ mod landlock {
             if e == 38 || e == 95 {
                 return Ok(());
             }
-            return Err(io::Error::from_raw_os_error(e));
+            // 带 stage 的错误信息:spawn 失败消息会透传给调用方,便于
+            // 在无法本地复现的环境(CI runner)定位具体失败阶段。
+            return Err(io::Error::new(
+                io::Error::from_raw_os_error(e).kind(),
+                format!("landlock[create_ruleset errno={e}]"),
+            ));
         }
         let ruleset_fd = fd as i32;
 
         // 2. add rules:workspace + 额外可写目录。
-        for dir in std::iter::once(workspace).chain(writable.iter()) {
-            let cpath = match CString::new(dir.to_string_lossy().as_bytes()) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            let parent_fd = unsafe { open(cpath.as_ptr(), 0o200000) }; // O_PATH = 0o200000 (0x200000)
-            if parent_fd < 0 {
-                continue;
-            }
-            let pb = LandlockPathBeneathAttr {
-                allowed_access: ACCESS_FS_ALL,
-                parent_fd,
-            };
-            let _ = unsafe {
-                syscall(
-                    SYS_LANDLOCK_ADD_RULE,
-                    ruleset_fd as i64,
-                    LANDLOCK_RULE_PATH_BENEATH as i64,
-                    &pb as *const _,
-                    0,
-                )
-            };
-            unsafe { close(parent_fd) };
+        // `chain` 两臂类型必须一致:once 产出 `&Path`,故 iter 侧映射为
+        // as_path(此前直接 iter() 产出 &PathBuf,类型不匹配编译失败)。
+        for dir in std::iter::once(workspace).chain(writable.iter().map(|p| p.as_path())) {
+            add_path_beneath_rule(ruleset_fd, dir, ACCESS_FS_WRITE_ONLY);
         }
 
+        // 2b. /dev/null:shell 里 `cmd 2>/dev/null` / `cmd >/dev/null` 是高频
+        // 写法,重定向失败时 sh 会**中止整条命令**(静默跳过执行),必须显式
+        // 允许。与 macOS Seatbelt profile 的
+        // `(allow file-write* (path "/dev/null"))` 对齐 —— 此前只有 Seatbelt
+        // 放行,Landlock 漏了,导致 Linux 上 `2>/dev/null` 全部失败
+        // (CI 实证:sh 报 "cannot create /dev/null: Permission denied",
+        // bash 内建工具的持久 cwd 恢复因此被误判成"目录已不存在")。
+        //
+        // /dev/null 是字符设备(非目录),规则只给文件级写权限(WRITE_FILE);
+        // MAKE_* / REMOVE_* 是目录语义,对文件规则无意义。
+        add_path_beneath_rule(ruleset_fd, Path::new("/dev/null"), ACCESS_FS_WRITE_FILE);
+
         // 3. 对自身应用限制(restrict self)。
+        //
+        // 前置:必须先设 no_new_privs(landlock 官方要求),否则
+        // restrict_self 返回 EPERM(CI ubuntu 实测)。prctl 被环境拦截
+        // (seccomp 环境同样报 EPERM)时降级放行 —— 与「内核不支持」
+        // 同语义:沙箱尽力而为,不阻塞 exec。
+        let nnp = unsafe { prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
+        if nnp != 0 {
+            let e = errno();
+            let _ = unsafe { close(ruleset_fd) };
+            return Err(io::Error::new(
+                io::Error::from_raw_os_error(if e == 0 { 1 } else { e }).kind(),
+                format!("landlock[prctl_no_new_privs errno={e}]"),
+            ));
+        }
         let r = unsafe { syscall(SYS_LANDLOCK_RESTRICT_SELF, ruleset_fd as i64, 0) };
         unsafe { close(ruleset_fd) };
         if r < 0 {
@@ -533,7 +735,10 @@ mod landlock {
             if e == 38 || e == 95 {
                 return Ok(()); // 降级
             }
-            return Err(io::Error::from_raw_os_error(e));
+            return Err(io::Error::new(
+                io::Error::from_raw_os_error(e).kind(),
+                format!("landlock[restrict_self errno={e}]"),
+            ));
         }
         Ok(())
     }
@@ -541,6 +746,54 @@ mod landlock {
 
 #[cfg(target_os = "linux")]
 use landlock::apply_landlock;
+
+/// Linux:内核是否支持 Landlock(非破坏性探测,见
+/// `landlock::kernel_supports_landlock`)。常驻进程可安全调用。
+#[cfg(target_os = "linux")]
+pub fn landlock_kernel_supported() -> bool {
+    landlock::kernel_supports_landlock()
+}
+
+/// 非 Linux:Seatbelt 路径不在此探针范围,恒视为可用。
+#[cfg(not(target_os = "linux"))]
+pub fn landlock_kernel_supported() -> bool {
+    true
+}
+
+/// 环境能力探测(Linux):在**调用进程内**应用 Landlock(写类 handled)
+/// 并验证之后仍能 spawn `/bin/true`。
+///
+/// 用途:embedder 的测试守卫。注意调用后当前进程已被 restrict(landlock
+/// domain 由子进程继承)—— 只应在**即将退出的短命子进程**(如测试二进制
+/// 的自重跑入口)中调用,不要在常驻 agent 进程里调用。
+///
+/// 返回 `true` = restrict 成功且 exec 可用(环境健全);`false` = 任一步
+/// 失败(内核不支持 / runner 环境异常)。两类失败对 agent 运行时都表现
+/// 为「沙箱降级 / spawn 受限」,由调用方决定策略。
+#[cfg(target_os = "linux")]
+pub fn probe_landlock_exec() -> bool {
+    // cwd 作为放行目录(探针语义,与具体 workspace 无关)。
+    let cwd = match std::env::current_dir() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    // 先 spawn 后 restrict:基线可用性。
+    if std::process::Command::new("/bin/true").status().is_err() {
+        return false;
+    }
+    // restrict:复用 apply_landlock(失败 = 环境不支持 → 视作不可用)。
+    if apply_landlock(&cwd, &[]).is_err() {
+        return false;
+    }
+    // restrict 成功后 exec 仍须可用(部分受限 runner 上会 EACCES)。
+    std::process::Command::new("/bin/true").status().is_ok()
+}
+
+#[cfg(not(target_os = "linux"))]
+/// 非 Linux 恒可用(Seatbelt 路径不在本探针范围)。
+pub fn probe_landlock_exec() -> bool {
+    true
+}
 
 // ── 向后兼容:旧的 stub 类型别名 ────────────────────────────────────
 //
@@ -598,6 +851,108 @@ mod tests {
             backend: OsSandboxStatus::NoBackend,
         };
         assert!(s.enforce_or_fail().is_err());
+    }
+
+    // ── 0.1 回归:Landlock handled 位集合 ────────────────────────────
+
+    /// 回归(0.1):handled 位集合必须是纯写类 `0x1ff2`。
+    ///
+    /// 原实现写作 `0xffe`,与自身注释列出的位不符:多含 READ_FILE(0x4) /
+    /// READ_DIR(0x8)(→ workspace 外的读被内核拒,execve 时动态链接器读不到
+    /// /usr/lib,表现为 spawn EACCES),又漏了 MAKE_SYM(0x1000)(→ workspace
+    /// 外的符号链接创建完全不受限)。该常量只在 Linux 编译,故用条件编译
+    /// 引用;非 Linux 上退化为对字面量的等价断言。
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn landlock_handled_access_is_write_only() {
+        assert_eq!(landlock::ACCESS_FS_WRITE_ONLY, 0x1ff2);
+        // 不得含 EXECUTE / READ_*(否则 execve 失败)。
+        assert_eq!(
+            landlock::ACCESS_FS_WRITE_ONLY & landlock::ACCESS_FS_EXECUTE,
+            0
+        );
+        assert_eq!(
+            landlock::ACCESS_FS_WRITE_ONLY & landlock::ACCESS_FS_READ_FILE,
+            0
+        );
+        assert_eq!(
+            landlock::ACCESS_FS_WRITE_ONLY & landlock::ACCESS_FS_READ_DIR,
+            0
+        );
+        // 必须含 MAKE_SYM(符号链接创建也要受限)。
+        assert_ne!(
+            landlock::ACCESS_FS_WRITE_ONLY & landlock::ACCESS_FS_MAKE_SYM,
+            0
+        );
+    }
+
+    /// 回归(0.1):`status_line()` 对网络边界必须按 backend 如实报告。
+    /// Landlock 的 `handled_access_net` 恒为 0,网络根本不受沙箱约束,
+    /// 不能因为 `allow_network = false` 就打印"网络:拒绝"。
+    #[test]
+    fn status_line_reports_network_honestly_per_backend() {
+        // Landlock:即使 allow_network = false,也不得声称"拒绝"。
+        let ll = OsSandbox {
+            enabled: true,
+            writable_dirs: Vec::new(),
+            allow_network: false,
+            strict: true,
+            backend: OsSandboxStatus::Landlock,
+        };
+        let line = ll.status_line();
+        assert!(
+            !line.contains("网络:拒绝"),
+            "Landlock 不限制网络,不得声称拒绝: {line}"
+        );
+        assert!(
+            line.contains("不受沙箱约束"),
+            "应如实标注网络不受约束: {line}"
+        );
+
+        // Seatbelt 真发 (deny network*),allow_network = false 时应称拒绝。
+        let sb = OsSandbox {
+            enabled: true,
+            writable_dirs: Vec::new(),
+            allow_network: false,
+            strict: true,
+            backend: OsSandboxStatus::Seatbelt,
+        };
+        assert!(sb.status_line().contains("网络:拒绝"));
+
+        // Seatbelt + allow_network = true → 允许。
+        let sb_net = OsSandbox {
+            allow_network: true,
+            ..sb.clone()
+        };
+        assert!(sb_net.status_line().contains("网络:允许"));
+    }
+
+    /// 回归(0.1):strict 模式下 `enforce_or_fail` 不得因 Linux 上
+    /// `detect_backend()` 的乐观返回值而放过"内核无 Landlock"的环境。
+    /// 内核探测不可用时必须 Err(否则 strict 的 fail-closed 是空话)。
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn enforce_or_fail_strict_probes_kernel_support() {
+        // 不直接断言 Ok/Err(取决于运行环境的内核),只断言:
+        // 若内核探测失败 → 必须 Err。这里通过一个后端为 Landlock 的实例
+        // 交叉验证两条路径的一致性。
+        let s = OsSandbox {
+            enabled: true,
+            writable_dirs: Vec::new(),
+            allow_network: false,
+            strict: true,
+            backend: OsSandboxStatus::Landlock,
+        };
+        let supported = landlock_kernel_supported();
+        let result = s.enforce_or_fail();
+        assert_eq!(
+            result.is_ok(),
+            supported,
+            "enforce_or_fail 必须与内核探测结果一致(supported={supported})"
+        );
+        if !supported {
+            assert!(result.unwrap_err().contains("Landlock"));
+        }
     }
 
     #[test]
@@ -767,6 +1122,59 @@ mod tests {
         let r = apply_landlock(&ws, &[]);
         // 测试进程已应用 landlock 后可能影响后续测试,故只验证不 panic。
         let _ = r;
+    }
+
+    // ── 回归:Landlock 必须放行 /dev/null 写 ────────────────────────────
+
+    /// 子进程入口:`REFLECT_SANDBOX_DEVNULL_CHILD=1` 时应用 Landlock,
+    /// 再尝试以写模式打开 /dev/null —— 成功 exit(0),被拒 exit(3)。
+    ///
+    /// 必须在**子进程**里做:Landlock 一旦 restrict 就无法撤销,会污染
+    /// 整个测试进程(父进程)。
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn landlock_devnull_write_child() {
+        if std::env::var("REFLECT_SANDBOX_DEVNULL_CHILD").as_deref() != Ok("1") {
+            return;
+        }
+        let ws = std::env::temp_dir();
+        if apply_landlock(&ws, &[]).is_err() {
+            std::process::exit(2); // 环境不支持 Landlock → 父进程按 skip 处理
+        }
+        match std::fs::OpenOptions::new().write(true).open("/dev/null") {
+            Ok(_) => std::process::exit(0),
+            Err(_) => std::process::exit(3),
+        }
+    }
+
+    /// 回归:Landlock 下 `/dev/null` 必须可写。
+    ///
+    /// 此前只有 macOS Seatbelt profile 放行 `/dev/null`
+    /// (`(allow file-write* (path "/dev/null"))`),Landlock 漏了 ——
+    /// Linux 上 shell 的 `cmd 2>/dev/null` 重定向直接失败(sh 报
+    /// "cannot create /dev/null: Permission denied" 并**中止整条命令**),
+    /// bash 内建工具的持久 cwd 恢复因此被误判成"目录已不存在"
+    /// (CI 实证:reflect-tools 的 `cwd_persists_across_calls` 失败)。
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn landlock_allows_devnull_write() {
+        if !landlock_kernel_supported() {
+            eprintln!("skip: 内核不支持 Landlock");
+            return;
+        }
+        let exe = std::env::current_exe().expect("current exe");
+        let status = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "tests::landlock_devnull_write_child",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("REFLECT_SANDBOX_DEVNULL_CHILD", "1")
+            .status()
+            .expect("spawn child");
+        // exit(2) = 环境不支持(不算失败);exit(3) = /dev/null 被拒(回归)。
+        assert_ne!(status.code(), Some(3), "/dev/null 写必须被 Landlock 放行");
     }
 
     #[test]

@@ -18,16 +18,20 @@
 //! 完整规范参见 `docs/protocol.md`。
 
 pub mod ask_user_input;
+pub mod bash_command;
 pub mod error;
 pub mod event;
 pub mod event_msg;
 pub mod item;
 pub mod op;
+pub mod op_prompt;
 pub mod question;
 pub mod recorder;
+pub mod stats;
 pub mod submission;
 pub mod text;
 
+pub use bash_command::{BASH_COMMAND_KEYS, resolve_bash_command, split_shell_segments};
 pub use error::ProtocolError;
 pub use event::{EVENT_ID_NONE, Event};
 pub use event_msg::{
@@ -37,25 +41,28 @@ pub use event_msg::{
     LspServerFailedEvent, LspServerStartedEvent, McpServerFailedEvent, McpServerStartedEvent,
     McpToolInvokedEvent, McpTransportMirror, PermissionBubbleEvent, PermissionModeChangedEvent,
     PlanApprovedEvent, PlanDraftUpdatedEvent, PlanReadyEvent, PlanRejectedEvent, PlanRequestEvent,
-    PlanStepEvent, PlanStepStatus, PluginLoadedEvent, QuotaExhaustedEvent, RoutingEvent,
-    RoutingEventKind, StreamErrorEvent, ThinkingDelta, TokenCountEvent, TokenUsage,
-    ToolCallArgsDeltaEvent, ToolCallBeginEvent, ToolCallEndEvent, ToolExecutionRequestEvent,
-    TriedCredential,
+    PlanStepEvent, PlanStepStatus, PluginLoadedEvent, PromptListEvent, PromptSwitchedEvent,
+    QuotaExhaustedEvent, RoutingEvent, RoutingEventKind, StreamErrorEvent, SubagentProgressEvent,
+    SubagentProgressKind, SubagentRunStateMirror, SubagentStatusEvent, SubagentStatusSnapshot,
+    ThinkingDelta, TokenCountEvent, TokenUsage, ToolCallArgsDeltaEvent, ToolCallBeginEvent,
+    ToolCallEndEvent, ToolCallOutputDeltaEvent, ToolExecutionRequestEvent, TriedCredential,
     TurnAbortedEvent, TurnCompleteEvent, TurnRewoundEvent, TurnStartedEvent, TurnStatus,
 };
 pub use item::{
     ApprovalPolicy, ContentBlock, PermissionMode, PlanApprovalChoice, PlanId,
     ReasoningEffortMirror, ReviewDecision, RiskLevel, SandboxPolicy, SessionConfiguredEvent,
-    ThreadId, ThreadSettingsOverrides, ToolError, ToolOutput, TurnId, UserInputItem,
-    is_edit_tool_name,
+    SteeringPriorityMirror, ThreadId, ThreadSettingsOverrides, ToolError, ToolOutput, TurnId,
+    UserInputItem, is_edit_tool_name,
 };
 pub use op::{Op, RemoteToolSpec};
+pub use op_prompt::PromptAction;
 pub use question::{
     Answer, AskUserAnswer, AskUserQuestionEvent, MAX_HEADER_CHARS, MAX_OPTIONS, MAX_QUESTIONS,
     MIN_OPTIONS, Question, QuestionError, QuestionOption,
 };
 pub use recorder::{
-    MessageRole, NullRecorder, RolloutRecord, RolloutRecorder, SessionInfo, derive_title,
+    MemoryOp, MessageRole, NullRecorder, RolloutRecord, RolloutRecorder, SessionInfo, derive_title,
 };
+pub use stats::{ModelUsage, SessionStats};
 pub use submission::{Submission, W3cTraceContext};
-pub use text::truncate_utf8;
+pub use text::{floor_char_boundary, truncate_chars, truncate_str, truncate_string_in_place};

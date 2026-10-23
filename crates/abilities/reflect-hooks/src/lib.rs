@@ -9,7 +9,7 @@
 #![allow(clippy::option_if_let_else)]
 #![allow(clippy::nonminimal_bool)]
 #![allow(clippy::manual_div_ceil)]
-//! `reflect-hooks` —— Hook trait、HookEngine、5 类事件、5 种决策、内置 hook。
+//! `reflect-hooks` —— Hook trait、HookEngine、12 类事件、7 种决策、内置 hook。
 //!
 //! 协议参见 `docs/tools-and-hooks.md §4`。`PermissionMode` 从
 //! `reflect-protocol` 再导出(其实际定义位于该 crate,以打破
@@ -24,6 +24,7 @@ pub mod engine;
 pub mod event;
 pub mod file_read_state;
 pub mod hook;
+pub mod shell;
 
 pub use abort::HookAbortSignal;
 pub use bash_classify::{BashCommandClass, classify_command};
@@ -32,6 +33,7 @@ pub use engine::HookEngine;
 pub use event::{HookContext, HookEvent, HookEventKind, StopReason};
 pub use file_read_state::{DenyReason, FileReadStateTracker, ReadRecord, SharedFileReadState};
 pub use hook::{Hook, HookError};
+pub use shell::{DEFAULT_SHELL_HOOK_TIMEOUT, ShellHook, wildcard_match};
 
 // 再导出 PermissionMode,便于把其视作 hook 协议一部分的用户使用
 // (确实如此 —— 它出现在 `HookDecision::PermissionOverride` 中)。

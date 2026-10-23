@@ -10,7 +10,7 @@ const WARN: &str = "!";
 ///
 /// 检查项(config / provider / rollout / MCP / LSP / plugins / rustc / sessions),
 /// 整体 exit code 0(doctor 是诊断,不是校验)。
-pub fn run(check_network: bool) -> anyhow::Result<()> {
+pub async fn run(check_network: bool) -> anyhow::Result<()> {
     let cfg = load_default();
     let config_path = default_config_path();
 
@@ -45,7 +45,26 @@ pub fn run(check_network: bool) -> anyhow::Result<()> {
         println!("[skip]   provider  network probe skipped (pass --check-network to enable)");
     }
 
-    // ── 3. rollout 目录(rollout dir)──
+    // ── 3. 模型清单(model list)──
+    // 清单实时取自 provider 接口 —— 免费模型池的成员集合随时会变,
+    // 这一项告诉用户「现在到底有哪些模型可用」。
+    if check_network {
+        let registry = std::sync::Arc::new(reflect_llm::ModelRegistry::new());
+        if let Err(e) = cfg.apply_to_registry(&registry) {
+            println!("{WARN} models    cannot build provider from config: {e}");
+        } else {
+            match crate::models::doctor_summary(&cfg, &registry).await {
+                Some(summary) => println!("{OK} models    {summary}"),
+                None => println!(
+                    "[skip]   models    no [active].provider set; skipped model list probe"
+                ),
+            }
+        }
+    } else {
+        println!("[skip]   models    model list probe skipped (pass --check-network to enable)");
+    }
+
+    // ── 4. rollout 目录(rollout dir)──
     let rollout_base = reflect_rollout::path::default_base();
     if rollout_base.exists() {
         println!(
@@ -59,27 +78,25 @@ pub fn run(check_network: bool) -> anyhow::Result<()> {
         );
     }
 
-    // ── 4. MCP 服务器(MCP servers)──
+    // ── 5. MCP 服务器(MCP servers)──
     check_mcp(&cfg);
 
-    // ── 5. LSP 服务器(LSP servers)──
+    // ── 6. LSP 服务器(LSP servers)──
     check_lsp(&cfg);
 
-    // ── 6. 插件(Plugins)──
+    // ── 7. 插件(Plugins)──
     check_plugins(&cfg);
 
-    // ── 7. rustc 与 workspace 版本(rustc + workspace version)──
-    let rustc = std::process::Command::new("rustc")
-        .arg("--version")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "rustc not on PATH".to_string());
+    // ── 8. rustc 与 workspace 版本(rustc + workspace version)──
+    // v1.6:探测加超时 + stdin 置 null —— `rustc` 可能是 rustup shim,
+    // 空 HOME 下会触发工具链网络下载而无限阻塞(e2e step 12 实测挂死
+    // 25 分钟);诊断命令不允许卡死整个 doctor。
+    let rustc = run_probe_with_timeout("rustc", &["--version"], std::time::Duration::from_secs(5))
+        .unwrap_or_else(|| "rustc not on PATH (or probe timed out)".to_string());
     println!("[env]    rustc     {rustc}");
     println!("[env]    package   reflect {}", env!("CARGO_PKG_VERSION"));
 
-    // ── 8. session 计数(session count)──
+    // ── 9. session 计数(session count)──
     match list_sessions(&rollout_base) {
         Ok(sessions) => println!(
             "[data]   sessions  {} found under {}",
@@ -89,7 +106,7 @@ pub fn run(check_network: bool) -> anyhow::Result<()> {
         Err(e) => println!("{WARN} sessions  list_sessions failed: {e}"),
     }
 
-    // ── 9. 集成桩(integration stubs,P2/P3)──
+    // ── 10. 集成桩(integration stubs,P2/P3)──
     check_integration_stubs(&cfg);
 
     println!();
@@ -306,6 +323,47 @@ fn check_plugins(cfg: &reflect_config::ReflectConfig) {
 }
 
 /// 测试辅助:加载 config 并快照解析摘要。
+/// 带超时运行外部探测命令,取 stdout 首行(stdin 置 null 防交互提示)。
+///
+/// `rustc` / `cargo` 等 PATH 上的二进制可能是 rustup shim:空 HOME 下
+/// shim 会触发工具链网络下载而无限阻塞 —— 诊断探测必须有界。
+/// 超时 / 非零退出 / spawn 失败一律返回 `None`(doctor 是尽力而为)。
+fn run_probe_with_timeout(
+    cmd: &str,
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> Option<String> {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    let mut child = std::process::Command::new(cmd)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => {
+                let mut out = String::new();
+                child.stdout.take()?.read_to_string(&mut out).ok()?;
+                return Some(out.trim().to_string());
+            }
+            Ok(Some(_)) | Err(_) => return None,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 fn snapshot_summary(cfg: &reflect_config::ReflectConfig) -> String {
     let mut out = String::new();
@@ -329,10 +387,41 @@ mod tests {
     use anyhow::Context;
     use reflect_config::{AnthropicSection, ReflectConfig};
 
-    #[test]
-    fn doctor_runs_without_panic_with_default() {
-        let result = run(false);
+    #[tokio::test]
+    async fn doctor_runs_without_panic_with_default() {
+        let result = run(false).await;
         assert!(result.is_ok());
+    }
+
+    /// 快命令正常返回 stdout;卡死命令(超 sleep)超时后返回 None 并
+    /// kill 子进程 —— 防 rustup shim 网络下载类挂死。
+    #[test]
+    fn probe_timeout_kills_stuck_command() {
+        let out = run_probe_with_timeout(
+            "/bin/echo",
+            &["probe-ok"],
+            std::time::Duration::from_secs(5),
+        );
+        assert_eq!(out.as_deref(), Some("probe-ok"));
+
+        let started = std::time::Instant::now();
+        let out =
+            run_probe_with_timeout("/bin/sleep", &["30"], std::time::Duration::from_millis(300));
+        assert!(out.is_none(), "卡死命令应超时返回 None");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "必须及时 kill,不能等子进程自然退出"
+        );
+
+        // 不存在的命令 → None(spawn 失败)。
+        assert!(
+            run_probe_with_timeout(
+                "/nonexistent-reflect-probe",
+                &[],
+                std::time::Duration::from_secs(5)
+            )
+            .is_none()
+        );
     }
 
     #[test]

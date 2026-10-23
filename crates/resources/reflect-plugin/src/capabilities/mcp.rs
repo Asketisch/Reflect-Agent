@@ -48,7 +48,7 @@ pub fn load(
     match spec {
         McpServerSpec::None => Ok(Vec::new()),
         McpServerSpec::Path(p) => load_from_file(plugin_root, p, plugin_name),
-        McpServerSpec::Inline(map) => load_from_inline(map, plugin_name),
+        McpServerSpec::Inline(map) => load_from_inline(map, plugin_root, plugin_name),
     }
 }
 
@@ -78,7 +78,7 @@ fn load_from_file(
         })?;
     let mut out = Vec::new();
     for (name, raw) in parsed {
-        let cfg = raw.into_config();
+        let cfg = expand_config(raw.into_config(), plugin_root);
         let transport = match (&cfg.command, &cfg.url) {
             (Some(_), None) => McpTransportKind::Stdio,
             (None, Some(_)) => McpTransportKind::Http,
@@ -106,6 +106,7 @@ fn load_from_file(
 
 fn load_from_inline(
     map: &std::collections::BTreeMap<String, McpServerConfig>,
+    plugin_root: &Path,
     plugin_name: &str,
 ) -> Result<Vec<LoadedMcpServer>> {
     let mut out = Vec::new();
@@ -128,11 +129,32 @@ fn load_from_inline(
             scoped_name: scoped_name(plugin_name, name),
             original_name: name.clone(),
             transport,
-            config: cfg.clone(),
+            config: expand_config(cfg.clone(), plugin_root),
             source: McpSource::Inline,
         });
     }
     Ok(out)
+}
+
+/// 把 server 配置里 command / args / env 值中的 `${PLUGIN_ROOT}` 展开
+/// 为插件安装目录绝对路径(插件安装到 cache 后相对路径失效)。
+fn expand_config(cfg: McpServerConfig, plugin_root: &Path) -> McpServerConfig {
+    McpServerConfig {
+        command: cfg
+            .command
+            .map(|c| super::expand_plugin_root(&c, plugin_root)),
+        args: cfg.args.map(|a| {
+            a.iter()
+                .map(|s| super::expand_plugin_root(s, plugin_root))
+                .collect()
+        }),
+        env: cfg.env.map(|m| {
+            m.into_iter()
+                .map(|(k, v)| (k, super::expand_plugin_root(&v, plugin_root)))
+                .collect()
+        }),
+        ..cfg
+    }
 }
 
 fn scoped_name(plugin_name: &str, original: &str) -> String {

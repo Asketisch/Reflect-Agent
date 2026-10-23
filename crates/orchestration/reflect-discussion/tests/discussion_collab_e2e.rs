@@ -152,6 +152,7 @@ fn mk_orchestrator_with_sink(
         consensus_window: 1,
         max_rounds,
         mailbox_capacity: 4,
+        judge: false,
     };
     let orch = DiscussionOrchestrator::with_event_sink(
         config,
@@ -209,6 +210,7 @@ async fn discussion_e2e_emits_collab_events_to_sink() {
         consensus_window: 1,
         max_rounds: 1,
         mailbox_capacity: 4,
+        judge: false,
     };
     let ctx = make_ctx(factory.clone(), &config, &agents, usage);
     let _ = usage_view;
@@ -291,6 +293,7 @@ async fn discussion_e2e_token_usage_written_to_slot() {
         consensus_window: 1,
         max_rounds: 1, // 顺序模式 1 轮 2 spawn = depth 2 OK(2 轮 = 4 > 3)
         mailbox_capacity: 4,
+        judge: false,
     };
     let ctx = make_ctx(factory.clone(), &config, &agents, usage);
     let bus = MessageBus::new(DiscussionId::new(), participants.clone(), 4);

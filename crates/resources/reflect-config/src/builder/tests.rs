@@ -278,6 +278,77 @@ fn empty_api_key_section_does_not_register() {
     assert!(r.get("openai").is_none());
 }
 
+/// **免 Key 端点也要注册** —— 显式 `base_url` + 空 `api_key`。
+///
+/// 免 Key 的 OpenAI 兼容端点(免费模型池)是真实接入形态。此前
+/// 「key 空 → 不注册」把它挡在门外,只能用 `[[openai.credentials]]`
+/// 数组形态绕道 —— 配置形态被迫分叉,GUI 也无法表达。
+#[test]
+fn keyless_openai_with_base_url_registers_pool() {
+    let cfg = ReflectConfig {
+        openai: Some(OpenAISection {
+            api_key: Some(String::new()),
+            base_url: Some("https://api.kilo.ai/api/gateway".into()),
+            model: Some("free".into()),
+            timeout_secs: Some(300),
+            credentials: vec![],
+            responses_api: false,
+        }),
+        ..Default::default()
+    };
+    let r = cfg.to_registry().unwrap();
+    assert!(
+        r.get("openai").is_some(),
+        "免 Key 端点(显式 base_url)必须注册 —— 否则 model=\"free\" 的清单发现报「未注册任何凭据」"
+    );
+}
+
+/// 既没 key 也没 base_url → 仍不注册(用户没配这个 provider)。
+#[test]
+fn keyless_openai_without_base_url_still_skipped() {
+    let cfg = ReflectConfig {
+        openai: Some(OpenAISection {
+            api_key: Some(String::new()),
+            base_url: None,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let r = cfg.to_registry().unwrap();
+    assert!(r.get("openai").is_none());
+}
+
+/// 免 Key 端点也应能推出 active provider(与注册条件同口径)。
+#[test]
+fn keyless_openai_with_base_url_is_active_provider() {
+    let cfg = ReflectConfig {
+        openai: Some(OpenAISection {
+            api_key: Some(String::new()),
+            base_url: Some("https://api.kilo.ai/api/gateway".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert_eq!(cfg.active_provider(), Some("openai"));
+}
+
+/// `[[openai.credentials]]` 的 `api_key` **可以整条省略** —— GUI 的 plan
+/// 编辑器在 key 为空时会省略该行,此前写出的 TOML 直接反序列化失败
+/// (整份配置保存被拒)。
+#[test]
+fn credential_block_without_api_key_deserializes() {
+    let toml = r#"
+        [[openai.credentials]]
+        label = "kilo-free"
+        base_url = "https://api.kilo.ai/api/gateway"
+        model = "free"
+    "#;
+    let cfg: ReflectConfig = toml::from_str(toml).expect("缺省 api_key 的凭据块应能反序列化");
+    let cred = &cfg.openai.as_ref().unwrap().credentials[0];
+    assert_eq!(cred.label, "kilo-free");
+    assert!(cred.api_key.is_empty(), "缺省 api_key = 空串(免 Key)");
+}
+
 #[test]
 fn active_provider_explicit_in_toml() {
     let cfg = ReflectConfig {
@@ -340,7 +411,10 @@ fn active_provider_unknown_string_returns_none() {
 #[test]
 fn resolve_model_returns_section_override() {
     let cfg = cfg_with_anthropic("sk-a");
-    assert_eq!(cfg.resolve_model("anthropic"), Some("claude-test".to_string()));
+    assert_eq!(
+        cfg.resolve_model("anthropic"),
+        Some("claude-test".to_string())
+    );
 }
 
 /// v1.5 诚实化:段级 / env / 钉住条目都没有 → `None`,不再回落内置默认。
@@ -477,10 +551,16 @@ fn resolve_model_prefers_pinned_credential_model() {
     let cfg: ReflectConfig = toml::from_str(toml).unwrap();
     assert_eq!(cfg.active_credential().as_deref(), Some("minimax"));
     // 命中条目无 model → 回落段级;不因别的条目有 model 而误取。
-    assert_eq!(cfg.resolve_model("anthropic"), Some("section-model".to_string()));
+    assert_eq!(
+        cfg.resolve_model("anthropic"),
+        Some("section-model".to_string())
+    );
 
     // 被钉住的条目自带 model → 压过段级。
-    let toml = toml.replace("api_key = \"sk-m\"", "api_key = \"sk-m\"\n        model = \"minimax-model\"");
+    let toml = toml.replace(
+        "api_key = \"sk-m\"",
+        "api_key = \"sk-m\"\n        model = \"minimax-model\"",
+    );
     let cfg: ReflectConfig = toml::from_str(&toml).unwrap();
     assert_eq!(
         cfg.resolve_model("anthropic"),
@@ -722,4 +802,31 @@ fn mock_not_active_for_real_provider_config() {
         Some("anthropic")
     );
     assert_eq!(cfg.active_provider_inner(None, None), Some("anthropic"));
+}
+
+// ── v1.5 review:`[routing] max_attempts` 配置透传 ────────────────
+
+/// `[routing] max_attempts` 覆盖 `RoutingPolicy.max_attempts`(缺省 16)。
+#[test]
+fn routing_max_attempts_from_toml() {
+    // 显式配置 → 生效(用户要把最坏情况重试从 16 压到 10 的入口)。
+    let toml = r#"
+        [routing]
+        max_attempts = 10
+    "#;
+    let cfg: ReflectConfig = toml::from_str(toml).unwrap();
+    assert_eq!(cfg.routing_policy().max_attempts, 10);
+
+    // `[routing]` 段存在但未写 max_attempts → 缺省 16。
+    let toml_default = r#"
+        [routing]
+        [routing.main]
+        primary = "anthropic/claude-test"
+    "#;
+    let cfg_default: ReflectConfig = toml::from_str(toml_default).unwrap();
+    assert_eq!(cfg_default.routing_policy().max_attempts, 16);
+
+    // 整个 `[routing]` 段缺省 → 缺省 16。
+    let cfg_none = cfg_with_anthropic("sk-a");
+    assert_eq!(cfg_none.routing_policy().max_attempts, 16);
 }

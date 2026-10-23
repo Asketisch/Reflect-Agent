@@ -64,11 +64,27 @@ mod tests {
     #[test]
     fn returns_start_when_no_marker() {
         let tmp = tempfile::tempdir().unwrap();
-        // tmp 目录及其祖先(在 CI/测试机临时目录里)通常没有项目标记;
-        // 关键不变量:返回值 == start,绝不悄悄上跳。
         let start = tmp.path().to_path_buf();
         let detected = detect_project_root(&start);
-        assert_eq!(detected, start);
+        // 环境自适应断言:tempdir 的祖先链(如 GitHub runner 的 /tmp)可能
+        // 存在 .git / Cargo.toml / .reflect 标记,「返回 start」仅在整条
+        // 祖先链都无标记时成立。两种情形都必须命中祖先链上**第一个**含
+        // 标记的目录(或 start 本身)—— 绝不越过它,也绝不返回 start
+        // 之外的后代。
+        let mut expected = start.clone();
+        loop {
+            if [".git", "Cargo.toml", ".reflect"]
+                .iter()
+                .any(|m| expected.join(m).exists())
+            {
+                break;
+            }
+            if !expected.pop() {
+                expected = start.clone();
+                break;
+            }
+        }
+        assert_eq!(detected, expected);
     }
 
     #[test]

@@ -42,15 +42,7 @@ pub trait MemoryStore: Send + Sync {
             }
             non_empty.push((*s, body));
         }
-        let mut parts = Vec::new();
-        for (s, body) in &non_empty {
-            if non_empty.len() > 1 {
-                parts.push(format!("### {s} memory\n\n{}", body.trim()));
-            } else {
-                parts.push(body.clone());
-            }
-        }
-        Ok(parts.join("\n\n"))
+        full_combined(non_empty)
     }
 
     /// 列出某 `scope` 下所有已存在的 `agent_type`,按字典序返回。
@@ -67,6 +59,20 @@ pub trait MemoryStore: Send + Sync {
             "list_agent_types not implemented for this MemoryStore".into(),
         ))
     }
+}
+
+/// v1.4 D2:把非空 scope 正文组合为注入文本(供 `load_combined` 与
+/// 检索路径的回退分支共用,格式保持一致)。
+pub(crate) fn full_combined(non_empty: Vec<(MemoryScope, String)>) -> Result<String, MemoryError> {
+    let mut parts = Vec::new();
+    for (s, body) in &non_empty {
+        if non_empty.len() > 1 {
+            parts.push(format!("### {s} memory\n\n{}", body.trim()));
+        } else {
+            parts.push(body.clone());
+        }
+    }
+    Ok(parts.join("\n\n"))
 }
 
 /// 文件承载的 store。通过读写解析路径上的 `MEMORY.md` 处理

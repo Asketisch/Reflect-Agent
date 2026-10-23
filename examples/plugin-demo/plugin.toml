@@ -1,0 +1,22 @@
+# Reflect 示例插件 —— 五类 capability 各配一个最小可运行样例。
+#
+# 安装:reflect plugin install examples/plugin-demo
+# 启用:reflect plugin enable demo
+#      (等价于把 "demo" 写进 ~/.reflect/config.toml 的
+#       [plugins].enabled_plugins,运行中改动支持热重载)
+name = "demo"
+version = "0.1.0"
+description = "Reflect 插件机制演示:slash 命令 / 子代理 / 技能 / hook / MCP server"
+keywords = ["example", "demo"]
+
+# ── 五类 capability 声明 ──────────────────────────────────────────────
+# commands:*.md slash 命令(用户输入 `/demo:<名字> <参数>` 时展开为正文)
+commands = "./commands"
+# agents:子代理定义(frontmatter 解析为 SubAgentSpec + call_<role> 工具)
+agents = "./agents"
+# skills:SKILL.md 技能(模型用 load_skill 按需激活)
+skills = "./skills"
+# hooks:Claude Code 风格 hooks.json,包装为外部进程 ShellHook
+hooks = "./hooks/hooks.json"
+# mcp_servers:MCP server 声明(工具以 mcp__plugin:demo:<名>__<工具> 注入)
+mcp_servers = "./.mcp.json"

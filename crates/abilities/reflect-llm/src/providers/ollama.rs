@@ -23,6 +23,7 @@ use crate::capabilities::Capabilities;
 use crate::client::ModelClient;
 use crate::error::LlmError;
 use crate::event::ChatEvent;
+use crate::model_catalog::ModelInfo;
 use crate::request::{ChatMessage, ChatRequest, ContentBlock, ToolSpec, UserContent};
 
 /// Ollama 默认 endpoint,本地 `ollama serve` 监听端口。
@@ -157,6 +158,62 @@ impl ModelClient for OllamaClient {
         }
 
         Ok(Box::pin(stream_ndjson(response, cancel)))
+    }
+
+    /// R0-1:拉取 Ollama 原生模型清单(`GET {base}/api/tags`)。
+    ///
+    /// Ollama 的清单只有本地已拉取的模型(`name` / `model` 字段),不带
+    /// 免费标记 —— 免费判定交给规则层。
+    async fn list_models(
+        &self,
+        cancel: CancellationToken,
+    ) -> Result<Option<Vec<ModelInfo>>, LlmError> {
+        let url = format!("{}/api/tags", self.resolved_base_url());
+
+        let mut req = self.http.get(&url).header("Accept", "application/json");
+        if let Some(key) = self.config.api_key.as_deref().filter(|k| !k.is_empty()) {
+            req = req.header("Authorization", format!("Bearer {key}"));
+        }
+
+        if cancel.is_cancelled() {
+            return Err(LlmError::Cancelled);
+        }
+
+        let response = req.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            if status == reqwest::StatusCode::NOT_FOUND {
+                return Ok(None);
+            }
+            let status_code = status.as_u16();
+            let text = response.text().await.unwrap_or_default();
+            return Err(classify_status(status_code, &text));
+        }
+
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|e| LlmError::Internal(format!("model listing parse failed: {e}")))?;
+        let Some(models) = body.get("models").and_then(Value::as_array) else {
+            return Ok(Some(Vec::new()));
+        };
+        let list = models
+            .iter()
+            .filter_map(|entry| {
+                let id = entry
+                    .get("name")
+                    .or_else(|| entry.get("model"))
+                    .and_then(Value::as_str)?;
+                if id.is_empty() {
+                    return None;
+                }
+                Some(ModelInfo {
+                    id: id.to_string(),
+                    ..Default::default()
+                })
+            })
+            .collect();
+        Ok(Some(list))
     }
 }
 
@@ -375,8 +432,12 @@ pub struct OllamaRequest {
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f32>,
+    /// v1.4 B1:结构化输出。`JsonObject` → `"json"`(字符串);`JsonSchema`
+    /// → schema 对象(Ollama 结构化输出支持把 JSON Schema 直接作为
+    /// `format` 值)。原来是 `Option<String>`,为承载 schema 对象放宽为
+    /// `Option<Value>`(wire 形态不变:None 时跳过序列化)。
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub format: Option<String>,
+    pub format: Option<Value>,
     /// Ollama 调参(`num_ctx` / `num_gpu` 等)放在 `options` 子对象。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub options: Option<Value>,
@@ -412,20 +473,21 @@ impl From<ChatRequest> for OllamaRequest {
                 }),
             })
             .collect();
-        // review 修复:`max_tokens` 此前被静默丢弃 —— Ollama 的输出上限
-        // 需要 `options.num_predict`。`build_request` 会把 config 的
-        // num_ctx/num_gpu 合并进同一 options 对象。
-        let options = req.max_tokens.map(|n| {
-            serde_json::json!({ "num_predict": n })
-        });
+        // v1.4 B1:结构化输出 → Ollama `format` 字段。
+        let format = match &req.response_format {
+            Some(crate::request::ResponseFormat::JsonObject) => Some(serde_json::json!("json")),
+            Some(crate::request::ResponseFormat::JsonSchema { schema, .. }) => Some(schema.clone()),
+            // Text / None:纯文本,不设置 format。
+            _ => None,
+        };
         Self {
             model: req.model,
             messages,
             stream: true,
             temperature: req.temperature,
             top_p: req.top_p,
-            format: None,
-            options,
+            format,
+            options: None,
             keep_alive: None,
             tools,
             stop: req.stop,
@@ -442,20 +504,14 @@ fn build_request(req: &ChatRequest, model: &str, config: &OllamaConfig) -> Ollam
     if let Some(secs) = config.keep_alive_secs {
         body.keep_alive = Some(format_keep_alive(secs));
     }
-    // review 修复:此前 config 的 options 会整体覆盖 `OllamaRequest::from`
-    // 写入的 num_predict(来自 max_tokens);改为合并进同一对象。
-    let has_config_options = config.num_ctx.is_some() || config.num_gpu.is_some();
-    if has_config_options {
-        let mut options = match body.options.take() {
-            Some(Value::Object(map)) => map,
-            _ => serde_json::Map::new(),
-        };
-        if let Some(n) = config.num_ctx {
-            options.insert("num_ctx".into(), Value::from(n));
-        }
-        if let Some(n) = config.num_gpu {
-            options.insert("num_gpu".into(), Value::from(n));
-        }
+    let mut options = serde_json::Map::new();
+    if let Some(n) = config.num_ctx {
+        options.insert("num_ctx".into(), Value::from(n));
+    }
+    if let Some(n) = config.num_gpu {
+        options.insert("num_gpu".into(), Value::from(n));
+    }
+    if !options.is_empty() {
         body.options = Some(Value::Object(options));
     }
     body
@@ -582,6 +638,7 @@ mod tests {
     #[test]
     fn ollama_request_basic() {
         let req = ChatRequest {
+            response_format: None,
             model: "llama3.2".into(),
             messages: vec![ChatMessage::User(UserContent {
                 blocks: vec![ContentBlock::text("hi")],
@@ -607,6 +664,7 @@ mod tests {
     #[test]
     fn ollama_request_with_tools() {
         let req = ChatRequest {
+            response_format: None,
             model: "qwen2.5:7b".into(),
             messages: vec![],
             tools: vec![ToolSpec::Function {
@@ -632,6 +690,7 @@ mod tests {
     #[test]
     fn build_request_with_keep_alive_zero_and_options() {
         let req = ChatRequest {
+            response_format: None,
             model: "llama3.2".into(),
             messages: vec![],
             tools: vec![],
@@ -857,5 +916,43 @@ mod tests {
         let client = OllamaClient::new(OllamaConfig::default()).unwrap();
         assert_eq!(client.provider_kind(), crate::ProviderKind::Ollama);
         assert_eq!(client.name(), "ollama");
+    }
+    // ── v1.4 B1:format 映射 ─────────────────────────────────────
+
+    #[test]
+    fn ollama_json_object_sets_format_json() {
+        let req = ChatRequest {
+            model: "llama3".into(),
+            response_format: Some(crate::ResponseFormat::JsonObject),
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(OllamaRequest::from(req)).unwrap();
+        assert_eq!(wire["format"], "json");
+    }
+
+    #[test]
+    fn ollama_json_schema_sets_format_object() {
+        let schema = serde_json::json!({"type": "object", "properties": {}});
+        let req = ChatRequest {
+            model: "llama3".into(),
+            response_format: Some(crate::ResponseFormat::JsonSchema {
+                name: "a".into(),
+                schema: schema.clone(),
+                strict: true,
+            }),
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(OllamaRequest::from(req)).unwrap();
+        assert_eq!(wire["format"], schema, "schema 对象应原样作为 format");
+    }
+
+    #[test]
+    fn ollama_no_response_format_no_format() {
+        let req = ChatRequest {
+            model: "llama3".into(),
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(OllamaRequest::from(req)).unwrap();
+        assert!(wire.get("format").is_none());
     }
 }

@@ -43,9 +43,14 @@ pub use smart_prune::{
     MAX_ASSISTANT_CHARS, MAX_TOOL_RESULT_CHARS, MAX_TOOL_RESULT_LINES, SmartPruneConfig,
     smart_prune,
 };
-pub use strategy::{Compactor, CompactorConfig, DEFAULT_TRIGGER_TOKENS};
+pub use strategy::{Compactor, CompactorConfig, DEFAULT_TRIGGER_TOKENS, MemoryWriteInfo};
 pub use summarizer::{
     LlmSummarizer, SUMMARIZE_PROMPT_FULL, SUMMARIZE_PROMPT_RECENT, SUMMARIZE_TIMEOUT, Summarizer,
     SummarizerError,
 };
-pub use tokens::estimate_messages;
+#[cfg(feature = "tokenizer")]
+pub use tokens::tiktoken::{TiktokenEstimator, global_tiktoken_estimator};
+pub use tokens::{
+    HeuristicEstimator, TokenEstimator, estimate_messages, estimate_text, global_estimator,
+    set_global_estimator,
+};

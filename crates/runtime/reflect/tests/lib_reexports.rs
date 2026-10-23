@@ -32,6 +32,7 @@ async fn lib_facade_exposes_message_bus_and_orchestrator() {
         consensus_window: 1,
         max_rounds: 1,
         mailbox_capacity: 4,
+        judge: false,
     };
     assert_eq!(config.topic, "facade smoke");
 
@@ -70,4 +71,73 @@ fn lib_facade_exposes_agent_section_and_misc_types() {
 
     // 顶层 `SubAgentFactory` re-export 仍可用(放在 subagent crate 的那一组)
     let _factory_type_check: fn() -> Option<Arc<SubAgentFactory>> = || None;
+}
+
+// ── v1.x:数据记录 SDK 化 —— telemetry / rollout 读取侧 + 统计 API ──────
+
+#[test]
+fn lib_facade_exposes_telemetry_read_api() {
+    // 写入侧类型可达。
+    let _sink_type: fn() -> Option<Arc<reflect::TelemetrySink>> = || None;
+    // 读取侧 API 可达(函数指针类型检查,不实际执行 I/O)。
+    let _list_io: fn(&std::path::Path) -> Vec<(String, std::path::PathBuf, std::time::SystemTime)> =
+        reflect::list_model_io_files;
+    let _read_io: fn(&std::path::Path) -> Vec<reflect::ModelIoRecord> = reflect::read_model_io_file;
+    let _list_spans: fn(&std::path::Path, usize) -> Vec<(String, std::path::PathBuf)> =
+        reflect::list_span_log_files;
+    let _read_spans: fn(&std::path::Path) -> Vec<reflect::TraceEvent> = reflect::read_span_log_file;
+    let _resolve_dir: fn(Option<&std::path::Path>) -> std::path::PathBuf =
+        reflect::resolve_traces_dir;
+    // 记录类型可达。
+    let _usage = reflect::UsageSnapshot {
+        input_tokens: 1,
+        output_tokens: 2,
+        cached_tokens: 0,
+        cache_write_tokens: 0,
+        total_tokens: 3,
+        cost_usd: None,
+    };
+    let _model_ref = reflect::ModelRef {
+        model_id: "openai/gpt-4o".into(),
+        provider_id: Some("openai".into()),
+        role: Some("main".into()),
+        source: Some("main_turn".into()),
+    };
+}
+
+#[test]
+fn lib_facade_exposes_rollout_read_api_and_stats() {
+    // rollout 读取侧 API 可达。
+    let _list: fn(&std::path::Path) -> std::io::Result<Vec<reflect::SessionInfo>> =
+        reflect::list_sessions;
+    let _find: fn(&std::path::Path, reflect::ThreadId) -> Option<std::path::PathBuf> =
+        reflect::find_session_path;
+    let _markdown: fn(&[reflect::RolloutRecord]) -> String = reflect::to_markdown;
+    // v1.x 统计 API 可达。
+    let _session_stats: fn(&std::path::Path, reflect::ThreadId) -> Option<reflect::SessionStats> =
+        reflect::session_stats;
+    let _all_models: fn(&std::path::Path) -> Vec<reflect::ModelUsage> = reflect::all_model_usage;
+    // 统计类型可达且字段可访问。
+    let usage = reflect::ModelUsage {
+        model: "openai/gpt-4o".into(),
+        provider: None,
+        calls: 1,
+        input_tokens: 10,
+        output_tokens: 5,
+        cached_tokens: 0,
+        cache_write_tokens: 0,
+        total_tokens: 15,
+        cost_usd: None,
+    };
+    assert_eq!(usage.total_tokens, 15);
+}
+
+#[test]
+fn lib_facade_builder_exposes_telemetry_and_rollout_config() {
+    // Builder 链式配置入口可达(不实际 build,避免依赖 API key)。
+    let _b = reflect::Reflect::builder("openai/gpt-4o")
+        .with_telemetry(None)
+        .with_traces_dir("/tmp/reflect-test-traces")
+        .with_rollout_dir("/tmp/reflect-test-sessions")
+        .without_rollout();
 }

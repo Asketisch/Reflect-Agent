@@ -19,7 +19,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use reflect_core::{AgentConfig, AgentThread};
+use reflect_plugin::runtime::{SharedPluginRuntime, bootstrap_plugins, empty_plugin_runtime};
 use reflect_protocol::{Event, Submission, ThreadId};
+use reflect_telemetry::TelemetrySink;
 use reflect_tools::ToolRegistry;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -27,7 +29,42 @@ use tokio_util::sync::CancellationToken;
 use crate::m4_bootstrap;
 use crate::stream::EventStream;
 
-/// [`Reflect`] 的链式 builder。
+/// telemetry 记录开关的三态(v1.x)。
+///
+/// - `Auto`(默认):按 `~/.reflect/config.toml` 的 `[telemetry]` 段构造,
+///   与 `reflect-exec` 路径对齐 —— SDK 消费者默认就有数据记录
+///   (model-io 全文 + span 日志落到 `~/.reflect/traces/`);
+/// - `Off`:`with_telemetry(None)` 显式关闭;
+/// - `Custom(sink)`:`with_telemetry(Some(sink))` 注入自建 sink
+///   (自定义目录 / 测试替身 / 多租户隔离)。
+///
+/// Debug 手写(不 derive):`TelemetrySink` 未实现 Debug。
+#[derive(Clone)]
+enum TelemetryChoice {
+    Auto,
+    Off,
+    Custom(Arc<TelemetrySink>),
+}
+
+impl Default for TelemetryChoice {
+    fn default() -> Self {
+        TelemetryChoice::Auto
+    }
+}
+
+// TelemetrySink 未实现 Debug(内部持有 writer/Mutex),手写一份只暴露
+// 变体名的 Debug —— ReflectBuilder derive Debug 需要所有字段可 Debug。
+impl std::fmt::Debug for TelemetryChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TelemetryChoice::Auto => f.write_str("Auto"),
+            TelemetryChoice::Off => f.write_str("Off"),
+            TelemetryChoice::Custom(_) => f.write_str("Custom(<sink>)"),
+        }
+    }
+}
+
+/// [`ReflectBuilder`] 的链式 builder。
 ///
 /// 由 [`Reflect::builder`] 构造。
 #[derive(Debug, Clone)]
@@ -40,6 +77,27 @@ pub struct ReflectBuilder {
     /// 调 `/exit-plan` 审批 plan 才能切回 `Prompt`。
     plan_mode: bool,
     cancel: Option<CancellationToken>,
+    /// 插件挂载列表:`Some(list)` = 显式启用;`None` = 按
+    /// `~/.reflect/config.toml` 的 `[plugins].enabled_plugins`。
+    /// 仅 [`ReflectBuilder::build_async`] 消费(挂载是异步操作)。
+    plugins: Option<Vec<String>>,
+    /// 额外提示词目录(v1.6)。`None` = 只用内嵌默认 + `~/.reflect/prompts/`;
+    /// `Some(dir)` = 额外扫描该目录下的 `*.md` 模型层(优先级最高,
+    /// 覆盖同名层)。TUI / GUI 用它把自带提示词包挂进运行时。
+    prompts_dir: Option<PathBuf>,
+    /// v1.x:telemetry 记录开关。默认 `Auto`(按 `[telemetry]` config 段
+    /// 构造,与 reflect-exec 对齐);`with_telemetry(None)` 关闭;
+    /// `with_telemetry(Some(sink))` 自定义。
+    telemetry: TelemetryChoice,
+    /// v1.x:`Auto` 路径下的 telemetry 目录覆盖(`with_traces_dir`)。
+    /// `None` = 用 `[telemetry].dir` 或默认 `~/.reflect/traces`。
+    traces_dir: Option<PathBuf>,
+    /// v1.x:rollout 落盘根目录。`None` = 默认 `~/.reflect/sessions`;
+    /// `Some(dir)` = 自定义(`with_rollout_dir`,便于测试隔离 / 多租户)。
+    rollout_base: Option<PathBuf>,
+    /// v1.x:rollout 开关(默认 true)。`without_rollout()` 置 false ——
+    /// 拿到 M4Deps 后把 `recorder` 置 `None`。
+    rollout_enabled: bool,
 }
 
 impl ReflectBuilder {
@@ -54,6 +112,12 @@ impl ReflectBuilder {
             approvals: true,
             plan_mode: false,
             cancel: None,
+            plugins: None,
+            prompts_dir: None,
+            telemetry: TelemetryChoice::Auto,
+            traces_dir: None,
+            rollout_base: None,
+            rollout_enabled: true,
         }
     }
 
@@ -85,6 +149,94 @@ impl ReflectBuilder {
     pub fn cancel_token(mut self, token: CancellationToken) -> Self {
         self.cancel = Some(token);
         self
+    }
+
+    /// 启用插件挂载(仅 [`ReflectBuilder::build_async`] 消费)。
+    ///
+    /// - `Some(list)` —— 显式启用列表,忽略 config;
+    /// - `None`(默认)—— 按 `~/.reflect/config.toml` 的
+    ///   `[plugins].enabled_plugins`。
+    ///
+    /// 插件的 skills / agents / MCP servers / shell hooks / slash 命令
+    /// 在 `build_async` 里挂载到共享 registry;未安装的 id 仅 warn 跳过,
+    /// 不阻塞启动。
+    pub fn with_plugins(mut self, enabled: Option<Vec<String>>) -> Self {
+        self.plugins = enabled;
+        self
+    }
+
+    /// v1.6:额外提示词目录(按模型匹配的外置提示词库)。
+    ///
+    /// 传入的目录在 `~/.reflect/prompts/` 之后扫描,同名层以本目录
+    /// 优先 —— TUI / GUI 由此把自带提示词包挂进运行时。目录约定:
+    /// `default.md` / `<厂商>.md` / `<精确模型名>.md`,每个文件用
+    /// `## key` 分节,缺失 key 落回内嵌默认。
+    pub fn with_prompts_dir(mut self, dir: impl AsRef<Path>) -> Self {
+        self.prompts_dir = Some(dir.as_ref().to_path_buf());
+        self
+    }
+
+    /// v1.x:配置 telemetry 数据记录(model-io 全文 + span 日志)。
+    ///
+    /// - `Some(sink)` —— 注入自建 sink(自定义目录 / 测试替身);
+    /// - `None` —— 显式关闭 telemetry;
+    /// - **不调用本方法**(默认)—— 按 `~/.reflect/config.toml` 的
+    ///   `[telemetry]` 段自动构造,与 `reflect-exec` 路径对齐。
+    ///   `[telemetry] enabled` 缺省为 `true`,故 SDK 消费者默认就有
+    ///   数据记录落到 `~/.reflect/traces/`。
+    ///
+    /// 记录内容:每次 LLM 调用的完整 messages + system prompt + 工具名 +
+    /// usage(input/output/cached/cache_write/cost)、turn/tool span。
+    /// 读取侧 API 经 `reflect` 门面 re-export(见 `lib.rs`)。
+    pub fn with_telemetry(mut self, sink: Option<Arc<TelemetrySink>>) -> Self {
+        self.telemetry = match sink {
+            Some(s) => TelemetryChoice::Custom(s),
+            None => TelemetryChoice::Off,
+        };
+        self
+    }
+
+    /// v1.x:`Auto` telemetry 路径下的 trace 目录覆盖。
+    ///
+    /// 优先级高于 `[telemetry].dir`;不设置则用 config 值或默认
+    /// `~/.reflect/traces`。与 `with_telemetry(Some(sink))` 同时使用时
+    /// 本设置无效(sink 自带目录)。
+    pub fn with_traces_dir(mut self, dir: impl AsRef<Path>) -> Self {
+        self.traces_dir = Some(dir.as_ref().to_path_buf());
+        self
+    }
+
+    /// v1.x:自定义 rollout 会话记录落盘根目录。
+    ///
+    /// 默认 `~/.reflect/sessions`(YYYY/MM/DD 分桶)。传入自定义目录便于
+    /// 测试隔离 / 多租户分目录存储。rollout 记录会话消息、TokenCount
+    /// (含模型归属)、Compaction 等审计轨迹,是 `session_stats` 统计的
+    /// 数据源。
+    pub fn with_rollout_dir(mut self, dir: impl AsRef<Path>) -> Self {
+        self.rollout_base = Some(dir.as_ref().to_path_buf());
+        self
+    }
+
+    /// v1.x:完全关闭 rollout 会话记录(不落任何 session JSONL)。
+    ///
+    /// 适用于纯一次性执行 / 隐私敏感场景。关闭后 `session_stats` 等
+    /// 读取侧 API 对该会话无数据可查。
+    pub fn without_rollout(mut self) -> Self {
+        self.rollout_enabled = false;
+        self
+    }
+
+    /// 按当前 telemetry 配置解析出最终注入 `AgentConfig` 的 sink。
+    ///
+    /// - `Off` → `None`(telemetry 关闭);
+    /// - `Custom(sink)` → 原样注入;
+    /// - `Auto` → 按 `[telemetry]` config 段构造(见 `build_telemetry_sink`)。
+    fn resolve_telemetry_sink(&self) -> Option<Arc<TelemetrySink>> {
+        match &self.telemetry {
+            TelemetryChoice::Off => None,
+            TelemetryChoice::Custom(sink) => Some(sink.clone()),
+            TelemetryChoice::Auto => build_telemetry_sink(self.traces_dir.as_deref()),
+        }
     }
 
     /// 安装合理的默认:构造完整 M4 依赖(compactor + memory + skills +
@@ -130,26 +282,157 @@ impl ReflectBuilder {
     pub fn build(self) -> anyhow::Result<Reflect> {
         let registry = build_registry_from_env()?;
         let tools = Arc::new(default_tool_registry());
+        // v1.x:先解析 telemetry sink —— self.cancel 随后被移出,部分移动后
+        // 不能再整体借用 self。
+        let telemetry_sink = self.resolve_telemetry_sink();
         let cancel = self.cancel.unwrap_or_default();
         let thread_id = ThreadId::new();
         // 默认构造完整 M4 依赖 —— compactor / memory / skills / agent def
         // / recorder / note store / file recovery / subagent registry。
-        // 失败 → 透传(不静默)。
-        let m4 = m4_bootstrap::build_default_m4(
+        // 失败 → 透传(不静默)。`with_prompts_dir` 的额外目录一并传入。
+        let mut m4 = m4_bootstrap::build_default_m4_with_prompts(
             &self.workspace,
             "default",
             &self.model,
             &registry,
             thread_id,
+            self.prompts_dir.as_slice(),
+            self.rollout_base.as_deref(),
         )?;
+        // v1.x:`without_rollout()` → 摘掉 recorder(M4Deps.recorder 为 Option)。
+        if !self.rollout_enabled {
+            m4.recorder = None;
+        }
         let mut cfg =
             AgentConfig::new(self.model, self.workspace.clone()).with_approvals(self.approvals);
         if self.plan_mode {
             cfg = cfg.with_initial_permission_mode(reflect_protocol::PermissionMode::Plan);
         }
         cfg = cfg.with_m4(m4);
+        // v1.x:注入 telemetry 记录 sink(Auto 路径按 [telemetry] config 构造)。
+        cfg = cfg.with_telemetry(telemetry_sink);
         let thread = Arc::new(AgentThread::new(cfg, registry, tools, None, None));
-        Ok(Reflect { thread, cancel })
+        Ok(Reflect {
+            thread,
+            cancel,
+            plugin_runtime: empty_plugin_runtime(),
+        })
+    }
+
+    /// [`ReflectBuilder::build`] 的异步完整版:额外构造真实 `HookEngine`
+    /// 与 MCP manager,并按 [`ReflectBuilder::with_plugins`] 挂载插件
+    /// (skills / agents / MCP servers / shell hooks / slash 命令)。
+    ///
+    /// 与 exec 路径的差异(与 `build()` 一致,嵌入场景从紧):
+    /// - config `[hooks]` 未显式列出 = 不启用内置 hook(verification 之类
+    ///   Stop hook 会在宿主 cwd 跑 shell,静默启用不可预期);插件自带
+    ///   hooks 不受此开关影响,照常挂载;
+    /// - config `[mcp_servers]` 不消费(空 manager 兜底,仅供插件的
+    ///   mcp_servers 能力落点)。
+    pub async fn build_async(self) -> anyhow::Result<Reflect> {
+        let registry = build_registry_from_env()?;
+        let tools = Arc::new(default_tool_registry());
+        // v1.x:先解析 telemetry sink —— self.cancel 随后被移出。
+        let telemetry_sink = self.resolve_telemetry_sink();
+        let cancel = self.cancel.unwrap_or_default();
+        let thread_id = ThreadId::new();
+        let mut m4 = m4_bootstrap::build_default_m4_with_prompts(
+            &self.workspace,
+            "default",
+            &self.model,
+            &registry,
+            thread_id,
+            self.prompts_dir.as_slice(),
+            self.rollout_base.as_deref(),
+        )?;
+        // v1.x:`without_rollout()` → 摘掉 recorder。
+        if !self.rollout_enabled {
+            m4.recorder = None;
+        }
+        let skills_for_plugins = m4.skills.clone();
+
+        // HookEngine:插件 shell hooks 与内置 hook 的共同落点。嵌入场景
+        // 未显式配置的内置 hook 不启用(见方法 doc)。
+        let app_cfg = reflect_config::load_default();
+        let mut hooks_cfg =
+            reflect_hooks::config::HooksConfig::from_reflect_section(&app_cfg.hooks);
+        if hooks_cfg.enabled.is_none() {
+            hooks_cfg.enabled = Some(Vec::new());
+        }
+        let hook_engine: Arc<reflect_hooks::HookEngine> = Arc::new(hooks_cfg.build_engine());
+
+        // MCP manager:空壳兜底 —— 插件 mcp_servers 经 loader 挂进同一份。
+        let (mcp_tx, _mcp_rx) = mpsc::channel::<reflect_mcp::McpLifecycleEvent>(16);
+        let mcp: Arc<reflect_mcp::McpConnectionManager> =
+            Arc::new(reflect_mcp::McpConnectionManager::new(mcp_tx));
+
+        // SubAgentFactory:插件 agents 能力的落点(loader 会注册
+        // `call_<role>` 工具并把 spec 记在 factory 上)。
+        let factory = Arc::new(reflect_subagent::SubAgentFactory::new(
+            thread_id,
+            self.model.clone(),
+            registry.clone(),
+            None,
+            tools.clone(),
+            cancel.clone(),
+            None,
+        ));
+        factory.set_parent_skills(skills_for_plugins.clone());
+
+        let mut cfg = AgentConfig::new(self.model.clone(), self.workspace.clone())
+            .with_approvals(self.approvals);
+        // 0.5:Plan mode 必须**既设 permission mode,又注册 PlanModeGate**。
+        // 此前这里只做了前者 —— `PermissionMode::Plan` 单独存在时没有任何
+        // 强制力(它只是让审批层知道当前是 Plan 模式),写工具照样放行。
+        // 真正的执行机制是 `PlanModeGate` 这个 PreToolUse hook 把白名单外
+        // 工具 blanket-deny。此前全 workspace 只有 `reflect-exec/src/
+        // headless.rs` 注册它,导致库门面(Reflect-TUI / ReflectDesktop)与
+        // reflect-py 的 `plan_mode(true)` 拿到的是一个零强制的 Plan mode。
+        if self.plan_mode {
+            cfg = cfg.with_initial_permission_mode(reflect_protocol::PermissionMode::Plan);
+        }
+        cfg = cfg.with_m4(m4);
+        // v1.x:注入 telemetry 记录 sink(Auto 路径按 [telemetry] config 构造)。
+        cfg = cfg.with_telemetry(telemetry_sink);
+        let thread = Arc::new(AgentThread::new(
+            cfg,
+            registry,
+            tools.clone(),
+            None,
+            Some(hook_engine.clone()),
+        ));
+        if self.plan_mode {
+            thread.register_hook(reflect_hooks::builtins::PlanModeGate::default_mode());
+            let rbe_section = app_cfg.hooks.read_before_edit.as_ref();
+            let (_rbe_state, rbe_hook) = reflect_hooks::builtins::build_read_before_edit(
+                rbe_section.and_then(|s| s.enabled),
+                rbe_section.and_then(|s| s.mtime_drift_tolerance_ms),
+            );
+            thread.register_hook(rbe_hook);
+            tracing::info!("plan_mode=true: registered PlanModeGate + read_before_edit hooks");
+        }
+
+        // 插件挂载:显式列表优先,否则读 config。HOME 缺失等场景
+        // bootstrap_plugins 返回空句柄,不阻塞启动。
+        let enabled = self
+            .plugins
+            .unwrap_or_else(|| app_cfg.plugins.enabled_plugins.clone());
+        let plugin_runtime = bootstrap_plugins(
+            tools,
+            hook_engine,
+            mcp,
+            skills_for_plugins,
+            factory,
+            &enabled,
+            None,
+        )
+        .await;
+
+        Ok(Reflect {
+            thread,
+            cancel,
+            plugin_runtime,
+        })
     }
 }
 
@@ -159,6 +442,10 @@ impl ReflectBuilder {
 pub struct Reflect {
     thread: Arc<AgentThread>,
     cancel: CancellationToken,
+    /// 运行时插件状态(`build_async` 挂载;`build` / `from_thread` 为空)。
+    /// 使用方可用 [`reflect_plugin::expand_user_input`] + 此句柄展开
+    /// `/plugin:ns:name args` 形式的 slash 命令。
+    plugin_runtime: SharedPluginRuntime,
 }
 
 impl std::fmt::Debug for Reflect {
@@ -178,7 +465,17 @@ impl Reflect {
     /// 直接从一个已构造好的 thread 包装。
     pub fn from_thread(thread: Arc<AgentThread>) -> Self {
         let cancel = thread.cancel_token().clone();
-        Self { thread, cancel }
+        Self {
+            thread,
+            cancel,
+            plugin_runtime: empty_plugin_runtime(),
+        }
+    }
+
+    /// 运行时插件状态句柄(`build_async` 挂载的 skills / agents / MCP /
+    /// shell hooks / slash 命令都在这里;`build()` 构造的实例返回空句柄)。
+    pub fn plugin_runtime(&self) -> &SharedPluginRuntime {
+        &self.plugin_runtime
     }
 
     /// 借用底层的 thread。
@@ -215,6 +512,72 @@ impl Reflect {
     pub fn next_thread_id(&self) -> ThreadId {
         ThreadId::new()
     }
+}
+
+/// v1.x:按 `[telemetry]` config 段构造本地 telemetry sink。
+///
+/// 与 `reflect-exec::runtime_config::build_telemetry_sink` 同逻辑,下沉到
+/// 门面让 SDK 路径默认有记录:
+/// - `enabled = false`(显式)→ `None`;
+/// - `enabled = true` 或缺省 → 构造 `TelemetrySink`,trace 目录按
+///   `traces_dir` 覆盖参数 → `[telemetry].dir` → 默认 `~/.reflect/traces`
+///   依次解析;
+/// - `[hooks].langfuse_tracker` 配了 endpoint + keys → 并行挂 Langfuse
+///   cloud exporter(缺省 / 缺 key 时 no-op,仅本地日志)。
+///
+/// sink 的 session_id 用新生成的 uuid(与 rollout 的 thread_id 独立,
+/// 因 telemetry 的 model-io 文件按这个 id 命名)。
+fn build_telemetry_sink(traces_dir: Option<&Path>) -> Option<Arc<TelemetrySink>> {
+    let cfg = reflect_config::load_default();
+    let default_section = reflect_config::TelemetrySection::default();
+    let section = cfg.telemetry.as_ref().unwrap_or(&default_section);
+    if !section.is_enabled() {
+        return None;
+    }
+    let base_dir = traces_dir
+        .map(|p| p.to_path_buf())
+        .or_else(|| section.dir.clone())
+        .unwrap_or_else(|| reflect_telemetry::resolve_traces_dir(None));
+    let session_id = uuid::Uuid::new_v4().to_string();
+    // v1.x:redact / max_bytes / record_tool_schemas 经 new_with_config
+    // 真正生效(此前 schema 定义了但从未读取)。
+    let write_cfg = reflect_telemetry::TelemetryWriteConfig {
+        redact: section.should_redact(),
+        max_bytes: section
+            .max_bytes
+            .map(|n| n as usize)
+            .unwrap_or(reflect_telemetry::model::MAX_FIELD_CHARS),
+    };
+    let sink = TelemetrySink::new_with_config(
+        base_dir,
+        session_id,
+        write_cfg,
+        section.should_record_tool_schemas(),
+    );
+
+    if let Some(lf) = cfg.hooks.langfuse_tracker.as_ref()
+        && lf.enabled.unwrap_or(false)
+        && let (Some(endpoint), Some(pk), Some(sk)) = (
+            lf.endpoint.as_ref(),
+            lf.public_key.as_ref(),
+            lf.secret_key.as_ref(),
+        )
+        && !endpoint.is_empty()
+        && !pk.is_empty()
+        && !sk.is_empty()
+    {
+        let lf_cfg = reflect_telemetry::LangfuseConfig {
+            endpoint: endpoint.clone(),
+            public_key: pk.clone(),
+            secret_key: sk.clone(),
+            batch_size: 64,
+        };
+        let exporter = reflect_telemetry::LangfuseExporter::start(Some(lf_cfg));
+        sink.set_langfuse(exporter);
+        tracing::info!(endpoint = %endpoint, "langfuse cloud exporter 已启用");
+    }
+
+    Some(sink)
 }
 
 /// 从标准 env 变量构造 `SharedModelRegistry`。与 `reflect_exec::async_main`
@@ -298,7 +661,7 @@ fn default_tool_registry() -> ToolRegistry {
     use reflect_tools::builtins;
     let r = ToolRegistry::default();
     r.register(Arc::new(builtins::EchoTool));
-    r.register(Arc::new(builtins::BashTool));
+    r.register(Arc::new(builtins::BashTool::default()));
     r.register(Arc::new(builtins::ReadTool));
     r.register(Arc::new(builtins::WriteTool));
     r.register(Arc::new(builtins::EditTool));
@@ -417,10 +780,42 @@ mod tests {
     /// builder 这边的 wiring 是 1 行 `if self.plan_mode { cfg = cfg.with_initial_permission_mode(...) }`
     /// —— 由 `default_tool_registry_has_seven_builtins_plus_plan_tools` 之类的
     /// build 路径间接覆盖。
+    ///
+    /// **0.5 补强**:permission mode 单独存在时**没有任何强制力** ——
+    /// `PermissionMode::Plan` 只是让审批层知道当前是 Plan 模式,写工具照样
+    /// 放行。真正的执行机制是 `PlanModeGate` 这个 PreToolUse hook。此前
+    /// builder 只设前者不注册后者,库门面(Reflect-TUI / ReflectDesktop)与
+    /// reflect-py 的 `plan_mode(true)` 拿到的是零强制的 Plan mode。
+    /// 下面两条断言分别守住这两个必要条件。
     #[test]
     fn builder_plan_mode_compiles() {
         // smoke test:确保 builder API 在编译期就接受 `plan_mode` 调用。
         let _b = Reflect::builder("openai/gpt-4o").plan_mode(true);
+    }
+
+    /// 回归(0.5):`plan_mode(true)` 必须让 AgentConfig 的初始 permission
+    /// mode 变成 `Plan`。
+    #[test]
+    fn builder_plan_mode_sets_plan_permission_mode() {
+        let mut cfg =
+            reflect_core::AgentConfig::new("openai/gpt-4o".to_string(), std::env::temp_dir());
+        // 与 builder.rs:233-235 的 wiring 保持一致(这里是可单测的重放)。
+        cfg = cfg.with_initial_permission_mode(reflect_protocol::PermissionMode::Plan);
+        assert_eq!(
+            *cfg.permission_mode.read(),
+            reflect_protocol::PermissionMode::Plan,
+            "plan_mode(true) 必须把 permission_mode 设为 Plan"
+        );
+    }
+
+    /// 回归(0.5):Plan mode 的强制力来自 hook,不是 permission mode。
+    /// 这条断言守住"PlanModeGate 是可达的默认构造"—— 若 hook 改名 /
+    /// 改签名,这里先编译失败,提示去同步 builder 里的注册调用。
+    #[test]
+    fn plan_mode_gate_hook_is_constructible() {
+        use reflect_hooks::hook::Hook as _;
+        let gate = reflect_hooks::builtins::PlanModeGate::default_mode();
+        assert_eq!(gate.name(), "plan_mode_gate");
     }
 
     /// `plan_mode(false)`(默认)保持 `PermissionMode::Auto`,与历史行为兼容。
@@ -547,6 +942,89 @@ mod tests {
             planwrite,
             reflect_protocol::PermissionMode::Auto,
             "PlanWrite.required_permission 必须为 Auto,Plan mode 下免审批直写"
+        );
+    }
+
+    // ── v1.x:telemetry / rollout 配置 wiring ────────────────────────────
+
+    /// 持锁期间把 `$HOME` 指到 `home`;guard drop 时还原原值。
+    /// 与 `env_lock` 共用一把锁,避免并行测试互相污染 env。
+    struct TempHomeGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        prior: Option<String>,
+    }
+
+    impl Drop for TempHomeGuard {
+        fn drop(&mut self) {
+            // SAFETY: 持锁期间还原,无并发 env 变更。
+            match &self.prior {
+                Some(h) => unsafe { std::env::set_var("HOME", h) },
+                None => unsafe { std::env::remove_var("HOME") },
+            }
+        }
+    }
+
+    fn with_temp_home(home: &Path) -> TempHomeGuard {
+        let lock = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let prior = std::env::var("HOME").ok();
+        // SAFETY: env_lock 已串行化所有 env 变更。
+        unsafe { std::env::set_var("HOME", home) };
+        TempHomeGuard { _lock: lock, prior }
+    }
+
+    #[test]
+    fn telemetry_auto_constructs_sink_from_default_config() {
+        // Auto 路径:HOME 指向空 tmpdir(无 config.toml)→ `[telemetry]`
+        // 缺省 enabled=true → sink 非 None(SDK 路径默认有数据记录)。
+        let tmp = tempfile::tempdir().unwrap();
+        let _g = with_temp_home(tmp.path());
+        let b = Reflect::builder("openai/gpt-4o");
+        assert!(
+            b.resolve_telemetry_sink().is_some(),
+            "Auto 路径应默认构造 telemetry sink(与 reflect-exec 对齐)"
+        );
+    }
+
+    #[test]
+    fn telemetry_explicit_off_disables_sink() {
+        // with_telemetry(None) = 显式关闭,不读 config。
+        let b = Reflect::builder("openai/gpt-4o").with_telemetry(None);
+        assert!(b.resolve_telemetry_sink().is_none());
+    }
+
+    #[test]
+    fn telemetry_custom_sink_is_injected_verbatim() {
+        let sink = TelemetrySink::new(
+            std::env::temp_dir().join("reflect-test-telemetry-traces"),
+            "test-session",
+        );
+        let b = Reflect::builder("openai/gpt-4o").with_telemetry(Some(sink.clone()));
+        let resolved = b.resolve_telemetry_sink().expect("custom sink");
+        assert!(Arc::ptr_eq(&resolved, &sink), "自定义 sink 应原样注入");
+    }
+
+    #[test]
+    fn telemetry_traces_dir_keeps_auto_sink() {
+        // with_traces_dir 只覆盖 Auto 路径的目录,不影响开关语义。
+        let tmp = tempfile::tempdir().unwrap();
+        let _g = with_temp_home(tmp.path());
+        let b = Reflect::builder("openai/gpt-4o").with_traces_dir(tmp.path().join("traces"));
+        assert!(b.resolve_telemetry_sink().is_some());
+    }
+
+    #[test]
+    fn rollout_config_fields_default_on() {
+        // 默认:rollout 开启、无自定义目录。
+        let b = Reflect::builder("openai/gpt-4o");
+        assert!(b.rollout_enabled);
+        assert!(b.rollout_base.is_none());
+        // without_rollout 关闭;with_rollout_dir 设目录。
+        let b2 = Reflect::builder("openai/gpt-4o").without_rollout();
+        assert!(!b2.rollout_enabled);
+        let b3 = Reflect::builder("openai/gpt-4o").with_rollout_dir("/tmp/custom-sessions");
+        assert_eq!(
+            b3.rollout_base.as_deref(),
+            Some(std::path::Path::new("/tmp/custom-sessions"))
         );
     }
 }

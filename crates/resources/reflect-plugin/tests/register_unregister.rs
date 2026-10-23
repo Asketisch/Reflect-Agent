@@ -146,6 +146,15 @@ async fn register_unregister_full_cycle() {
     let lint_plugin_id = skills.get("lint").and_then(|s| s.plugin_id.clone());
     assert_eq!(lint_plugin_id.as_deref(), Some("phase-b-fixture@inline"));
 
+    // 验证 commands 已挂到 CommandRegistry(展开在用户输入层做)
+    let commands = registries.commands.list();
+    let cmd_names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(cmd_names, vec!["phase-b-fixture:hello"], "{cmd_names:?}");
+    // lookup 命中后可展开(读 md + 剥 frontmatter)
+    let hello = registries.commands.lookup("phase-b-fixture:hello").unwrap();
+    let expanded = reflect_plugin::expand_command(&hello, "张三").unwrap();
+    assert!(expanded.contains("# hi"), "unexpected: {expanded}");
+
     // 验证 agents 已挂为 tool + spec
     let tool_names = tools
         .list_with_source()
@@ -174,6 +183,14 @@ async fn register_unregister_full_cycle() {
 
     // Skills catalog 清除
     assert!(!skills.plugin_ids().contains(&id.to_string()));
+    // CommandRegistry 清除
+    assert!(registries.commands.list().is_empty());
+    assert!(
+        registries
+            .commands
+            .lookup("phase-b-fixture:hello")
+            .is_none()
+    );
     // Plugin-sourced tools 清除
     let remaining_plugin_tools = tools
         .list_with_source()

@@ -2,9 +2,14 @@
 //!
 //! 接受一个 todos 数组,每个 todo
 //! 含 `content` + `status`(`pending` | `in_progress` | `completed`) +
-//! `activeForm`(可选)。工具把整个列表序列化到 `metadata.todos`,由
-//! `reflect-tui` 的 reducer(Phase 6)在 `EventMsg::ToolCallEnd` 时回填
-//! 到 `RenderState.todos` 渲染。
+//! `activeForm`(可选)。工具把整个列表序列化到 **`ToolOutput.metadata.todos`**。
+//!
+//! ⚠️ **清单只出不进**(2026-10 核实):`ToolOutput.metadata` 是**输出通道** ——
+//! 事件侧 `EventMsg::ToolCallEnd` 带着它,GUI 能展示这份清单;但**没有任何
+//! 组件把它回灌进下一轮的模型上下文**,所以 LLM 写完即忘。
+//! (此前本文件的注释说「由 `reflect-tui` 的 reducer(Phase 6)回填到
+//! `RenderState.todos`」—— **submodule 里没有 `reflect-tui` crate,也没有
+//! 任何这样的 reducer**;那是上游早期的设计稿,实现从未落地。)
 //!
 //! **与 V2 的关系**:TodoWrite 不走 `TaskManager`,不持久化,不做跨
 //! session 同步。它的存在理由是 LLM 在单次会话里高频更新自己的 working

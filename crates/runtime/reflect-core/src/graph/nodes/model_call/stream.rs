@@ -14,6 +14,14 @@ use tokio::time::sleep;
 use super::super::retry::{RetryAction, classify_action, error_code, outcome_code};
 use crate::submission_loop::NodeContext;
 
+/// 结束原因之后等待尾部 usage chunk 的上限。
+///
+/// provider 把 usage 放在「结束原因之后」的额外 chunk 里是常见做法
+/// (OpenAI `stream_options.include_usage`、Kilo 免费池实测均如此)。
+/// 该 chunk 通常紧随其后到达,但有些 provider 收尾后不立刻关连接 ——
+/// 用短超时兜底,避免整个回合被拖住。
+const USAGE_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(2000);
+
 /// 解析流式累积的工具参数 JSON。
 ///
 /// 模型(尤其弱模型)可能输出空 / 截断 / 非法 JSON,导致 `from_str` 失败。
@@ -66,12 +74,64 @@ pub async fn process_stream_events(
     let mut tool_calls: Vec<(String, String, serde_json::Value)> = Vec::new();
     let mut current_tool: Option<(String, String)> = None;
     let mut current_args_str = String::new();
+    // 本轮工具的参数是**从 ToolUseStart 带过来的**(`input_json` 非空)吗?
+    //
+    // provider 的两种参数投递形态:
+    // - **分片形态**:ToolUseStart 带**空** `input_json`,参数随后由若干
+    //   `ToolUseDelta` 分片送来(Anthropic / OpenAI / Responses)。
+    // - **整包形态**:ToolUseStart 直接带**完整** `input_json`,**没有**
+    //   delta(Ollama 原生格式;mock provider 也发整包 + 一份重复 delta)。
+    //
+    // 此前只累积 delta、把 `input_json` 整个忽略 —— 于是**整包形态的
+    // provider 参数全丢**(工具收到 `args = null`,表现为「missing 'cmd'」
+    // 这类假故障)。本标记用来区分两种形态:整包形态下忽略随后的 delta
+    // (mock 会重复发一份),分片形态下正常累积。
+    let mut args_from_start = false;
     let mut usage = TokenUsage::default();
     let mut stop = false;
+    // 收到结束原因后的「排空」阶段:只再收 usage 事件。
+    //
+    // 某些 provider 把 usage 放在**结束原因之后**的额外 chunk 里 ——
+    // OpenAI(`stream_options.include_usage`)与 Kilo 免费池实测均如此。
+    // 此前在 `MessageStop` 处直接 break,尾部的 usage chunk 被丢弃 →
+    // `token_count` 恒为 0,配额/成本统计全部失真。
+    let mut draining = false;
+    // 排空阶段的截止时刻(进入排空时设定)—— 整个排空窗口有界。
+    let mut drain_deadline: Option<tokio::time::Instant> = None;
     let mut error: Option<LlmError> = None;
     let mut truncated = false;
 
     loop {
+        // 排空阶段:在有界窗口内继续读,**跳过非 usage 事件**直到拿到 usage。
+        //
+        // 为什么不能只读一个事件:provider 的每个 chunk 都会先产出一个
+        // `MessageStart`(OpenAI 兼容形状里 id/model 每帧都有),所以尾部
+        // usage chunk 前面还隔着一个 `MessageStart` —— 只读一次拿到的是
+        // 它,usage 反而被漏掉。
+        if draining {
+            let deadline = drain_deadline.unwrap_or_else(tokio::time::Instant::now);
+            match tokio::time::timeout_at(deadline, s.next()).await {
+                Ok(Some(Ok(ChatEvent::Usage {
+                    input_tokens,
+                    output_tokens,
+                    cached_tokens,
+                    cache_write_tokens,
+                }))) => {
+                    usage = TokenUsage {
+                        input_tokens,
+                        output_tokens,
+                        cached_tokens,
+                        cache_write_tokens,
+                        total_tokens: input_tokens + output_tokens,
+                    };
+                    break;
+                }
+                // 非 usage 事件(如每个 chunk 都带的 MessageStart)——跳过继续等。
+                Ok(Some(Ok(_))) => continue,
+                // 流结束 / 出错 / 超时 —— 放弃排空。
+                _ => break,
+            }
+        }
         tokio::select! {
             biased;
             _ = ctx.cancel.cancelled() => {
@@ -106,7 +166,7 @@ pub async fn process_stream_events(
                             }),
                         )).await;
                     }
-                    Some(Ok(ChatEvent::ToolUseStart { id, name, .. })) => {
+                    Some(Ok(ChatEvent::ToolUseStart { id, name, input_json })) => {
                         let _ = ctx.event_tx.send(Event::new(
                             ctx.sub_id.clone(),
                             EventMsg::ToolCallBegin(ToolCallBeginEvent {
@@ -127,25 +187,37 @@ pub async fn process_stream_events(
                             tool_calls.push((prev_id, prev_name, prev_args));
                         }
                         current_tool = Some((id, name));
-                        current_args_str.clear();
+                        // 播种而非清空:整包形态的 provider(Ollama 原生
+                        // 格式)把**完整**参数放在这里且**不发** delta ——
+                        // 清空会把参数整个丢掉。
+                        args_from_start = !input_json.is_empty();
+                        current_args_str = input_json;
                     }
                     Some(Ok(ChatEvent::ToolUseDelta(partial))) => {
-                        current_args_str.push_str(&partial);
-                        // v1.5 新功能:把流式工具参数增量转发给客户端 ——
-                        // 此前只缓冲不转发,tool_call_begin 携带 args: null,
-                        // 消费方在模型生成期间只能干等。additive 变体,
-                        // 老客户端按未知 type 忽略。
-                        if let Some((id, _)) = &current_tool {
-                            let _ = ctx.event_tx.send(Event::new(
-                                ctx.sub_id.clone(),
-                                EventMsg::ToolCallArgsDelta(
-                                    reflect_protocol::ToolCallArgsDeltaEvent {
-                                        call_id: id.clone(),
-                                        delta: partial,
-                                    },
-                                ),
-                            ))
-                            .await;
+                        // 整包形态:参数已由 ToolUseStart 带全,随后的 delta
+                        // 是重复的(mock provider 就这么发)—— 忽略,否则会
+                        // 拼成两遍 JSON,解析失败又变回 `args = null`。
+                        if !args_from_start {
+                            current_args_str.push_str(&partial);
+                            // v1.5 新功能:把流式工具参数增量转发给客户端 ——
+                            // 此前只缓冲不转发,tool_call_begin 携带 args: null,
+                            // 消费方在模型生成期间只能干等。additive 变体,
+                            // 老客户端按未知 type 忽略。
+                            //
+                            // 只转发**真正被采纳**的分片:整包形态下的 delta
+                            // 是重复的,转发会让客户端把同一段参数累积两遍。
+                            if let Some((id, _)) = &current_tool {
+                                let _ = ctx.event_tx.send(Event::new(
+                                    ctx.sub_id.clone(),
+                                    EventMsg::ToolCallArgsDelta(
+                                        reflect_protocol::ToolCallArgsDeltaEvent {
+                                            call_id: id.clone(),
+                                            delta: partial,
+                                        },
+                                    ),
+                                ))
+                                .await;
+                            }
                         }
                     }
                     Some(Ok(ChatEvent::MessageStopTruncated { .. })) => {
@@ -171,7 +243,16 @@ pub async fn process_stream_events(
                     Some(Err(e)) => { error = Some(e); stop = true; }
                     Some(Ok(_)) => {}
                 }
-                if stop { break; }
+                if stop {
+                    // 流中出错:立即结束,不排空(错误优先)。
+                    if error.is_some() {
+                        break;
+                    }
+                    // 结束原因已到 —— 进入排空阶段等尾部 usage chunk。
+                    draining = true;
+                    drain_deadline =
+                        Some(tokio::time::Instant::now() + USAGE_DRAIN_TIMEOUT);
+                }
             }
         }
     }

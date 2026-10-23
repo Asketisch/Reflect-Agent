@@ -168,6 +168,11 @@ pub struct DiscussionConfig {
     pub max_rounds: u32,
     /// Mailbox 容量上限(per agent,防 OOM)。
     pub mailbox_capacity: usize,
+    /// v1.4 C3:裁判模式 —— 每轮结束由裁判(独立 LLM)通读全部发言出
+    /// 结构化裁决,`agreed` 才算共识;代理自报 Consensus 降级为裁判的
+    /// 参考信号之一。`false`(默认)维持纯自报共识的历史行为。
+    #[serde(default)]
+    pub judge: bool,
 }
 
 impl Default for DiscussionConfig {
@@ -179,9 +184,73 @@ impl Default for DiscussionConfig {
             consensus_window: 1,
             max_rounds: 10,
             mailbox_capacity: 64,
+            judge: false,
         }
     }
 }
+
+/// v1.4 C3:裁判裁决(结构化输出,由裁判 LLM 产出 JSON 解析而来)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JudgeVerdict {
+    /// 是否已达共识。
+    pub agreed: bool,
+    /// 当前共识摘要(agreed 时)或当前分歧焦点(未达成时)。
+    pub summary: String,
+    /// 未达共识时的待解决点(裁判在下一轮注入,引导讨论收敛)。
+    #[serde(default)]
+    pub blockers: Vec<String>,
+}
+
+impl JudgeVerdict {
+    /// 从裁判 LLM 的自由文本产出解析裁决:容错提取首个 `{...}` 块
+    /// (容忍 markdown fence / 前后噪声),解析失败返回 Err。
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let trimmed = text.trim();
+        let stripped = trimmed
+            .strip_prefix("```json")
+            .or_else(|| trimmed.strip_prefix("```"))
+            .unwrap_or(trimmed)
+            .trim()
+            .trim_end_matches("```")
+            .trim();
+        let json_str = match (stripped.find('{'), stripped.rfind('}')) {
+            (Some(s), Some(e)) if s <= e => &stripped[s..=e],
+            _ => stripped,
+        };
+        let v: serde_json::Value = serde_json::from_str(json_str)
+            .map_err(|e| format!("invalid JSON: {e}; raw: {text}"))?;
+        let agreed = v
+            .get("agreed")
+            .and_then(|x| x.as_bool())
+            .ok_or_else(|| format!("missing 'agreed' field; raw: {text}"))?;
+        let summary = v
+            .get("summary")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let blockers = v
+            .get("blockers")
+            .and_then(|x| x.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(Self {
+            agreed,
+            summary,
+            blockers,
+        })
+    }
+}
+
+/// v1.4 C3:裁判回调 —— 每轮结束后由 runtime 调用,入参(当前轮次,
+/// 全量 transcript),产出裁决。错误字符串仅用于 warn 日志(裁判故障时
+/// 回退到自报共识路径,不中断讨论)。
+pub type JudgeFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<JudgeVerdict, String>> + Send>>;
+pub type JudgeCallback = dyn Fn(u32, Vec<DiscussionMessage>) -> JudgeFuture + Send + Sync;
 
 /// 讨论最终结果。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

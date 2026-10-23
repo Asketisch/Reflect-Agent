@@ -90,6 +90,54 @@ pub fn expand_keep_window_to_preserve_pairs(msgs: &[ChatMessage], keep_start: us
     new_keep_start
 }
 
+/// 校验消息列表里不存在半截 tool 配对。
+///
+/// "半截配对"= 某条 `Assistant` 消息声明了 `tool_use(id)`,但列表里找不到
+/// 对应 `call_id` 的 `ChatMessage::Tool`(或反过来:有 `Tool` 结果却没有
+/// 声明它的 assistant `tool_use`)。OpenAI / Anthropic 都会以 HTTP 400
+/// 拒绝这种请求,所以这是压缩策略的硬不变式。
+///
+/// 返回违规描述列表;空 vec = 配对完整。
+///
+/// 用途:测试断言(压缩后必须 intact)+ 调试。生产路径不调用 —— 它是
+/// O(n) 全表扫描,且压缩本身已保证不变式(见
+/// [`expand_keep_window_to_preserve_pairs`] 的调用点)。
+pub fn find_broken_pairs(msgs: &[ChatMessage]) -> Vec<String> {
+    let tool_use_idx = find_tool_use_indices(msgs);
+    let tool_result_idx = find_tool_result_indices(msgs);
+    let mut broken = Vec::new();
+    // assistant 声明了 tool_use 但缺结果。
+    for (id, i) in &tool_use_idx {
+        if !tool_result_idx.contains_key(id) {
+            broken.push(format!(
+                "assistant[{i}] 的 tool_use '{id}' 没有对应的 Tool 结果"
+            ));
+        }
+    }
+    // 有 Tool 结果但没有声明它的 assistant。
+    for (id, i) in &tool_result_idx {
+        if !tool_use_idx.contains_key(id) {
+            broken.push(format!(
+                "Tool[{i}] 的结果 '{id}' 没有对应的 assistant tool_use"
+            ));
+        }
+    }
+    broken
+}
+
+/// 断言消息列表的 tool 配对完整,否则 panic 并列出全部违规项。
+///
+/// 0.7:给 strategy / microcompact / smart_prune 的测试统一使用,避免每个
+/// 测试各写一遍(且容易只检查一个方向)。
+pub fn assert_pairs_intact(msgs: &[ChatMessage]) {
+    let broken = find_broken_pairs(msgs);
+    assert!(
+        broken.is_empty(),
+        "压缩后出现半截 tool 配对(provider 会 400):\n{}",
+        broken.join("\n")
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

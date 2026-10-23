@@ -14,8 +14,10 @@
 //!   用户工作流)。
 //!
 //! v1.x 简化:
-//! - `tool` 字段是精确匹配(无 glob);v2.x 加 glob + scope(session/user/
-//!   project)。
+//! - ~~`tool` 字段精确匹配(无 glob)~~(P2 `permission-rules` 已补:
+//!   `matcher` 模块支持 `tool_glob`(如 `Web*`)与 bash 专用
+//!   `shell_pattern` 的上下文感知匹配);scope(session/user/project)
+//!   留 v2。
 //! - 没有 rule precedence 概念 —— 第一条匹配即返回(用户 add 的顺序
 //!   隐式定 precedence)。
 //! - 持久化只在 HOME base,无 `$REFLECT_HOME` 支持(留给 reflect-config

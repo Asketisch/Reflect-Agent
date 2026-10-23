@@ -31,6 +31,17 @@ pub enum MessageRole {
     Tool,
 }
 
+/// v1.x:记忆访问操作类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryOp {
+    /// 检索注入(pre_loop 每轮迭代把相关记忆拼进 system prompt)。
+    Read,
+    /// 固化写入(compact 的 LLM 摘要成功后把提取的事实 append 进
+    /// MEMORY.md)。
+    Write,
+}
+
 /// CLI `resume` 流与会话索引用到的轻量会话元数据。`message_count` 在每条
 /// 记录写入时延迟更新。
 ///
@@ -103,11 +114,20 @@ pub enum RolloutRecord {
     },
     /// 由 `pre_loop` 在 `Compactor::compact` 执行完且策略不为 `Noop` 时发出。
     /// `summary` 是替换被丢弃切片的那条合成 `<summary>` System 消息正文。
+    ///
+    /// v1.x:`before_tokens` / `after_tokens` 记录压缩前后的上下文 token
+    /// 估算(源自 `ContextCompactedEvent`)—— 此前这两个值只在内存事件流
+    /// 里,落盘即丢,导致会话统计无法回答「压缩省了多少 token」。
+    /// `#[serde(default)]` 保证旧 JSONL(无这两字段)反序列化为 0。
     Compaction {
         turn_id: TurnId,
         strategy: String,
         removed_count: usize,
         summary: String,
+        #[serde(default)]
+        before_tokens: u32,
+        #[serde(default)]
+        after_tokens: u32,
     },
     /// 由 `SubAgentFactory::fork` 发出,标记一个分支会话。
     Fork {
@@ -161,6 +181,12 @@ pub enum RolloutRecord {
     /// 持久化一遍,确保进程退出后 CLI `reflect session ls/show` 仍能看到累计。
     /// `cost_usd` 在 emit 当时已由 `model_call` 调用
     /// `reflect_llm::providers::price()` 算好;此处直接复用,不重新计算。
+    ///
+    /// v1.x 模型级统计:`model` / `provider` 记录本次调用实际命中的模型
+    /// spec(如 `"openai/gpt-4o"`)与 provider 名,供 `session_stats` 按模型
+    /// 分组聚合。`#[serde(default, skip_serializing_if)]` 与 `cost_usd`
+    /// 同一兼容模式 —— 旧 JSONL 无这两字段时反序列化为 `None`,聚合方
+    /// 回退到会话级 `SessionMeta.model`。
     TokenCount {
         turn_id: TurnId,
         /// 标准 5 段 usage: input / output / cached / cache_write / total。
@@ -168,6 +194,10 @@ pub enum RolloutRecord {
         usage: TokenUsage,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cost_usd: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
         at: DateTime<Utc>,
     },
     /// v1.x Plan mode:agent 请求进入 Plan mode。镜像 `PlanRequestEvent`,
@@ -204,6 +234,24 @@ pub enum RolloutRecord {
     PermissionModeChanged {
         from: PermissionMode,
         to: PermissionMode,
+        at: DateTime<Utc>,
+    },
+    /// v1.x:记忆访问审计。读 = pre_loop 检索注入(每轮迭代);写 = compact
+    /// 固化(LLM 摘要成功后 append 进 MEMORY.md)。此前两者只有 tracing
+    /// 日志,无持久化 —— 用户无法回答「这个会话注入了哪些记忆 / 固化
+    /// 了什么」。审计轨迹,不参与 `resume` 回放(与 TokenCount 同类)。
+    MemoryAccess {
+        turn_id: TurnId,
+        op: MemoryOp,
+        /// 记忆作用域。读 = agent 配置的 scope 列表(逗号 join,如
+        /// `"project,user"`);写 = 实际写入的单一 scope。
+        scope: String,
+        /// agent 类型名(记忆按 agent 分文件存储)。
+        agent_type: String,
+        /// 读 = 注入 system prompt 的记忆字符数;写 = 追加内容的字符数。
+        chars: u32,
+        /// 写 = 固化的记忆条目数;读 = 0(检索结果不拆条计数)。
+        entries: u32,
         at: DateTime<Utc>,
     },
 }
@@ -346,12 +394,79 @@ mod tests {
             strategy: "microcompact".into(),
             removed_count: 12,
             summary: "<summary>...</summary>".into(),
+            before_tokens: 9_000,
+            after_tokens: 2_000,
         };
         let j = serde_json::to_string(&r).unwrap();
         assert!(j.contains(r#""type":"compaction""#));
         assert!(j.contains(r#""strategy":"microcompact""#));
+        // v1.x:压缩前后 token 随记录序列化。
+        assert!(j.contains(r#""before_tokens":9000"#), "got: {j}");
+        assert!(j.contains(r#""after_tokens":2000"#), "got: {j}");
         let back: RolloutRecord = serde_json::from_str(&j).unwrap();
         assert_eq!(back, r);
+    }
+
+    #[test]
+    fn rollout_record_memory_access_serde() {
+        // v1.x:MemoryAccess 读/写两个 op 的 roundtrip。
+        for op in [MemoryOp::Read, MemoryOp::Write] {
+            let r = RolloutRecord::MemoryAccess {
+                turn_id: TurnId::new(),
+                op,
+                scope: "project,user".into(),
+                agent_type: "coder".into(),
+                chars: 1234,
+                entries: if matches!(op, MemoryOp::Write) { 3 } else { 0 },
+                at: Utc::now(),
+            };
+            let j = serde_json::to_string(&r).unwrap();
+            assert!(j.contains(r#""type":"memory_access""#), "got: {j}");
+            let expected_op = match op {
+                MemoryOp::Read => "read",
+                MemoryOp::Write => "write",
+            };
+            assert!(j.contains(&format!(r#""op":"{expected_op}""#)), "got: {j}");
+            let back: RolloutRecord = serde_json::from_str(&j).unwrap();
+            match back {
+                RolloutRecord::MemoryAccess {
+                    op: back_op,
+                    scope,
+                    agent_type,
+                    chars,
+                    entries,
+                    ..
+                } => {
+                    assert_eq!(back_op, op);
+                    assert_eq!(scope, "project,user");
+                    assert_eq!(agent_type, "coder");
+                    assert_eq!(chars, 1234);
+                    assert_eq!(entries, if matches!(op, MemoryOp::Write) { 3 } else { 0 });
+                }
+                other => panic!("wrong variant: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn rollout_record_compaction_tokens_backward_compat() {
+        // 旧 JSONL 的 Compaction 无 before/after 字段 → 反序列化为 0。
+        let j = format!(
+            r#"{{"type":"compaction","turn_id":"{}","strategy":"microcompact","removed_count":3,"summary":""}}"#,
+            TurnId::new()
+        );
+        let back: RolloutRecord = serde_json::from_str(&j).unwrap();
+        match back {
+            RolloutRecord::Compaction {
+                before_tokens,
+                after_tokens,
+                ..
+            } => {
+                assert_eq!(before_tokens, 0);
+                assert_eq!(after_tokens, 0);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
     }
 
     #[test]
@@ -541,6 +656,8 @@ mod tests {
             turn_id: tid,
             usage: usage.clone(),
             cost_usd: Some(0.0234),
+            model: Some("openai/gpt-4o".into()),
+            provider: Some("openai".into()),
             at: Utc::now(),
         };
         let j = serde_json::to_string(&r).unwrap();
@@ -548,17 +665,24 @@ mod tests {
         assert!(j.contains(r#""input_tokens":1000"#), "got: {j}");
         assert!(j.contains(r#""total_tokens":1200"#), "got: {j}");
         assert!(j.contains(r#""cost_usd":0.0234"#), "got: {j}");
+        // v1.x:模型级统计字段随记录序列化。
+        assert!(j.contains(r#""model":"openai/gpt-4o""#), "got: {j}");
+        assert!(j.contains(r#""provider":"openai""#), "got: {j}");
         let back: RolloutRecord = serde_json::from_str(&j).unwrap();
         match back {
             RolloutRecord::TokenCount {
                 turn_id,
                 usage: u,
                 cost_usd,
+                model,
+                provider,
                 ..
             } => {
                 assert_eq!(turn_id, tid);
                 assert_eq!(u, usage);
                 assert_eq!(cost_usd, Some(0.0234));
+                assert_eq!(model.as_deref(), Some("openai/gpt-4o"));
+                assert_eq!(provider.as_deref(), Some("openai"));
             }
             other => panic!("wrong variant: {other:?}"),
         }
@@ -571,10 +695,18 @@ mod tests {
         let back: RolloutRecord = serde_json::from_str(j).unwrap();
         match back {
             RolloutRecord::TokenCount {
-                usage, cost_usd, ..
+                usage,
+                cost_usd,
+                model,
+                provider,
+                ..
             } => {
                 assert_eq!(usage.total_tokens, 15);
                 assert_eq!(cost_usd, None);
+                // v1.x:旧 JSONL 无 model / provider → None(聚合方回退
+                // SessionMeta.model)。
+                assert_eq!(model, None);
+                assert_eq!(provider, None);
             }
             other => panic!("wrong variant: {other:?}"),
         }

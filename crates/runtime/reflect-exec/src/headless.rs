@@ -18,8 +18,8 @@ use reflect_core::{AgentConfig, AgentThread};
 use reflect_hooks::builtins::{PlanModeGate, build_read_before_edit};
 use reflect_llm::ModelRegistry;
 use reflect_mcp::McpConnectionManager;
-use reflect_protocol::{Event, ThreadId};
-use reflect_rollout::JsonlRolloutWriter;
+use reflect_plugin::runtime::{SharedPluginRuntime, bootstrap_plugins};
+use reflect_protocol::{Event, Submission, ThreadId};
 use reflect_task::coordinator::CoordinatorConfig;
 use reflect_tools::{Sanitizer, ToolRegistry, ToolSource};
 use tokio::sync::mpsc;
@@ -28,7 +28,6 @@ use tokio_util::sync::CancellationToken;
 use crate::bootstrap::{
     self, bootstrap_lsp, bootstrap_m4, bootstrap_m5, bootstrap_m6, bootstrap_resume,
 };
-use crate::bootstrap_plugins;
 use crate::jsonl::JsonlWriter;
 use crate::reload::spawn_reload_task;
 use crate::runtime_config::{
@@ -83,6 +82,10 @@ pub struct HeadlessSession {
     /// resume 分支回放进 thread 的历史消息数(普通分支为 0)。exec 用它
     /// 拼合成 reminder 文案;serve 忽略。
     pub prior_messages: usize,
+    /// 运行时插件状态 —— exec / serve 用它在 submit 前展开
+    /// `/plugin:ns:name args` 形式的 slash 命令(`expand_user_input`)。
+    /// `HOME` 缺失或 plugins 目录不存在时 `Option` 内为 `None`。
+    pub plugin_runtime: SharedPluginRuntime,
 }
 
 /// 装配公共前半段:config → tracing → 工具注册表 → task manager →
@@ -97,7 +100,12 @@ pub async fn bootstrap_common(args: &HeadlessArgs) -> anyhow::Result<HeadlessCom
     // 把 `[sandbox].os_level` 配置桥接到 env(`REFLECT_SANDBOX_OS_LEVEL`)
     // —— `BashTool` 在 execute 时读 env 决定是否激活 Seatbelt/Landlock。
     // env 优先于 TOML(让 `REFLECT_SANDBOX_OS_LEVEL=0` 能临时覆盖配置)。
-    if initial_cfg.sandbox.os_level && std::env::var_os("REFLECT_SANDBOX_OS_LEVEL").is_none() {
+    // `Option<bool>`:`None` = 用户未表态 → 不桥接 env,让
+    // `OsSandbox::from_env()` 走**核心基线**(env 未设置 = 默认开启);
+    // `Some(true)` = 显式要求开 → 桥接 env=1。
+    if initial_cfg.sandbox.os_level == Some(true)
+        && std::env::var_os("REFLECT_SANDBOX_OS_LEVEL").is_none()
+    {
         unsafe {
             std::env::set_var("REFLECT_SANDBOX_OS_LEVEL", "1");
         }
@@ -135,13 +143,19 @@ pub async fn bootstrap_common(args: &HeadlessArgs) -> anyhow::Result<HeadlessCom
             config_path.display()
         );
     }
-    let model = initial_cfg.resolved_model_spec().ok_or_else(|| {
-        anyhow::anyhow!(
-            "no model configured for the active provider: set [<provider>].model \
-             or a [[<provider>.credentials]].model entry in {} (or REFLECT_MODEL env)",
-            config_path.display()
-        )
-    })?;
+    // `model = "free"` 这类**运行时才知道**的值(从 provider 清单里挑一个
+    // 免费模型)在此解析成真实 id —— 之后 `AgentConfig.model` 拿到的永远是
+    // 具体模型,事件流 / tracing 里也不会出现 "free" 这种占位。
+    let model = reflect_config::resolve_model_spec(&initial_cfg, &registry)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to resolve model: {e}"))?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no model configured for the active provider: set [<provider>].model \
+                 or a [[<provider>.credentials]].model entry in {} (or REFLECT_MODEL env)",
+                config_path.display()
+            )
+        })?;
 
     // v1.5 实战修复:新用户首次运行(HOME 下无 `~/.reflect/`)时,notify
     // watcher 要求被监听路径存在,否则 bootstrap 直接失败。先确保父目录
@@ -168,7 +182,7 @@ pub async fn bootstrap_common(args: &HeadlessArgs) -> anyhow::Result<HeadlessCom
     // 2. 工具注册表(builtin 全量注册,与 exec 历史行为一致)。
     let tools = Arc::new(ToolRegistry::default());
     tools.register(Arc::new(reflect_tools::builtins::EchoTool));
-    tools.register(Arc::new(reflect_tools::builtins::BashTool));
+    tools.register(Arc::new(reflect_tools::builtins::BashTool::default()));
     // 核心文件工具:与 lib facade(`reflect::builder::default_tool_registry`)对齐。
     // 此前缺失导致 CLI headless/serve 下模型调用 read/write/edit/grep/glob 报
     // "tool not found",而 ALWAYS_ON_TOOLS prompt 仍向模型宣告这些工具可用。
@@ -247,6 +261,20 @@ pub async fn bootstrap_common(args: &HeadlessArgs) -> anyhow::Result<HeadlessCom
     reflect_task::register_task_tools(&tools, task_manager.clone());
     bootstrap::TOOLS.with(|t| *t.borrow_mut() = Some(tools.clone()));
 
+    // v1.4 D1:tokenizer feature 开启时注册 tiktoken 全局估算器
+    // (set-once;失败仅 warn,回退启发式,不阻塞启动)。
+    #[cfg(feature = "tokenizer")]
+    match reflect_compact::global_tiktoken_estimator() {
+        Ok(est) => {
+            if reflect_compact::set_global_estimator(est) {
+                tracing::info!("tiktoken estimator registered (tokenizer feature)");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "tiktoken estimator init failed; using heuristic");
+        }
+    }
+
     // 3. Ctrl-C 取消令牌 + workspace 解析。
     let cancel = CancellationToken::new();
     {
@@ -288,6 +316,68 @@ pub async fn bootstrap_common(args: &HeadlessArgs) -> anyhow::Result<HeadlessCom
 /// send 失败后自然退出,不会泄漏。
 pub(crate) struct ReloadRxHandle(pub(crate) mpsc::Receiver<Event>);
 
+/// 装配权限层 + YOLO 分类器(normal 与 resume 分支共用)。
+///
+/// 优先级(链式 first-match-wins,更具体的作用域在前):
+/// config.toml `[permissions]`(会话) > project
+/// (`<workspace>/.reflect/permissions.toml`) > 用户级
+/// (`~/.reflect/permissions.toml`)。`add` / `remove` 委托链尾的用户级
+/// file store,运行时写入照旧落盘到用户文件;project 文件手工维护,
+/// 随工作区签入。
+///
+/// v1.5 修复:此前只有 normal 分支装配权限,resume 分支完全绕过
+/// 权限规则与 YOLO 分类器。
+async fn apply_permission_layers(
+    mut cfg: AgentConfig,
+    initial_cfg: &reflect_config::ReflectConfig,
+    workspace: &std::path::Path,
+) -> AgentConfig {
+    let Ok(file_store) = reflect_permissions::FilePermissionStore::with_default_home() else {
+        cfg.yolo_classifier = Some(Arc::new(reflect_permissions::HeuristicYoloClassifier));
+        return cfg;
+    };
+    let file_store: Arc<dyn reflect_permissions::PermissionStore> = Arc::new(file_store);
+    let cfg_store: Arc<dyn reflect_permissions::PermissionStore> =
+        Arc::new(reflect_permissions::InMemoryPermissionStore::new());
+    if let Some(sec) = &initial_cfg.permissions {
+        let rules = sec.expanded_rules();
+        for rule in &rules {
+            if let Err(e) = cfg_store.add(rule.clone()).await {
+                tracing::warn!(error = %e, "permission rule from config.toml 落库失败,跳过");
+            }
+        }
+        tracing::info!(
+            rules = rules.len(),
+            "loaded permissions rules from config.toml [permissions]"
+        );
+    }
+    // v1.5:project 级权限 —— `<workspace>/.reflect/permissions.toml`。
+    let project_path = workspace.join(".reflect").join("permissions.toml");
+    let project_store: Arc<dyn reflect_permissions::PermissionStore> = Arc::new(
+        reflect_permissions::FilePermissionStore::with_path(project_path.clone()),
+    );
+    if let Ok(rules) = project_store.list().await {
+        if !rules.is_empty() {
+            tracing::info!(
+                rules = rules.len(),
+                path = %project_path.display(),
+                "loaded project permissions from .reflect/permissions.toml"
+            );
+        }
+    }
+    let chained: Arc<dyn reflect_permissions::PermissionStore> =
+        Arc::new(reflect_permissions::ChainedPermissionStore::new(vec![
+            cfg_store,
+            project_store,
+            file_store,
+        ]));
+    let resolver: Arc<dyn reflect_permissions::PermissionResolver> =
+        Arc::new(reflect_permissions::StorePermissionResolver::new(chained));
+    cfg = cfg.with_permission_resolver(resolver);
+    cfg.yolo_classifier = Some(Arc::new(reflect_permissions::HeuristicYoloClassifier));
+    cfg
+}
+
 /// 装配普通分支后半段(与原 `async_main` 普通分支逐行对应),返回
 /// 可供 exec / serve 使用的 session。
 pub async fn bootstrap_normal(
@@ -324,7 +414,7 @@ pub async fn bootstrap_normal(
         telemetry_sink.clone(),
     )
     .expect("bootstrap_m4 must succeed for the normal (non-resume) path");
-    let policy = Arc::new(initial_cfg.routing_policy());
+    let policy = Arc::new(initial_cfg.routing_policy_with(&model));
 
     // M5 bootstrap:subagent 工具(call_<role>)。
     let parent_recorder: Arc<dyn reflect_protocol::RolloutRecorder> = m4
@@ -342,6 +432,13 @@ pub async fn bootstrap_normal(
         &initial_cfg,
     );
     factory.set_telemetry(telemetry_sink.clone());
+    // v1.4 A1:子代理运行注册表 + 主会话令牌注入 —— 同一 `Arc` 双侧共享
+    // (主 cfg 的 `Op::Interrupt { child_id }` 路由侧 / 工厂的 spawn 登记
+    // 侧);同时把主会话 Ctrl-C 令牌覆盖进 factory,让子代理的 child_token
+    // 挂在会话令牌之下,Shutdown / Ctrl-C 能级联取消在飞子代理。
+    let subagent_runtime = Arc::new(reflect_core::SubagentRuntimeRegistry::new());
+    factory.set_runtime_registry(subagent_runtime.clone());
+    factory.set_cancel(cancel.clone());
 
     // Coordinator 模式整合:team spec 注入 factory + 统一开关。
     let coord_enabled = CoordinatorConfig::from_env_or_config(
@@ -368,6 +465,10 @@ pub async fn bootstrap_normal(
     let max_iterations =
         reflect_core::config::max_iterations_from_env(initial_cfg.active.max_iterations);
     let quota_tracker = build_quota_tracker(&initial_cfg);
+    // v1.5 R4:恢复上次的配额窗口(重启不静默重置;文件缺失 no-op)。
+    if let Some(t) = &quota_tracker {
+        t.load_state();
+    }
     // web_search 工具级 env:`[web_search].api_key` → BRAVE_API_KEY。
     let mut tool_env = std::collections::HashMap::new();
     if let Some(ws) = &initial_cfg.web_search {
@@ -377,7 +478,7 @@ pub async fn bootstrap_normal(
             }
         }
     }
-    let mut cfg = AgentConfig::new(model.clone(), workspace)
+    let mut cfg = AgentConfig::new(model.clone(), workspace.clone())
         .with_m4(m4)
         .with_policy(policy)
         .with_token_budget(token_budget)
@@ -386,6 +487,7 @@ pub async fn bootstrap_normal(
         .with_tool_env(tool_env)
         .with_telemetry(telemetry_sink.clone())
         .with_cancel(cancel.clone())
+        .with_subagent_runtime(subagent_runtime.clone())
         .with_context_window_overrides(
             initial_cfg
                 .context_windows
@@ -398,31 +500,7 @@ pub async fn bootstrap_normal(
         } else {
             reflect_protocol::PermissionMode::Auto
         });
-    if let Ok(file_store) = reflect_permissions::FilePermissionStore::with_default_home() {
-        let file_store: Arc<dyn reflect_permissions::PermissionStore> = Arc::new(file_store);
-        let cfg_store: Arc<dyn reflect_permissions::PermissionStore> =
-            Arc::new(reflect_permissions::InMemoryPermissionStore::new());
-        if let Some(sec) = &initial_cfg.permissions {
-            let rules = sec.expanded_rules();
-            for rule in &rules {
-                if let Err(e) = cfg_store.add(rule.clone()).await {
-                    tracing::warn!(error = %e, "permission rule from config.toml 落库失败,跳过");
-                }
-            }
-            tracing::info!(
-                rules = rules.len(),
-                "loaded permissions rules from config.toml [permissions]"
-            );
-        }
-        let chained: Arc<dyn reflect_permissions::PermissionStore> =
-            Arc::new(reflect_permissions::ChainedPermissionStore::new(vec![
-                cfg_store, file_store,
-            ]));
-        let resolver: Arc<dyn reflect_permissions::PermissionResolver> =
-            Arc::new(reflect_permissions::StorePermissionResolver::new(chained));
-        cfg = cfg.with_permission_resolver(resolver);
-    }
-    cfg.yolo_classifier = Some(Arc::new(reflect_permissions::HeuristicYoloClassifier));
+    cfg = apply_permission_layers(cfg, &initial_cfg, &workspace).await;
     let cfg_for_reload = cfg.clone(); // 共享 model Arc<RwLock>
     let thread = Arc::new(AgentThread::new(
         cfg,
@@ -481,8 +559,15 @@ pub async fn bootstrap_normal(
     tools.register(Arc::new(reflect_mcp::ReadMcpResourceTool::new(
         mcp_for_plugins.clone(),
     )));
+    // v1.6:MCP Prompts 原语(与 Resources 对齐的第三类原语)。
+    tools.register(Arc::new(reflect_mcp::ListMcpPromptsTool::new(
+        mcp_for_plugins.clone(),
+    )));
+    tools.register(Arc::new(reflect_mcp::GetMcpPromptTool::new(
+        mcp_for_plugins.clone(),
+    )));
 
-    let plugin_runtime = bootstrap_plugins::bootstrap_plugins(
+    let plugin_runtime = bootstrap_plugins(
         tools.clone(),
         thread.hook_engine(),
         mcp_for_plugins,
@@ -505,7 +590,7 @@ pub async fn bootstrap_normal(
         Some(parent_recorder),
         mcp_manager,
         tools.clone(),
-        Some(plugin_runtime),
+        Some(plugin_runtime.clone()),
     );
     let (sync_tx, sync_rx) = std::sync::mpsc::channel::<Event>();
     std::thread::spawn(move || {
@@ -531,11 +616,19 @@ pub async fn bootstrap_normal(
         thread,
         tools,
         prior_messages: 0,
+        plugin_runtime,
     })
 }
 
-/// 装配 resume 分支(与原 `async_main` resume 分支逐行对应):回放历史
-/// 消息到全新 AgentThread,不带 factory / plugin(回放补足先前状态)。
+/// 装配 resume 分支:回放历史消息到全新 AgentThread,并与普通分支共用
+/// 完整 M4/M5 装配 + 插件挂载。
+///
+/// 历史 resume 分支为了最小依赖用了测试辅助 `default_m4_deps`(空壳
+/// skills catalog + "You are a test agent." system prompt)且不带
+/// factory / plugin,导致续跑会话丢失 skills / 子代理 / 插件能力。
+/// 现在 resume 与普通分支同权:M4 真实装配(recorder 仍续写原
+/// session)、SubAgentFactory 在位、`enabled_plugins` 挂载且
+/// `[plugins]` 段热重载生效。
 pub async fn bootstrap_resumed(
     common: HeadlessCommon,
     args: &HeadlessArgs,
@@ -558,18 +651,59 @@ pub async fn bootstrap_resumed(
     } = common;
 
     let bundle = bootstrap_resume(thread_id_str).await?;
-    // 最小 M4 依赖:不做 compaction,recorder 续写原 session。
-    let resume_recorder: Arc<dyn reflect_protocol::RolloutRecorder> = Arc::new(
-        JsonlRolloutWriter::new(reflect_rollout::path::default_base(), bundle.thread_id),
+    let thread_id = bundle.thread_id;
+    let telemetry_sink = build_telemetry_sink(&initial_cfg);
+    // 与普通分支相同的 M4 装配:真实 skills 扫描 + 记忆 + 压缩器 + note
+    // 落盘。`bootstrap_m4` 内部按 thread_id 续写同一 JSONL,与旧 resume
+    // 的 `resume_recorder` 等价。
+    let m4 = bootstrap_m4(
+        &workspace,
+        args.agent.as_deref().unwrap_or("default"),
+        &model,
+        &registry,
+        thread_id,
+        initial_cfg.compact.trigger_tokens,
+        &initial_cfg,
+        telemetry_sink.clone(),
+    )
+    .expect("bootstrap_m4 must succeed for the resume path");
+    let resume_recorder: Arc<dyn reflect_protocol::RolloutRecorder> = m4
+        .recorder
+        .clone()
+        .unwrap_or_else(|| Arc::new(reflect_protocol::NullRecorder));
+    let skills_for_plugins = m4.skills.clone();
+    // M5:子代理工厂 —— 插件 agents 能力与内置 subagent spec 都落在这里。
+    let factory = bootstrap_m5(
+        &workspace,
+        args.agent.as_deref().unwrap_or("default"),
+        &model,
+        &registry,
+        thread_id,
+        resume_recorder.clone(),
+        &m4,
+        &initial_cfg,
     );
-    let mut m4 = reflect_core::config::default_m4_deps(args.agent.as_deref().unwrap_or("default"));
-    m4.recorder = Some(resume_recorder.clone());
+    factory.set_telemetry(telemetry_sink.clone());
+    factory.set_cancel(cancel.clone());
     let cfg = AgentConfig::new(model.clone(), workspace.clone())
         .with_m4(m4)
-        .with_policy(Arc::new(initial_cfg.routing_policy()))
-        .with_telemetry(build_telemetry_sink(&initial_cfg))
+        .with_policy(Arc::new(initial_cfg.routing_policy_with(&model)))
+        .with_telemetry(telemetry_sink)
         .with_cancel(cancel.clone())
         .with_preload_messages(bundle.initial_messages.clone());
+    // 与 normal 分支同权:权限三层装配(config > project > user)+ YOLO
+    // 分类器。此前 resume 分支漏装,resume 会话会绕过权限规则。
+    let cfg = apply_permission_layers(cfg, &initial_cfg, &workspace).await;
+    // 0.5:resume 分支此前完全忽略 `--plan-mode` —— 既不设
+    // `PermissionMode::Plan` 也不注册 `PlanModeGate`,于是
+    // `reflect exec --plan-mode --resume <id>` 直接是 Auto 模式 + 无
+    // Plan gate,写工具全开。始终传 `--plan-mode` 的脚本调用方只要同时
+    // resume 就静默拿到完整写权限。与 normal 分支对齐。
+    let cfg = if args.plan_mode {
+        cfg.with_initial_permission_mode(reflect_protocol::PermissionMode::Plan)
+    } else {
+        cfg
+    };
     let cfg_for_reload = cfg.clone();
     let thread = Arc::new(AgentThread::new(
         cfg,
@@ -578,9 +712,38 @@ pub async fn bootstrap_resumed(
         Some(sanitizer.clone()),
         Some(hook_engine.clone()),
     ));
+    // 0.5:Plan mode 的执行机制是 hook,不是 permission mode。normal 分支
+    // 注册的 PlanModeGate / read_before_edit 在 resume 分支也要有。
+    if args.plan_mode {
+        thread.register_hook(PlanModeGate::default_mode());
+        let rbe_section = initial_cfg.hooks.read_before_edit.as_ref();
+        let (_rbe_state, rbe_hook) = build_read_before_edit(
+            rbe_section.and_then(|s| s.enabled),
+            rbe_section.and_then(|s| s.mtime_drift_tolerance_ms),
+        );
+        thread.register_hook(rbe_hook);
+        tracing::info!("resume path: plan_mode=true, registered PlanModeGate + read_before_edit");
+    }
     // resume 也跑 MCP bootstrap,方便继续使用之前挂的 MCP server。
     let mcp_manager = bootstrap_m6(&initial_cfg, reload_tx.clone()).await;
     let _lsp_manager = bootstrap_lsp(&initial_cfg, reload_tx.clone(), tools.clone()).await;
+    // 插件 runtime —— resume 与普通分支同权:挂载 enabled_plugins。
+    // resume 分支历史上没有 reload drainer(事件静默丢弃),插件
+    // `PluginLoaded` 事件同样无消费者,传 `None` 静默。
+    let mcp_for_plugins = mcp_manager.clone().unwrap_or_else(|| {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<reflect_mcp::McpLifecycleEvent>(16);
+        Arc::new(McpConnectionManager::new(tx))
+    });
+    let plugin_runtime = bootstrap_plugins(
+        tools.clone(),
+        hook_engine.clone(),
+        mcp_for_plugins,
+        skills_for_plugins,
+        factory.clone(),
+        &initial_cfg.plugins.enabled_plugins,
+        None,
+    )
+    .await;
     spawn_reload_task(
         registry.clone(),
         watcher,
@@ -588,11 +751,11 @@ pub async fn bootstrap_resumed(
         config_path.clone(),
         initial_cfg,
         cfg_for_reload,
-        None,
+        Some(factory),
         Some(resume_recorder),
         mcp_manager,
         tools.clone(),
-        None,
+        Some(plugin_runtime.clone()),
     );
     // resume 分支历史上没有 reload drainer(事件静默丢弃),保持原行为:
     // 这里同样不桥接 reload_rx,drop 即让 reload task 的发送端自然退出。
@@ -602,6 +765,7 @@ pub async fn bootstrap_resumed(
         thread,
         tools,
         prior_messages: bundle.initial_messages.len(),
+        plugin_runtime,
     })
 }
 
@@ -622,9 +786,254 @@ pub fn resolve_resume_thread_id(
     Ok(None)
 }
 
+/// 内置 `/prompt` slash 分流(v1.6.1,提示词层管理)。
+///
+/// - `/prompt` 或 `/prompt list` → `Op::PromptCommand { List }`,引擎回
+///   `EventMsg::PromptList`(可用层 + 生效层);
+/// - `/prompt reload`(或 `/prompt rescan`)→ `Switch { layer: None }`,
+///   引擎按启动目录序重扫提示词库,回 `EventMsg::PromptSwitched`;
+/// - `/prompt <其他词>` → 同 Switch,词作为 action 名透传(预留聚焦切换);
+/// - 不以 `/prompt` 开头(含 `/prompts` 等相近词)→ 返回 `None`,调用方
+///   继续走插件展开 / 普通 prompt。
+///
+/// 与插件命令的关系:本命令是引擎内置(协议级),优先于插件展开;
+/// TUI/GUI 也可不经 slash 直接构造 `Op::PromptCommand` 提交。
+pub fn expand_prompt_slash(prompt: &str) -> Option<Submission> {
+    let rest = prompt.trim().strip_prefix("/prompt")?;
+    if !(rest.is_empty() || rest.starts_with(char::is_whitespace)) {
+        return None;
+    }
+    let arg = rest.split_whitespace().next().unwrap_or("list");
+    let action = match arg {
+        "list" | "" => reflect_protocol::PromptAction::List,
+        "reload" | "rescan" => reflect_protocol::PromptAction::Switch { layer: None },
+        other => reflect_protocol::PromptAction::Switch {
+            layer: Some(other.to_string()),
+        },
+    };
+    Some(
+        Submission::with_id(
+            uuid::Uuid::new_v4().to_string(),
+            reflect_protocol::Op::PromptCommand { action },
+        )
+        .with_source_command("prompt"),
+    )
+}
+
 /// 给 `bootstrap_resumed` 用的合成 prompt(与 exec 历史行为一致)。
 pub fn resumed_prompt(thread_id: &str, prior_messages: usize) -> String {
     format!(
         "<system-reminder>Resumed session {thread_id} ({prior_messages} prior messages)</system-reminder>\n\nContinue."
     )
+}
+
+/// 展开用户输入中的插件 slash 命令(`/plugin:ns:name args`)并构造
+/// Submission。
+///
+/// - 输入不以 `/` 开头或未命中任何已挂载命令 → 原样构造
+///   `Submission::user_input`(直通,不影响普通 prompt);
+/// - 命中 → 以命令 md 正文(剥 frontmatter + `$ARGUMENTS`/`$1`..`$9`
+///   替换)替换输入,并在 `Submission::source_command` 标注命令名;
+/// - 命中但命令文件读取失败 → 返回 `Err`(exec 直接报错退出;serve
+///   侧调用方选择降级为原样转发)。
+pub async fn expand_plugin_command(
+    plugin_runtime: &SharedPluginRuntime,
+    prompt: String,
+) -> anyhow::Result<Submission> {
+    // 先快照命令注册表并尽快释放 runtime 锁 —— 展开期间的文件 IO 不占锁。
+    let registry = {
+        let guard = plugin_runtime.lock().await;
+        match guard.as_ref() {
+            Some(rt) => rt.commands(),
+            None => return Ok(Submission::user_input(prompt)),
+        }
+    };
+    match reflect_plugin::expand_user_input(&prompt, &registry) {
+        None => Ok(Submission::user_input(prompt)),
+        Some(Ok(expanded)) => {
+            tracing::info!(command = %expanded.name, "plugin command expanded");
+            Ok(Submission::user_input(expanded.body).with_source_command(expanded.name))
+        }
+        Some(Err(e)) => {
+            // split_whitespace 自带按首尾空白裁切,无需先 trim。
+            let name = prompt
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_start_matches('/');
+            Err(anyhow::anyhow!("插件命令 `{name}` 展开失败: {e}"))
+        }
+    }
+}
+
+// ── v1.7:CLI 图片输入(`--image`)────────────────────────────────
+
+/// 单张图片读取上限(10 MiB),与 `image_view` 工具的限额一致 ——
+/// 防止超大图片撑爆请求体 / token 预算。
+pub const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+
+/// 按扩展名推断图片 MIME(仅支持常见栅格格式)。返回 `None` 表示
+/// 不支持的格式。
+pub fn image_mime_for_path(path: &str) -> Option<&'static str> {
+    let ext = path.rsplit('.').next()?.to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "bmp" => Some("image/bmp"),
+        _ => None,
+    }
+}
+
+/// 读取本地图片文件为 `UserInputItem::Image`(数据内联,core 已接线到
+/// LLM Image block)。扩展名不支持 / 文件不可读 / 超过
+/// [`MAX_IMAGE_BYTES`] → `Err`(exec 报错退出)。
+pub fn load_image_item(path: &str) -> anyhow::Result<reflect_protocol::UserInputItem> {
+    let mime = image_mime_for_path(path)
+        .ok_or_else(|| anyhow::anyhow!("不支持的图片格式(仅 png/jpeg/gif/webp/bmp): {path}"))?;
+    let data = std::fs::read(path).map_err(|e| anyhow::anyhow!("读取图片失败 {path}: {e}"))?;
+    if data.len() > MAX_IMAGE_BYTES {
+        anyhow::bail!(
+            "图片超过大小上限({} bytes > {}): {path}",
+            data.len(),
+            MAX_IMAGE_BYTES
+        );
+    }
+    Ok(reflect_protocol::UserInputItem::Image {
+        data,
+        mime_type: mime.to_string(),
+    })
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+
+    /// 1×1 透明 PNG(最小合法文件,89 字节)。
+    const TINY_PNG: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    #[test]
+    fn mime_detection_by_extension() {
+        assert_eq!(image_mime_for_path("a.png"), Some("image/png"));
+        assert_eq!(image_mime_for_path("B.PNG"), Some("image/png"));
+        assert_eq!(image_mime_for_path("c.jpg"), Some("image/jpeg"));
+        assert_eq!(image_mime_for_path("d.jpeg"), Some("image/jpeg"));
+        assert_eq!(image_mime_for_path("e.gif"), Some("image/gif"));
+        assert_eq!(image_mime_for_path("f.webp"), Some("image/webp"));
+        assert_eq!(image_mime_for_path("g.bmp"), Some("image/bmp"));
+        assert_eq!(image_mime_for_path("h.txt"), None);
+        assert_eq!(image_mime_for_path("noext"), None);
+        assert_eq!(image_mime_for_path("i.svg"), None, "svg 不在内联白名单");
+    }
+
+    #[test]
+    fn loads_png_into_image_item() {
+        let dir = std::env::temp_dir().join(format!("reflect-exec-img-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("t.png");
+        std::fs::write(&p, TINY_PNG).unwrap();
+        let item = load_image_item(p.to_str().unwrap()).unwrap();
+        match item {
+            reflect_protocol::UserInputItem::Image { data, mime_type } => {
+                assert_eq!(data, TINY_PNG);
+                assert_eq!(mime_type, "image/png");
+            }
+            other => panic!("应为 Image item,得到 {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rejects_unsupported_and_missing() {
+        assert!(load_image_item("/nonexistent/x.txt").is_err());
+        let dir = std::env::temp_dir().join(format!("reflect-exec-img2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("t.txt");
+        std::fs::write(&p, b"hello").unwrap();
+        assert!(load_image_item(p.to_str().unwrap()).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rejects_oversized_image() {
+        // 构造一个"扩展名合法但超限"的场景:用 png 扩展名写 11MiB 数据。
+        let dir = std::env::temp_dir().join(format!("reflect-exec-img3-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("big.png");
+        std::fs::write(&p, vec![0u8; MAX_IMAGE_BYTES + 1]).unwrap();
+        let err = load_image_item(p.to_str().unwrap()).unwrap_err();
+        assert!(err.to_string().contains("超过大小上限"), "got: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn user_input_items_submission_carries_images() {
+        let sub = reflect_protocol::Submission::user_input_items(vec![
+            reflect_protocol::UserInputItem::Image {
+                data: TINY_PNG.to_vec(),
+                mime_type: "image/png".into(),
+            },
+            reflect_protocol::UserInputItem::Text {
+                text: "看这张图".into(),
+            },
+        ]);
+        match &sub.op {
+            reflect_protocol::Op::UserInput { items, .. } => {
+                assert_eq!(items.len(), 2);
+                assert!(matches!(
+                    items[0],
+                    reflect_protocol::UserInputItem::Image { .. }
+                ));
+            }
+            other => panic!("应为 UserInput op,得到 {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod prompt_slash_tests {
+    use super::*;
+
+    /// `/prompt` 分流:List / reload / 透传词 / 非 /prompt 前缀不命中。
+    #[test]
+    fn expand_prompt_slash_parses_actions() {
+        // 裸 `/prompt` 与 `/prompt list` → List。
+        for input in ["/prompt", "/prompt  ", "/prompt list"] {
+            let sub = expand_prompt_slash(input).expect("should match");
+            assert_eq!(sub.source_command.as_deref(), Some("prompt"));
+            match sub.op {
+                reflect_protocol::Op::PromptCommand {
+                    action: reflect_protocol::PromptAction::List,
+                } => {}
+                other => panic!("expected List, got {other:?}"),
+            }
+        }
+        // `/prompt reload` → Switch { layer: None }。
+        let sub = expand_prompt_slash("/prompt reload").expect("should match");
+        match sub.op {
+            reflect_protocol::Op::PromptCommand {
+                action: reflect_protocol::PromptAction::Switch { layer: None },
+            } => {}
+            other => panic!("expected Switch(None), got {other:?}"),
+        }
+        // `/prompt <其他词>` → Switch 透传词(预留聚焦切换)。
+        let sub = expand_prompt_slash("/prompt my-layer").expect("should match");
+        match sub.op {
+            reflect_protocol::Op::PromptCommand {
+                action: reflect_protocol::PromptAction::Switch { layer: Some(l) },
+            } => assert_eq!(l, "my-layer"),
+            other => panic!("expected Switch(Some), got {other:?}"),
+        }
+        // 相近前缀不命中(留给插件 / 普通 prompt)。
+        for input in ["/prompts", "/promptx", "plain text", "/plan only"] {
+            assert!(expand_prompt_slash(input).is_none(), "{input} 不应命中");
+        }
+    }
 }

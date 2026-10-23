@@ -13,7 +13,6 @@
 //! 以 JSONL 流形式向 stdout 输出事件。tracing 日志走 stderr。
 
 mod bootstrap;
-pub mod bootstrap_plugins;
 mod checkpoint_tool;
 mod cron_tool;
 mod headless;
@@ -98,6 +97,48 @@ pub struct ExecArgs {
     /// 目录)作为工作区。默认关;与 `reflect tui --auto-root` 对齐。
     #[arg(long, default_value_t = false)]
     pub auto_root: bool,
+    /// v1.7:图片附件(可多次传入)。每个文件读为 `UserInputItem::Image`
+    /// block,与 prompt 一并提交 —— 打通协议层已支持的多模态输入(此前
+    /// 只有 `image_view` 工具能产生 Image block,CLI 无入口)。支持
+    /// png/jpeg/gif/webp/bmp,单张 ≤10MiB。与 `--resume`/`-c`/`-r` 互斥。
+    #[arg(long = "image", value_name = "PATH")]
+    pub images: Vec<String>,
+}
+
+/// `--plan-mode` 下"计划生成失败"的退出码。
+///
+/// `docs/PLAN_MODE.md:50` 与 `ExecArgs::plan_mode` 的 doc 都承诺了这个
+/// 退出码,但**全仓库没有任何实现** —— `async_main` 正常路径恒返回
+/// `Ok(())`(exit 0),依赖 122 做重试判断的脚本调用方会永远看到"成功"。
+///
+/// 判定标准:Plan mode 下 agent 调研完成后调 `ExitPlanMode` 成功,core 会
+/// 派发 `EventMsg::PlanReady`(见 `graph/nodes/tool_exec.rs` 的
+/// `ExitPlanMode` 分支)。所以"流过了 `PlanReady` / `PlanApproved`"就等价于
+/// "计划已产出";turn 结束仍没见过 → 计划生成失败,需要重试。
+pub const PLAN_MODE_EXIT_CODE: i32 = 122;
+
+/// 判断一个 event 是否代表"计划已成功产出"。
+fn is_plan_ready_event(event: &reflect_protocol::Event) -> bool {
+    matches!(
+        event.msg,
+        reflect_protocol::EventMsg::PlanReady(_) | reflect_protocol::EventMsg::PlanApproved(_)
+    )
+}
+
+/// `--plan-mode` 收尾:产出过计划 → `Ok(())`;否则按文档约定 exit 122。
+///
+/// 只在显式请求了 Plan mode 时生效,普通 headless 调用不受影响。
+fn finish_plan_mode(plan_requested: bool, plan_produced: bool) -> anyhow::Result<()> {
+    if plan_requested && !plan_produced {
+        tracing::warn!(
+            exit_code = PLAN_MODE_EXIT_CODE,
+            "plan_mode: turn 结束但未产出计划(未见 PlanReady),按文档约定退出 122"
+        );
+        // 直接退出而非返回 Err:Err 会让 main 打印错误链并 exit 1,
+        // 与约定的 122 混淆。
+        std::process::exit(PLAN_MODE_EXIT_CODE);
+    }
+    Ok(())
 }
 
 /// 入口函数:既被独立 `reflect-exec` 二进制调用,也被顶层 CLI router 的
@@ -141,6 +182,13 @@ fn exit_code_for(args: &ExecArgs, msg: &EventMsg) -> i32 {
 async fn async_main(args: ExecArgs) -> anyhow::Result<i32> {
     // v1.3 SDK:装配段已抽到 `headless` 模块(与 `reflect serve` 共享),
     // exec 只保留"resume 三选一 → 提交单条 prompt → 流式输出"的编排。
+    // v1.7:图片附件走多模态 UserInput,与 resume 语义互斥(历史回放 +
+    // 合成续跑 prompt 的路径不支持附加 item)。
+    if !args.images.is_empty()
+        && (args.resume.is_some() || args.continue_last || args.resume_by.is_some())
+    {
+        anyhow::bail!("--image 不能与 --resume/-c/-r 同时使用");
+    }
     let hargs = HeadlessArgs {
         agent: args.agent.clone(),
         ephemeral_tasks: args.ephemeral_tasks,
@@ -165,26 +213,62 @@ async fn async_main(args: ExecArgs) -> anyhow::Result<i32> {
         let mut handle = session.thread.submit(sub).await;
         let stdout = std::io::stdout();
         let mut writer = JsonlWriter::new(stdout.lock());
+        let mut plan_produced = false;
         let mut code = 0;
         while let Some(event) = handle.next().await {
+            if is_plan_ready_event(&event) {
+                plan_produced = true;
+            }
+            // 一般失败(Error / 非 Success 的 TurnComplete / TurnAborted)→
+            // 非零退出码,CI 与脚本可据此感知失败。
             code = exit_code_for(&args, &event.msg);
             if let Err(e) = writer.write_event(&event) {
                 tracing::warn!(error = %e, "jsonl writer failed; exiting");
                 break;
             }
         }
+        // plan 模式未产出计划 → 按上游约定 exit 122;其余失败由上面的
+        // `exit_code_for` 映射成 0 / 1 / 122。
+        finish_plan_mode(args.plan_mode, plan_produced)?;
         return Ok(code);
     }
 
     // ── 普通分支:单条 prompt → JSONL 流 ──
-    let prompt = args.prompt.clone().ok_or_else(|| {
-        anyhow::anyhow!("usage: reflect exec <prompt>")
-    })?;
+    if args.prompt.is_none() && args.images.is_empty() {
+        anyhow::bail!("usage: reflect exec <prompt>");
+    }
+    let prompt = args.prompt.clone().unwrap_or_default();
     let session = headless::bootstrap_normal(common, &hargs).await?;
-    let sub = Submission::user_input(prompt);
+    // v1.7:图片附件 → 多模态 UserInput(items = [Image.., Text?]),不经
+    // 插件 slash 展开(命令展开是纯文本路径)。
+    let sub = if args.images.is_empty() {
+        // v1.6.1:内置 `/prompt` slash 优先于插件展开(引擎级命令)。
+        if let Some(prompt_sub) = headless::expand_prompt_slash(&prompt) {
+            prompt_sub
+        } else {
+            // 插件 slash 命令展开:`/demo:hello world` → 命令 md 正文;未命中
+            // 任何命令时原样提交。展开失败(命令文件不可读)直接报错退出。
+            headless::expand_plugin_command(&session.plugin_runtime, prompt).await?
+        }
+    } else {
+        let mut items = Vec::new();
+        for path in &args.images {
+            items.push(headless::load_image_item(path)?);
+        }
+        if !prompt.trim().is_empty() {
+            items.push(reflect_protocol::UserInputItem::Text { text: prompt });
+        }
+        reflect_protocol::Submission::user_input_items(items)
+    };
     let mut handle = session.thread.submit(sub).await;
+    let mut plan_produced = false;
     let mut code = 0;
     while let Some(event) = handle.next().await {
+        if is_plan_ready_event(&event) {
+            plan_produced = true;
+        }
+        // 一般失败(Error / 非 Success 的 TurnComplete / TurnAborted)→
+        // 非零退出码,CI 与脚本可据此感知失败。
         code = exit_code_for(&args, &event.msg);
         let mut w = JsonlWriter::new(std::io::stdout().lock());
         if let Err(e) = w.write_event(&event) {
@@ -193,5 +277,6 @@ async fn async_main(args: ExecArgs) -> anyhow::Result<i32> {
             break;
         }
     }
+    finish_plan_mode(args.plan_mode, plan_produced)?;
     Ok(code)
 }

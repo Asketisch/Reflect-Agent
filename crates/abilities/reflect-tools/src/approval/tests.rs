@@ -1087,3 +1087,45 @@ async fn bubble_mode_still_auto_approves_medium_risk_tool() {
         EventMsg::PermissionBubble(b) if b.tool_name == "grep"
     ));
 }
+
+/// 回合级中断(`Op::Interrupt` 取消**回合令牌**)必须解除审批等待。
+///
+/// 此前 gate 只观察**会话级**令牌(调用方 `ToolContext.cancel` 传的是它)
+/// —— 于是「agent 正在等审批时按中断」**不解除等待**,回合永远停在审批
+/// 门上(实测:回合停在 `approval_request` 上,中断后既没有 `turn_aborted`
+/// 也没有 `turn_complete`)。
+#[tokio::test]
+async fn turn_cancel_short_circuits_approval_wait() {
+    let (gate, _rx) = make_gate();
+    let session_cancel = CancellationToken::new(); // 会话级:不取消
+    let turn_cancel = CancellationToken::new(); // 回合级:被中断
+
+    let gate_arc = Arc::new(gate.with_turn_cancel(turn_cancel.clone()));
+    let g = gate_arc.clone();
+    let session_c = session_cancel.clone();
+    let asker = tokio::spawn(async move {
+        g.ask_tool("bash", &serde_json::json!({}), RiskLevel::Low, &session_c)
+            .await
+    });
+
+    // 给 asker 一点时间完成注册。
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    // 只取消回合令牌 —— 会话令牌不动。
+    turn_cancel.cancel();
+
+    let decision = timeout(Duration::from_secs(2), asker)
+        .await
+        .unwrap()
+        .unwrap();
+    match decision {
+        ReviewDecision::Deny { reason } => assert!(
+            reason.contains("turn interrupted"),
+            "应报告回合中断,实际:{reason}"
+        ),
+        other => panic!("expected Deny(turn interrupted), got {other:?}"),
+    }
+    // Waiter 应已被移除。
+    assert!(gate_arc.waiters().lock().is_empty());
+    // 会话级令牌**未**受影响。
+    assert!(!session_cancel.is_cancelled());
+}

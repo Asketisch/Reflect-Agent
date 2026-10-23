@@ -59,6 +59,9 @@ pub enum MockReply {
 pub struct MockClient {
     script: Mutex<VecDeque<MockReply>>,
     seq: AtomicU32,
+    /// 已收到的请求快照(按调用顺序追加)—— 测试断言「模型实际看到什么」
+    /// 用,比如插件 slash 命令展开后的 prompt 文本。
+    requests: Mutex<Vec<ChatRequest>>,
 }
 
 impl MockClient {
@@ -67,6 +70,7 @@ impl MockClient {
         Self {
             script: Mutex::new(VecDeque::new()),
             seq: AtomicU32::new(0),
+            requests: Mutex::new(Vec::new()),
         }
     }
 
@@ -115,7 +119,14 @@ impl MockClient {
         Self {
             script: Mutex::new(script.into()),
             seq: AtomicU32::new(0),
+            requests: Mutex::new(Vec::new()),
         }
+    }
+
+    /// 已收到的请求快照(按调用顺序)。测试用它断言引擎发给模型的
+    /// 消息内容(如命令展开后的用户文本)。
+    pub fn recorded_requests(&self) -> Vec<ChatRequest> {
+        self.requests.lock().clone()
     }
 }
 
@@ -142,10 +153,12 @@ impl ModelClient for MockClient {
 
     async fn stream(
         &self,
-        _request: ChatRequest,
+        request: ChatRequest,
         _cancel: CancellationToken,
     ) -> Result<Pin<Box<dyn futures::Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError>
     {
+        // 记录请求快照(测试可观测性;失败不影响主流程)。
+        self.requests.lock().push(request.clone());
         let n = self.seq.fetch_add(1, Ordering::Relaxed);
         let reply = self.script.lock().pop_front();
 
@@ -157,10 +170,15 @@ impl ModelClient for MockClient {
         match reply {
             Some(MockReply::Text { text }) => push_text_deltas(&mut chunks, text),
             Some(MockReply::ToolCall { name, args }) => {
-                // engine 在 ToolUseStart 后必须接收 ToolUseDelta 才能
-                // 累积 args 并喂给工具;mock 一次性把 args 塞进单个 delta,
-                // 模拟 provider 完整参数到达的形态(Anthropic / OpenAI
-                // 都按「start → 一/多个 delta → message_stop」模式 emit)。
+                // mock 一次性把 args 塞进单个 delta,模拟 provider 完整参数
+                // 到达的形态(Anthropic / OpenAI 都按「start → 一/多个 delta
+                // → message_stop」模式 emit)。
+                //
+                // 同时**也**把它放进 ToolUseStart.input_json —— 那是
+                // 「整包形态」的 provider(Ollama 原生格式)的做法:参数
+                // 全在 start 里、没有 delta。engine 两种形态都要认
+                // (见 reflect-core 的 `args_from_start`),所以这里两种都发,
+                // 顺带当 engine 侧的回归夹具。
                 let input_json = if args.is_null() {
                     String::new()
                 } else {

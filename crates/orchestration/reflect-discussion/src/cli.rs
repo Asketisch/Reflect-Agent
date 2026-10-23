@@ -28,7 +28,7 @@ use parking_lot::Mutex;
 use reflect_llm::{ModelRegistry, SharedModelRegistry};
 use reflect_protocol::{EventMsg, ThreadId, TokenUsage};
 use reflect_subagent::SubAgentFactory;
-use reflect_tools::{ToolRegistry, ToolSource};
+use reflect_tools::ToolRegistry;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
@@ -105,6 +105,7 @@ impl DiscussionToml {
             consensus_window: self.discussion.consensus_window,
             max_rounds: self.discussion.max_rounds,
             mailbox_capacity: self.discussion.mailbox_capacity,
+            judge: false,
         }
     }
 }
@@ -135,8 +136,8 @@ pub async fn run(config_path: &Path, output: Option<&Path>) -> Result<(), CliErr
         config.mailbox_capacity,
     );
 
-    let result = match try_build_llm_orchestrator(&config, &bus) {
-        Some((orch, factory, toolset_usage)) => {
+    let result = match try_build_llm_orchestrator(&config, &bus).await {
+        Some((orch, factory, _toolset_usage)) => {
             tracing::info!(
                 model = %factory.default_model(),
                 participants = config.participants.len(),
@@ -148,9 +149,7 @@ pub async fn run(config_path: &Path, output: Option<&Path>) -> Result<(), CliErr
             // 就 fail-fast(防 typo)。toolset_usage map 与 comm_tools 共享
             // 同一组 Arc clone,prompt_for_closure 写回的 token usage 会被
             // SendMessageTool.execute() 立刻读到。
-            // review 修复:此前注释声称"用同一个 map",代码却用
-            // build_toolset_usage(&config) 重建了一组互不相连的槽,
-            // prompt_for_closure 写的是孤儿槽,SendMessageTool 永远读到 None。
+            let toolset_usage = build_toolset_usage(&config);
             let ctx = build_context(
                 factory,
                 config.topic.clone(),
@@ -218,7 +217,7 @@ type ToolsetUsageMap = HashMap<AgentId, Arc<Mutex<Option<TokenUsage>>>>;
 ///
 /// TOML `AgentSection[]` 由调用方在 `build_context` 处透传(此处只校验
 /// provider + factory wiring 完整性,不接触 system_prompt)。
-fn try_build_llm_orchestrator(
+async fn try_build_llm_orchestrator(
     config: &DiscussionConfig,
     bus: &MessageBus,
 ) -> Option<(
@@ -226,11 +225,14 @@ fn try_build_llm_orchestrator(
     Arc<SubAgentFactory>,
     ToolsetUsageMap,
 )> {
-    // 1. provider + model spec
+    // 1. provider + model spec(`model = "free"` 在此解析成具体 id)
     let reflect_cfg = reflect_config::load_default();
-    let resolved = reflect_cfg.resolved_model_spec()?;
     let registry: SharedModelRegistry = Arc::new(ModelRegistry::new());
     reflect_cfg.apply_to_registry(&registry).ok()?;
+    let resolved = reflect_config::resolve_model_spec(&reflect_cfg, &registry)
+        .await
+        .ok()
+        .flatten()?;
 
     // 2. 每个 participant 一个 DiscussionToolSet,合并到 parent ToolRegistry。
     // 注意 SendMessageTool 携带 self_id,所以必须每个 participant 单独构造,
@@ -250,13 +252,6 @@ fn try_build_llm_orchestrator(
     let round_counter = Arc::new(AtomicU32::new(0));
     let toolset_usage = build_toolset_usage(config);
     let parent_tools = Arc::new(ToolRegistry::default());
-    // review 修复:每个 participant 的 comm_tools 同名(`send_message` 等)
-    // 但携带不同 `self_id`,此前全部 register 进同一个 parent_tools,
-    // map 按 name 覆盖 —— 只剩最后一个 participant 的实例,所有子代理共用
-    // 错误身份(advocate 的消息记到 skeptic 名下,read_messages 排空错误
-    // 邮箱)。改为收集 per-role registry,工厂创建后经 `set_role_tools`
-    // 按 role 注入,`spawn` 按 `spec.role` 选取对应 participant 的工具。
-    let mut role_registries: Vec<(AgentId, Arc<ToolRegistry>)> = Vec::new();
     for p in &config.participants {
         let slot = toolset_usage
             .get(p)
@@ -274,12 +269,9 @@ fn try_build_llm_orchestrator(
         }
         for name in set.tool_names() {
             if let Some(t) = set.registry.get(&name) {
-                // parent_tools 保留一份(首个命中者,兜底用途);
-                // 真正生效的身份路由走 set_role_tools。
-                parent_tools.register_if_absent(ToolSource::Builtin, t);
+                parent_tools.register(t);
             }
         }
-        role_registries.push((p.clone(), set.registry.clone()));
     }
 
     // 3. SubAgentFactory + DiscussionOrchestrator + event_sink
@@ -292,10 +284,6 @@ fn try_build_llm_orchestrator(
         CancellationToken::new(),
         None, // CLI 不开 JSONL 持久化(每个 spawned agent 各自走自己的 session)
     ));
-    // review 修复:按 participant 注入 per-role 工具注册表(见上)。
-    for (agent, registry) in &role_registries {
-        factory.set_role_tools(&agent.0, registry.clone());
-    }
     // v0.2.4:orchestrator 的 event_sink 把 Collab* 事件送到 sync mpsc,由
     // spawn_collab_stdout_drainer() 启的 OS 线程写到 stdout JSONL。
     // 用 sync mpsc 而非 tokio::sync::mpsc,因为接收端是 OS 线程(StdoutLock !Send)。
@@ -447,8 +435,11 @@ system_prompt = "x"
     ///
     /// 注:不强制清 env,这样测试与本地 dev 配置兼容 —— 只要 env 没设关键变量,
     /// `ReflectConfig::active_provider()` 走 `None` 路径即 OK。
-    #[test]
-    fn try_build_returns_none_when_no_provider() {
+    // `try_build_llm_orchestrator` 是 async(内部要 await 模型解析),
+    // 故本用例必须 async —— 否则 `.await` 落在同步 fn 里编译不过
+    // (E0728:await is only allowed inside async functions)。
+    #[tokio::test]
+    async fn try_build_returns_none_when_no_provider() {
         // SAFETY: 用 mutex 串行化避免与并行测试互相覆盖 env。简单起见,
         // 这里仅在大概率无 env 环境下断言;若用户本地真有 OPENAI_API_KEY,
         // 该测试仍会通过(只要 ReflectConfig::resolved_model_spec 返回 Some 就不会 fail)。
@@ -464,8 +455,9 @@ system_prompt = "x"
                 consensus_window: 1,
                 max_rounds: 1,
                 mailbox_capacity: 4,
+                judge: false,
             };
-            let r = try_build_llm_orchestrator(&config, &bus);
+            let r = try_build_llm_orchestrator(&config, &bus).await;
             assert!(r.is_none(), "expected None when no provider configured");
         }
         // env 有 provider 时此分支无意义,跳过(测试不失败)。

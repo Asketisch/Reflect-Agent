@@ -21,7 +21,8 @@ tokio-util          = { workspace = true }
 tracing             = { workspace = true }
 futures             = { workspace = true }
 
+reflect-tools  = { workspace = true }
+
 [dev-dependencies]
 reflect-llm    = { workspace = true }
-reflect-tools  = { workspace = true }
 tempfile = "3"

@@ -11,18 +11,21 @@
 #![allow(clippy::manual_div_ceil)]
 //! reflect-prompt —— 分层 system prompt 构造与 prompt 缓存支持。
 //!
-//! Reflect 路线图的 M4。三个模块:
+//! Reflect 路线图的 M4。四个模块:
 //! - [`template`] —— 轻量 minijinja 封装,做 `{{ var }}` 变量替换。
 //! - [`caching`] —— Anthropic `cache_control` 注入 + 变化检测。
 //! - [`builder`] —— `LayeredPrompt` 组合(core / append / ephemeral),
 //!   以及持有 `CacheBreakDetector`、从分层集合组装 `ChatRequest` 的
 //!   `PromptBuilder`。
+//! - [`library`] —— 按模型匹配的外置提示词库(default → 厂商 →
+//!   精确模型名三级回退),v1.6 起支持 `.reflect/prompts/*.md`。
 //!
 //! v0 只做 `{{ var }}` 变量替换;不支持 `{% if %}` / `{% for %}` 块
 //! (与 Reflect `manager.get_prompt` 语义一致)。
 
 pub mod builder;
 pub mod caching;
+pub mod library;
 pub mod resources;
 pub mod template;
 
@@ -33,6 +36,10 @@ pub use builder::{
 pub use caching::{
     CacheBreakDetector, CacheBreakError, CacheMonitorStats, DEFAULT_PREFIX_ANCHOR_OFFSET,
     find_prefix_anchor, inject_cache_control,
+};
+pub use library::{
+    DescriptionSource, PromptLibrary, PromptSet, apply_model_overrides, init_library, library,
+    split_spec,
 };
 pub use resources::{PromptResources, copy, prompts};
 pub use template::{PromptError, render, render_with};

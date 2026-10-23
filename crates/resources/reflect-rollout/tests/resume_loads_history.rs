@@ -21,6 +21,8 @@ async fn roundtrips_all_four_record_types() {
             strategy: "microcompact".into(),
             removed_count: 8,
             summary: "<summary>...</summary>".into(),
+            before_tokens: 0,
+            after_tokens: 0,
         },
         RolloutRecord::Fork {
             parent_session_id: sid,

@@ -138,7 +138,7 @@ async fn main() -> anyhow::Result<()> {
     use std::path::Path;
     let cfg = AgentConfig::new("mock/danger-mock", Path::new("."));
     let tools = Arc::new(ToolRegistry::default());
-    tools.register(Arc::new(builtins::BashTool));
+    tools.register(Arc::new(builtins::BashTool::default()));
     let thread = Arc::new(AgentThread::new(cfg, registry, tools, None, None));
 
     // 在 thread 的 hook engine 上注册 hook。`register_hook` 消费传入值

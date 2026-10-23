@@ -236,14 +236,15 @@ serve_ops_plan() {
     tcase "plan markdown 落盘到 workspace" \
         bash -c "ls '$ISO_CWD/.reflect/plan/' | grep -q . "
 
-    # ── plan_approval auto_mode → 切权限模式(不 emit plan_approved)──
+    # ── plan_approval auto_mode → 切权限模式 + plan_approved ──
     wop "{\"id\":\"p2\",\"op\":{\"type\":\"plan_approval\",\"id\":\"$plid\",\"choice\":\"auto_mode\"}}"
     waitfor "$out" '"permission_mode_changed"' 20 || echo NO_PMC_PLAN
     tcase "plan_approval auto_mode 切权限模式" \
         jq -e 'select(.msg.type=="permission_mode_changed" and .msg.to=="accept_edits")' "$out"
-    # headless 路径 plan 审批只切模式、不 emit plan_approved(断言其缺席)
-    tcase "plan_approval 不 emit plan_approved(headless 语义)" \
-        bash -c "! jq -e 'select(.msg.type==\"plan_approved\")' \"$out\" >/dev/null 2>&1"
+    # Exit 方向的审批会补发 plan_approved(TUI 的审批提示条靠它关闭;
+    # 见 submission_loop.rs:1432-1444)。此前引擎从不 emit,确认行是死代码。
+    tcase "plan_approval 触发 plan_approved" \
+        jq -e 'select(.msg.type=="plan_approved")' "$out"
 
     # ── exit_plan_mode op 路径(无 LLM 工具调用)→ 第二个 plan_ready ──
     # 该路径只有 fallback markdown,无真实内容可带 → 断言 fallback 串

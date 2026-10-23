@@ -87,6 +87,7 @@ async fn main() -> anyhow::Result<()> {
         consensus_window: 1,
         max_rounds: 1, // 1 round × 3 agents = 3 spawn,正好命中 MAX_DEPTH
         mailbox_capacity: 32,
+        judge: false,
     };
 
     // 3. 构造共享 MessageBus

@@ -40,6 +40,9 @@ node_modules/
 .pytest_cache/
 *.egg-info/
 
+# ── CI 日志转储(诊断产物,非源码)──
+github-ci-error/
+
 # ── 临时文件 ──
 *.log
 *.pid
@@ -50,5 +53,4 @@ dist
 
 __pycache__
 .opencode
-.github
 .cargo

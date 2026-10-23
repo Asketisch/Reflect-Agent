@@ -14,9 +14,11 @@ use reflect_plugin::state::PluginScope;
 
 mod config;
 mod doctor;
+mod init;
 mod login;
 mod lsp;
 mod mcp;
+mod models;
 mod pipeline;
 mod plugin;
 mod security;
@@ -33,7 +35,7 @@ mod test_home;
 #[command(
     name = "reflect",
     version,
-    about = "Reflect — Rust agent runtime CLI (subcommands: exec, serve, discussion, login, mcp, config, session, traces, doctor, plugin, lsp, task, pipeline, security, workspace, update, version). 交互式 TUI 见独立仓库 Reflect-TUI.",
+    about = "Reflect — Rust agent runtime CLI (subcommands: exec, serve, discussion, login, init, mcp, config, session, traces, doctor, plugin, lsp, task, pipeline, security, workspace, update, version). 交互式 TUI 见独立仓库 Reflect-TUI.",
     propagate_version = true
 )]
 struct Cli {
@@ -106,6 +108,11 @@ enum Command {
         #[arg(long)]
         check_network: bool,
     },
+    /// 列出 / 挑选 provider 当前可用的模型(清单实时取自 provider 接口)。
+    Models {
+        #[command(subcommand)]
+        action: ModelsAction,
+    },
     /// 安装 / 列出 / 启用 / 禁用 / 卸载插件。
     /// v1.0.0-rc2:plugin 主体 7 条 + marketplace stub 3 条。
     Plugin {
@@ -142,6 +149,12 @@ enum Command {
         /// 预留给 v0.5 的 GitHub release API 检查。
         #[arg(long)]
         check_only: bool,
+    },
+    /// v1.6:在当前目录生成 AGENTS.md 项目说明(agent 上下文锚点)。
+    Init {
+        /// 已存在时覆盖(默认跳过,保护手工维护的内容)。
+        #[arg(long)]
+        force: bool,
     },
     /// 打印版本号并退出。
     Version,
@@ -225,6 +238,44 @@ enum WorkspaceAction {
     },
 }
 
+/// `reflect models` 子命令。
+///
+/// 模型清单**实时取自 provider 接口** —— 免费模型池的成员集合由上游决定,
+/// 随时可能增删,写死在配置里必然腐烂。
+#[derive(Debug, Subcommand)]
+enum ModelsAction {
+    /// 列出 provider 当前可用的模型(含免费标记与上下文窗口)。
+    List {
+        /// provider 名(默认:配置里的 active provider)。
+        #[arg(long)]
+        provider: Option<String>,
+        /// 只列免费模型。
+        #[arg(long)]
+        free_only: bool,
+        /// 以 JSON 输出(供脚本 `jq` 消费)。
+        #[arg(long)]
+        json: bool,
+        /// 清单接口超时(秒)。
+        #[arg(long)]
+        timeout_secs: Option<u64>,
+    },
+    /// 挑一个模型并只打印它的 id(供 `$(...)` 消费)。
+    Pick {
+        /// provider 名(默认:配置里的 active provider)。
+        #[arg(long)]
+        provider: Option<String>,
+        /// 只在免费模型里挑。
+        #[arg(long)]
+        free_only: bool,
+        /// id 子串偏好(优先挑含该子串的模型)。
+        #[arg(long)]
+        prefer: Option<String>,
+        /// 清单接口超时(秒)。
+        #[arg(long)]
+        timeout_secs: Option<u64>,
+    },
+}
+
 /// `reflect config` 子命令。
 #[derive(Debug, Subcommand)]
 enum ConfigAction {
@@ -303,6 +354,13 @@ enum SessionAction {
         /// 以 JSON 行输出(每条命中一行,便于脚本消费)。
         #[arg(long)]
         json: bool,
+    },
+    /// v1.x:跨会话按模型汇总 token 用量(每个模型的使用量一览)。
+    /// 不带 `--workspace` 统计全部会话;带则只统计归属该工作区的会话。
+    Stats {
+        /// 只统计 `SessionMeta.workspace` 等于该路径的会话。
+        #[arg(long)]
+        workspace: Option<String>,
     },
 }
 
@@ -473,6 +531,9 @@ enum PipelineAction {
         /// 可选 JSON 输出路径(默认:仅人可读 stdout)。
         #[arg(long, short = 'o')]
         output: Option<PathBuf>,
+        /// 模板附加输入 `key=value`(可重复);模板 `{{input.<key>}}` 可引用。
+        #[arg(long = "input", value_name = "KEY=VALUE")]
+        inputs: Vec<String>,
     },
     /// 为指定 team 运行预设流水线(plan → prd → exec → verify)。
     /// v1.x:接入此前孤儿的 `run_team_pipeline` / `TEAM_PIPELINE_TOML`。
@@ -720,12 +781,57 @@ fn main() -> anyhow::Result<()> {
                 limit,
                 json,
             } => session::search(&query, limit, json),
+            SessionAction::Stats { workspace } => session::stats(workspace.as_deref()),
         },
         Command::Traces { action } => match action {
             TracesAction::Ls { limit } => traces::ls(limit),
             TracesAction::Show { id } => traces::show(&id),
         },
-        Command::Doctor { check_network } => doctor::run(check_network),
+        Command::Doctor { check_network } => rt.block_on(doctor::run(check_network)),
+        Command::Models { action } => {
+            let code = match action {
+                ModelsAction::List {
+                    provider,
+                    free_only,
+                    json,
+                    timeout_secs,
+                } => rt.block_on(models::list(models::ListArgs {
+                    provider,
+                    free_only,
+                    json,
+                    timeout_secs,
+                }))?,
+                ModelsAction::Pick {
+                    provider,
+                    free_only,
+                    prefer,
+                    timeout_secs,
+                } => rt.block_on(models::pick(models::PickArgs {
+                    provider,
+                    free_only,
+                    prefer,
+                    timeout_secs,
+                }))?,
+            };
+            // 退出码约定:0 成功;2 provider 无清单能力;3 无匹配模型。
+            if code != 0 {
+                std::process::exit(code);
+            }
+            Ok(())
+        }
+        Command::Init { force } => {
+            let existed = std::env::current_dir()
+                .ok()
+                .map(|d| d.join("AGENTS.md").exists())
+                .unwrap_or(false);
+            let path = init::run(force)?;
+            if existed && !force {
+                println!("AGENTS.md 已存在,跳过(用 --force 覆盖):{}", path.display());
+            } else {
+                println!("已生成 {}:请按项目实际情况填充 TODO 段落。", path.display());
+            }
+            Ok(())
+        }
         Command::Update { check_only } => update::run(check_only),
         Command::Plugin { action } => match action {
             PluginAction::Install { path, scope } => {
@@ -824,11 +930,13 @@ fn main() -> anyhow::Result<()> {
                 topic,
                 failure_policy,
                 output,
+                inputs,
             } => rt.block_on(pipeline::run(
                 &config,
                 &topic,
                 failure_policy.as_deref(),
                 output.as_deref(),
+                &inputs,
             )),
             PipelineAction::Team { name, topic } => rt.block_on(pipeline::run_team(&name, &topic)),
         },

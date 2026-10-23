@@ -18,7 +18,7 @@ use parking_lot::Mutex;
 
 use crate::model::{
     MAX_ROTATED_FILES, MODEL_IO_SUBDIR, ModelIoRecord, ROTATE_AFTER_BYTES, SPAN_LOG_SUBDIR,
-    TraceEvent, serialize_redacted,
+    TelemetryWriteConfig, TraceEvent, serialize_redacted_with,
 };
 
 /// 内部可变状态。
@@ -72,13 +72,21 @@ fn ensure_parent(path: &Path) -> std::io::Result<()> {
 /// (跨天的 span 写到新日期文件)。
 pub struct SpanLogWriter {
     base_dir: PathBuf,
+    /// v1.x:脱敏 / 截断配置(`[telemetry].redact` / `max_bytes`)。
+    write_cfg: TelemetryWriteConfig,
     inner: Mutex<Inner>,
 }
 
 impl SpanLogWriter {
     pub fn new(base_dir: impl Into<PathBuf>) -> Self {
+        Self::with_config(base_dir, TelemetryWriteConfig::default())
+    }
+
+    /// v1.x:带写入配置构造(redact / max_bytes 真正生效)。
+    pub fn with_config(base_dir: impl Into<PathBuf>, write_cfg: TelemetryWriteConfig) -> Self {
         Self {
             base_dir: base_dir.into(),
+            write_cfg,
             inner: Mutex::new(Inner::new()),
         }
     }
@@ -109,7 +117,7 @@ impl SpanLogWriter {
 
     /// 追加一条 span 事件。best-effort:失败只 warn。
     pub fn append(&self, ev: &TraceEvent) {
-        let line = match serialize_redacted(ev) {
+        let line = match serialize_redacted_with(ev, &self.write_cfg) {
             Ok(l) => l,
             Err(e) => {
                 tracing::warn!(error = %e, "telemetry: serialize trace event failed");
@@ -173,14 +181,26 @@ impl SpanLogWriter {
 pub struct ModelIoWriter {
     base_dir: PathBuf,
     session_id: String,
+    /// v1.x:脱敏 / 截断配置(`[telemetry].redact` / `max_bytes`)。
+    write_cfg: TelemetryWriteConfig,
     inner: Mutex<Inner>,
 }
 
 impl ModelIoWriter {
     pub fn new(base_dir: impl Into<PathBuf>, session_id: impl Into<String>) -> Self {
+        Self::with_config(base_dir, session_id, TelemetryWriteConfig::default())
+    }
+
+    /// v1.x:带写入配置构造(redact / max_bytes 真正生效)。
+    pub fn with_config(
+        base_dir: impl Into<PathBuf>,
+        session_id: impl Into<String>,
+        write_cfg: TelemetryWriteConfig,
+    ) -> Self {
         Self {
             base_dir: base_dir.into(),
             session_id: session_id.into(),
+            write_cfg,
             inner: Mutex::new(Inner::new()),
         }
     }
@@ -207,7 +227,7 @@ impl ModelIoWriter {
 
     /// 追加一条 model-io 记录。best-effort:失败只 warn。
     pub fn append(&self, rec: &ModelIoRecord) {
-        let line = match serialize_redacted(rec) {
+        let line = match serialize_redacted_with(rec, &self.write_cfg) {
             Ok(l) => l,
             Err(e) => {
                 tracing::warn!(error = %e, "telemetry: serialize model-io failed");

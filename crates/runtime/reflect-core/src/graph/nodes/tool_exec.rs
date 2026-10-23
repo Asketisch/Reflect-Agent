@@ -103,10 +103,46 @@ pub async fn tool_exec(state: &mut AgentState, ctx: &NodeContext) -> Option<Grap
         .iter()
         .map(|c| (c.id.clone(), (c.name.clone(), c.args.clone())))
         .collect();
+    // v1.4 C1:子代理自报告 —— 本线程若是父会话 spawn 的子代理
+    // (cfg.subagent_status 为 Some),把本批工具开始写入自己的状态槽,
+    // 父会话经 QuerySubagents 即时可见。
+    if let Some(slot) = ctx.cfg.subagent_status.as_ref() {
+        for c in &calls {
+            slot.begin_tool(&c.name);
+        }
+    }
+    // v1.4 C1:构造事件转发器 —— 携带 sub_id / event_tx / 父历史尾部
+    // 快照,供 CallSubAgentTool 转发子代理进度(SubagentProgress)与
+    // 按 pass_context_messages 截取上下文。普通工具不读这些字段,零开销。
+    // 快照:最近 10 条消息(含本轮 assistant 工具调用),JSON 形态规避
+    // reflect-tools → llm 反向依赖。
+    let parent_tail: Vec<serde_json::Value> = state
+        .messages
+        .messages
+        .iter()
+        .rev()
+        .take(10)
+        .rev()
+        .filter_map(|m| serde_json::to_value(m).ok())
+        .collect();
+    let mut forwarder = reflect_tools::ToolEventForwarder::new(
+        ctx.sub_id.clone(),
+        ctx.event_tx.clone(),
+        parent_tail,
+    );
+    // v1.5 R1:每回合沙箱覆盖透传给队列(→ ToolContext.os_sandbox)。
+    forwarder.os_sandbox = ctx.sandbox_override;
+    let forwarder = Arc::new(forwarder);
     let results = ctx
         .tools_queue
-        .execute_all_with_gate(calls, ctx.approval_gate.clone())
+        .execute_all_with_progress(calls, ctx.approval_gate.clone(), Some(forwarder))
         .await;
+    // v1.4 C1:本批工具全部结束 → 清空子代理状态槽的 current_tool。
+    if let Some(slot) = ctx.cfg.subagent_status.as_ref() {
+        for (name, _) in call_meta.values() {
+            slot.end_tool(name);
+        }
+    }
     // 移除 ToolUse 块,用它们的结果替换。
     state
         .latest_content
@@ -375,6 +411,13 @@ pub async fn tool_exec(state: &mut AgentState, ctx: &NodeContext) -> Option<Grap
                     *state.web_domain_counts.entry(domain).or_insert(0) += 1;
                 }
             }
+        }
+        // 清单回灌:`TodoWrite` 把清单写进 `metadata.todos`(输出通道)。
+        // 渲染成紧凑文本存进**会话级**槽 —— `pre_loop` 会把它注入进
+        // core prompt,让 LLM 在后续轮次仍看得见自己写的清单。
+        // 没有这一步,清单「只出不进」,LLM 写完即忘。
+        if let Some(checklist) = render_todo_checklist(&tool_output.metadata) {
+            *ctx.todos_slot.write() = Some(checklist);
         }
         state
             .messages
@@ -652,6 +695,49 @@ async fn maybe_emit_plan_draft_updated(
             }),
         ))
         .await;
+}
+
+// ── todo 清单回灌 ────────────────────────────────────────────────────────
+//
+// `TodoWrite` 的输出元数据形状(见 reflect-task 的 TodoWriteTool):
+// ```json
+// { "todos": [ { "content": "...", "status": "pending|in_progress|completed",
+//                 "activeForm": "..." } ], "count": 3 }
+// ```
+//
+// 渲染成注入给模型的紧凑文本:`- [ ] / - [~] / - [x]` 三态。
+//
+// 返回 `None` = 这不是一份 todo 清单(别的工具 / 没有 `todos` 字段 /
+// 清单为空)—— 调用方据此**不覆盖**已有槽位。
+
+/// 把 `TodoWrite` 的 `metadata.todos` 渲染成注入给模型的紧凑清单文本。
+fn render_todo_checklist(metadata: &serde_json::Value) -> Option<String> {
+    let todos = metadata.get("todos")?.as_array()?;
+    let mut out = String::new();
+    for t in todos {
+        let content = t
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if content.trim().is_empty() {
+            continue;
+        }
+        let mark = match t
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("pending")
+        {
+            "completed" => "x",
+            "in_progress" => "~",
+            _ => " ",
+        };
+        out.push_str(&format!("- [{mark}] {}\n", content.trim()));
+    }
+    if out.trim().is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 #[cfg(test)]

@@ -63,7 +63,14 @@ async fn start_serve(
     let (client_w, server_r) = tokio::io::duplex(8192);
     let (sink, sink_rx) = mpsc::channel::<Event>(256);
     let tools = thread.tools().clone();
-    let handle = tokio::spawn(serve_session(thread, tools, server_r, sink));
+    let handle = tokio::spawn(serve_session(
+        thread,
+        tools,
+        // 测试不启用插件:空 runtime 句柄,命令展开直通。
+        reflect_plugin::empty_plugin_runtime(),
+        server_r,
+        sink,
+    ));
     (client_w, sink_rx, handle)
 }
 

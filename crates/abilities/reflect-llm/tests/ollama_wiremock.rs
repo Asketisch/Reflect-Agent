@@ -33,6 +33,7 @@ fn basic_request() -> ChatRequest {
         cache_control: vec![],
         metadata: Default::default(),
         stop: vec![],
+        response_format: None,
     }
 }
 

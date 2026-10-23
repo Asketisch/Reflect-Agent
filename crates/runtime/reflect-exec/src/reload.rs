@@ -9,11 +9,11 @@ use reflect_config::ConfigWatcher;
 use reflect_core::AgentConfig;
 use reflect_llm::ModelRegistry;
 use reflect_mcp::{McpConnectionManager, McpServerConfig};
+use reflect_plugin::runtime::{SharedPluginRuntime, reload_plugins};
 use reflect_subagent::SubAgentFactory;
 use reflect_tools::ToolRegistry;
 
 use crate::apply_coordinator_from_config;
-use crate::bootstrap_plugins;
 
 /// 监听 config watcher,每次变更重建 `ModelRegistry` 内的 provider client。
 /// 已发出的 LLM 请求不受影响;下一个 turn 用新 client。
@@ -42,7 +42,7 @@ pub fn spawn_reload_task(
     recorder: Option<Arc<dyn reflect_protocol::RolloutRecorder>>,
     mcp_manager: Option<Arc<McpConnectionManager>>,
     tools: Arc<ToolRegistry>,
-    plugin_runtime: Option<bootstrap_plugins::SharedPluginRuntime>,
+    plugin_runtime: Option<SharedPluginRuntime>,
 ) {
     tokio::spawn(async move {
         let mut rx = watcher.subscribe();
@@ -109,14 +109,21 @@ pub async fn handle_reload(
     event_tx: &tokio::sync::mpsc::Sender<reflect_protocol::Event>,
     mcp_manager: Option<&McpConnectionManager>,
     tools: &ToolRegistry,
-    plugin_runtime: Option<&bootstrap_plugins::SharedPluginRuntime>,
+    plugin_runtime: Option<&SharedPluginRuntime>,
 ) -> Result<(), String> {
     if let Err(e) = new_cfg.apply_to_registry(registry) {
         return Err(format!("apply_to_registry failed: {e}"));
     }
     let sections_changed = diff_sections(old_cfg, new_cfg);
-    let old_spec = old_cfg.resolved_model_spec();
-    let new_spec = new_cfg.resolved_model_spec();
+    // `model = "free"` 这类运行时才知道的值要在**这里**重新解析 —— 配置
+    // 改的可能是 `[model_discovery]` 规则,或 provider 换了(清单跟着变)。
+    // 解析失败 → 本轮 reload 报错(保留旧 model),不静默沿用旧值。
+    let old_spec = reflect_config::resolve_model_spec(old_cfg, registry)
+        .await
+        .map_err(|e| format!("resolve old model failed: {e}"))?;
+    let new_spec = reflect_config::resolve_model_spec(new_cfg, registry)
+        .await
+        .map_err(|e| format!("resolve new model failed: {e}"))?;
     let model_changed = old_spec != new_spec && new_spec.is_some();
     if let Some(new_model) = new_spec.as_ref() {
         if model_changed {
@@ -204,7 +211,7 @@ pub async fn handle_reload(
     // v1.0.0-rc2: `[plugins]` 段变更 → 同步 enabled_plugins 挂载。
     if sections_changed.iter().any(|s| s == "plugins") {
         if let Some(rt) = plugin_runtime {
-            bootstrap_plugins::reload_plugins(rt, &new_cfg.plugins.enabled_plugins).await;
+            reload_plugins(rt, &new_cfg.plugins.enabled_plugins).await;
         }
     }
 

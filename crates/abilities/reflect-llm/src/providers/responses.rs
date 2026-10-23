@@ -27,6 +27,7 @@ use crate::capabilities::Capabilities;
 use crate::client::ModelClient;
 use crate::error::LlmError;
 use crate::event::ChatEvent;
+use crate::model_catalog::ModelInfo;
 use crate::request::{ChatRequest, ContentBlock, ToolSpec};
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com";
@@ -121,10 +122,15 @@ impl ModelClient for OpenAIResponsesClient {
         let mut req = self
             .http
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.config.api_key))
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream")
             .body(body.to_string());
+
+        // 空 `api_key` 不发 Authorization 头(免 Key 端点)—— 与 openai.rs
+        // / ollama.rs 的既有约定一致。
+        if !self.config.api_key.is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", self.config.api_key));
+        }
 
         if cancel.is_cancelled() {
             return Err(LlmError::Cancelled);
@@ -141,6 +147,49 @@ impl ModelClient for OpenAIResponsesClient {
         }
 
         Ok(Box::pin(stream_sse(response, cancel)))
+    }
+
+    /// R0-1:与 Chat Completions 共用同一份清单解析器(端点同为 `{base}/v1/models`)。
+    async fn list_models(
+        &self,
+        cancel: CancellationToken,
+    ) -> Result<Option<Vec<ModelInfo>>, LlmError> {
+        let base = self
+            .config
+            .base_url
+            .as_deref()
+            .unwrap_or(DEFAULT_BASE_URL)
+            .trim_end_matches('/');
+        let url = format!("{base}/v1/models");
+
+        let mut req = self.http.get(&url).header("Accept", "application/json");
+        if !self.config.api_key.is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", self.config.api_key));
+        }
+
+        if cancel.is_cancelled() {
+            return Err(LlmError::Cancelled);
+        }
+
+        let response = req.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            if status == reqwest::StatusCode::NOT_FOUND
+                || status == reqwest::StatusCode::METHOD_NOT_ALLOWED
+            {
+                return Ok(None);
+            }
+            let status_code = status.as_u16();
+            let headers = response.headers().clone();
+            let text = response.text().await.unwrap_or_default();
+            return Err(classify_status(status_code, &text, &headers));
+        }
+
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|e| LlmError::Internal(format!("model listing parse failed: {e}")))?;
+        Ok(Some(crate::providers::openai::parse_model_listing(&body)))
     }
 }
 
@@ -339,6 +388,10 @@ pub struct ResponsesRequest {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<String>,
+    /// v1.4 B1:结构化输出(`text.format` 子对象)。`None` 不序列化,
+    /// 历史请求体不变。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<Value>,
 }
 
 impl From<ChatRequest> for ResponsesRequest {
@@ -366,6 +419,29 @@ impl From<ChatRequest> for ResponsesRequest {
                 }),
             })
             .collect();
+        // v1.4 B1:结构化输出 → Responses `text.format`。Responses 的
+        // wire 形态与 Chat Completions 的 `response_format` 同构。
+        let text = req.response_format.as_ref().map(|rf| {
+            let format = match rf {
+                crate::request::ResponseFormat::Text => {
+                    serde_json::json!({"type": "text"})
+                }
+                crate::request::ResponseFormat::JsonObject => {
+                    serde_json::json!({"type": "json_object"})
+                }
+                crate::request::ResponseFormat::JsonSchema {
+                    name,
+                    schema,
+                    strict,
+                } => serde_json::json!({
+                    "type": "json_schema",
+                    "name": name,
+                    "schema": schema,
+                    "strict": strict,
+                }),
+            };
+            serde_json::json!({"format": format})
+        });
         Self {
             model: req.model,
             input,
@@ -375,6 +451,7 @@ impl From<ChatRequest> for ResponsesRequest {
             top_p: req.top_p,
             stream: true,
             instructions,
+            text,
         }
     }
 }
@@ -594,5 +671,33 @@ mod tests {
         assert_eq!(r.input[0]["role"], "user");
         assert_eq!(r.input[0]["content"], "hi");
         assert!(r.stream);
+    }
+    // ── v1.4 B1:text.format 映射 ────────────────────────────────
+
+    #[test]
+    fn responses_json_schema_sets_text_format() {
+        let req = ChatRequest {
+            model: "gpt-4o".into(),
+            response_format: Some(crate::ResponseFormat::JsonSchema {
+                name: "answer".into(),
+                schema: serde_json::json!({"type": "object"}),
+                strict: false,
+            }),
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(ResponsesRequest::from(req)).unwrap();
+        assert_eq!(wire["text"]["format"]["type"], "json_schema");
+        assert_eq!(wire["text"]["format"]["name"], "answer");
+        assert_eq!(wire["text"]["format"]["strict"], false);
+    }
+
+    #[test]
+    fn responses_no_response_format_no_text() {
+        let req = ChatRequest {
+            model: "gpt-4o".into(),
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(ResponsesRequest::from(req)).unwrap();
+        assert!(wire.get("text").is_none());
     }
 }

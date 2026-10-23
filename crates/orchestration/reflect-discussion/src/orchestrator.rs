@@ -264,11 +264,26 @@ impl DiscussionOrchestrator {
         // 消息为 `CollabMessage`(包含 token_usage,如 LLM 路径下注入)。
         let transcript_len_before = self.bus.transcript().len();
 
-        let runtime = DiscussionRuntime::new(
+        let mut runtime = DiscussionRuntime::new(
             self.config.clone(),
             self.bus.clone(),
             self.round_counter.clone(),
         );
+        // v1.4 C3:裁判模式 —— config.judge 且工厂在位时,构造 LLM 裁判
+        // 闭包(spawn 独立 judge 子代理,禁用工具,max_turns=1)挂到
+        // runtime。工厂缺席时 warn 并回退自报共识。
+        if self.config.judge {
+            match self.factory.clone() {
+                Some(factory) => {
+                    runtime = runtime.with_judge(crate::llm::make_judge_closure(factory));
+                }
+                None => {
+                    warn!(
+                        "discussion judge=true but no factory wired; falling back to self-reported consensus"
+                    );
+                }
+            }
+        }
         let result = match self.config.mode {
             // 顺序模式:on_event 闭包只需 FnMut,直接 &mut 借用即可。
             DiscussionMode::Sequential => {
@@ -422,6 +437,7 @@ mod tests {
             consensus_window,
             max_rounds,
             mailbox_capacity: 4,
+            judge: false,
         };
         let bus = MessageBus::new(DiscussionId::new(), participants, 4);
         let mut orch =

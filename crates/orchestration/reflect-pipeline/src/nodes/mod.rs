@@ -8,7 +8,7 @@
 //!
 //! | 预设名 | 默认 prompt 模板(模板字符串为字面量) | 输出字段 |
 //! |---|---|---|
-//! | `planner` | `"Plan for: {{topic}}\n\n{{input.audience}}"` | `result` |
+//! | `planner` | `"Plan for: {{topic}}"` | `result` |
 //! | `prd` | `"PRD from plan: {{nodes.plan.outputs.result}}"` | `result` |
 //! | `executor` | `"Implement: {{nodes.prd.outputs.result}}"` | `result` |
 //! | `verifier` | `"Verify: {{nodes.exec.outputs.result}}"` | `result` |
@@ -18,6 +18,7 @@
 pub mod human_gate;
 pub mod join;
 pub mod loop_control;
+pub mod shell;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -29,6 +30,7 @@ use serde::Deserialize;
 use tracing::{debug, warn};
 
 use crate::error::PipelineError;
+use crate::nodes::shell::{ShellNodeParams, ShellNodeRunner};
 use crate::runner::{NodeContext, NodeOutcome, NodeRunner, NodeStatus};
 use crate::template;
 
@@ -288,8 +290,12 @@ impl NodeRunner for TeamNodeRunner {
 // ── 4 阶段预设工厂 ─────────────────────────────────────────────────────────
 
 /// `planner` 预设 — `Plan for {{topic}}`。
+///
+/// v1.6 修复:此前模板硬编码 `{{input.audience}}`,而 `pipeline run`
+/// 默认不传 inputs,渲染必失败(tests/README 已知限制 #1)。现在只依赖
+/// 必有的 `{{topic}}`;需要附加输入的节点经 `--input k=v` 显式传入。
 pub fn planner_node(name: impl Into<String>, team: TeamFile) -> TeamNodeRunner {
-    TeamNodeRunner::new(name, team, "Plan for: {{topic}}\n\n{{input.audience}}")
+    TeamNodeRunner::new(name, team, "Plan for: {{topic}}")
 }
 
 /// `prd` 预设 — `PRD from plan: {{nodes.plan.outputs.result}}`。
@@ -305,6 +311,27 @@ pub fn executor_node(name: impl Into<String>, team: TeamFile) -> TeamNodeRunner 
 /// `verifier` 预设 — `Verify: {{nodes.exec.outputs.result}}`。
 pub fn verifier_node(name: impl Into<String>, team: TeamFile) -> TeamNodeRunner {
     TeamNodeRunner::new(name, team, "Verify: {{nodes.exec.outputs.result}}")
+}
+
+/// v1.4 C2:默认 runner 分发器 —— `Pipeline::from_toml` 的 runner_for
+/// 闭包推荐实现。按 TOML 的 `runner` 字段分发:
+/// - `"shell"` → [`ShellNodeRunner::from_params`](解析 params.command);
+/// - 其余(`"team"` 等)→ 走 label 预设(`preset_for`)。
+///
+/// 闭包签名变更(v1.4):runner 类型透传给分发器,不再靠 params 内容猜。
+pub fn default_runner_for(
+    label: &str,
+    runner: &str,
+    params: Option<&toml::Value>,
+    team_for_label: impl Fn(&str) -> Option<TeamFile>,
+) -> Option<Arc<dyn NodeRunner>> {
+    if runner == "shell" {
+        let p = params?;
+        let parsed: ShellNodeParams = p.clone().try_into().ok()?;
+        return Some(Arc::new(ShellNodeRunner::from_params(label, &parsed).ok()?));
+    }
+    let _ = runner;
+    preset_for(label, team_for_label)
 }
 
 /// 预设注册器 —— 帮 `Pipeline::from_toml` 的 runner_for 闭包根据节点 label

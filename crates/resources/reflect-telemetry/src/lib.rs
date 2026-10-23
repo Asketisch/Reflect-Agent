@@ -27,7 +27,8 @@ pub mod writer;
 
 pub use langfuse::{LangfuseConfig, LangfuseExporter};
 pub use model::{
-    DEFAULT_TRACES_DIR, Level, ModelIoRecord, ModelRef, SpanStatus, TraceEvent, UsageSnapshot,
+    DEFAULT_TRACES_DIR, Level, ModelIoRecord, ModelRef, SpanStatus, TelemetryWriteConfig,
+    TraceEvent, UsageSnapshot,
 };
 pub use sink::{TelemetrySink, TurnSpan, resolve_traces_dir};
 pub use writer::{

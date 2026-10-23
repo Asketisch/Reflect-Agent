@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  # PyO3 在编译期需要解释器。CI runner 镜像的默认 Python 会随镜像升级漂移
+  # (曾从 3.12 漂到 3.14,导致 pyo3-ffi 构建脚本硬失败),故所有需要
+  # 编译 pyo3 的 job 显式 setup-python 并用 PYO3_PYTHON 锁定解释器。
+  PYTHON_VERSION: "3.14"
+  PYO3_PYTHON: python3
+
+jobs:
+  check:
+    name: cargo check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: cargo check --workspace --all-targets
+
+  fmt:
+    name: cargo fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: cargo clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      # --no-fail-fast:一个 test binary 失败不阻断其余 binaries(一次
+      # 看到全部失败面,失败诊断不再打地鼠)。
+      - run: cargo test --workspace --all-targets --no-fail-fast
+
+  # SDK 测试用本地 Node "mock serve" 驱动协议,不依赖 reflect 二进制
+  # 与网络(离线;真二进制的端到端覆盖在 Rust 集成测试 serve_stdio.rs)。
+  sdk-ts:
+    name: sdk typescript
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+        working-directory: sdks/typescript
+      - run: npm run typecheck
+        working-directory: sdks/typescript
+      - run: npm test
+        working-directory: sdks/typescript
+
+  sdk-python:
+    name: sdk python
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+        working-directory: sdks/python
+      - run: pytest -ra
+        working-directory: sdks/python
+        env:
+          PYTHONPATH: .
+
+  # 功能覆盖门禁:能力覆盖层(Python 打真二进制,原始 wire)+ Rust CLI 参数面
+  # + 双 SDK 绑定层。cargo test / clippy / fmt / doc 由上面的 job 覆盖,
+  # 这里用 `functional` 模式跳过(REFLECT_SKIP_WORKSPACE=1)。
+  functional-suite:
+    name: functional test suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # 显式装 toolchain:runner 镜像里的 rustup **没有默认 toolchain**
+      # (既没有 `rustup default`,仓库外的临时目录也读不到 rust-toolchain.toml),
+      # 任何在仓库外执行的 cargo 都会报
+      # "rustup could not choose a version of cargo to run"。
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: install jq (tests/rust/*.sh 依赖)
+        run: sudo apt-get update && sudo apt-get install -y jq
+      - run: pip install pytest
+      - name: build reflect binary (release)
+        run: cargo build --release -p reflect-cli
+      - name: build mock MCP server (审批用例需要)
+        run: cargo build -p reflect-mcp
+      - run: npm ci
+        working-directory: sdks/typescript
+      - run: ./tests/run_all.sh functional

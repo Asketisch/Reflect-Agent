@@ -12,7 +12,8 @@
 //! - **MCP servers**: 完整接入(`start_server_with_namespace` + scoped name)
 //! - **Agents**: 完整接入(parse frontmatter → `SubAgentSpec` →
 //!   `register_plugin_spec` + `CallSubAgentTool` → `register_plugin_tool`)
-//! - **Commands**: deferred 到 Phase C(`reflect-tui` slash 命令系统)
+//! - **Commands**: 完整接入(`LoadedCommand` → [`CommandRegistry`];展开在
+//!   exec / serve / 门面的用户输入层,`expand_user_input`)
 //! - **Hooks**: deferred 到 Phase B-internal 收尾(需要 `ShellHook` 实现,
 //!   涉及 child-process spawning,工作量独立)
 
@@ -26,6 +27,7 @@ use reflect_subagent::{CallSubAgentTool, SubAgentFactory, SubAgentSpec};
 use reflect_tools::ToolRegistry;
 
 use crate::capabilities::{CapabilityError, LoadedPlugin, scan_all};
+use crate::commands_registry::CommandRegistry;
 use crate::identifier::PluginId;
 use crate::manifest::PluginManifest;
 
@@ -40,6 +42,8 @@ pub struct LoaderRegistries {
     pub mcp: Arc<McpConnectionManager>,
     pub skills: Arc<SkillsCatalog>,
     pub subagent_factory: Arc<SubAgentFactory>,
+    /// 插件 slash 命令注册表 —— 本 crate 自建自管,不依赖外部传入。
+    pub commands: Arc<CommandRegistry>,
 }
 
 impl LoaderRegistries {
@@ -56,6 +60,7 @@ impl LoaderRegistries {
             mcp,
             skills,
             subagent_factory,
+            commands: Arc::new(CommandRegistry::new()),
         }
     }
 }
@@ -97,6 +102,7 @@ pub async fn register(
             body: String::new(),
             plugin_id: Some(loaded.plugin_id.to_string()),
             when_paths: vec![],
+            version: None,
         })
         .collect();
     if !skill_metas.is_empty() {
@@ -105,6 +111,12 @@ pub async fn register(
             .skills
             .add_plugin_skills(&plugin_id, &skill_metas);
     }
+
+    // 1b. Commands —— 纯内存注册;正文在用户输入展开时才读取
+    //      (`expand_user_input`),改 md 即生效,无需重挂插件。
+    registries
+        .commands
+        .add_plugin(loaded.plugin_id.as_str(), loaded.commands.clone());
 
     // 2. Agents —— parse frontmatter → SubAgentSpec → register_plugin_spec
     //    + CallSubAgentTool → register_plugin_tool。
@@ -153,36 +165,99 @@ pub async fn register(
                 .unwrap_or_default(),
             timeout: std::time::Duration::from_secs(mcp_loaded.config.timeout_secs.unwrap_or(30)),
         };
-        if let Err(e) = registries
+        let timeout = cfg.timeout;
+        match registries
             .mcp
             .start_server_with_namespace(loaded.plugin_id.as_str(), &mcp_loaded.original_name, cfg)
             .await
         {
-            errors.push(RegisterError {
+            Ok(handle) => {
+                // server 启动成功后,把工具 adapter 以 scoped 全名注册进
+                // ToolRegistry —— 否则工具只存在于 manager 缓存里,LLM
+                // 的可见工具集(pre_loop 读 registry)看不到它们。
+                for desc in &handle.tools {
+                    let adapter = reflect_mcp::McpToolAdapter::from_descriptor(
+                        handle.inner.clone(),
+                        desc,
+                        &handle.server_name,
+                        timeout,
+                        None,
+                    );
+                    registries.tools.register_mcp_tool(Arc::new(adapter));
+                }
+            }
+            Err(e) => errors.push(RegisterError {
                 capability: "mcp_servers",
                 name: mcp_loaded.scoped_name.clone(),
                 message: format!("{e}"),
-            });
+            }),
         }
     }
 
-    // 4. Commands / 5. Hooks —— plugin hooks 尚未实现 ShellHook;
-    //    扫描到的 hook 声明仅 log,不注册到 HookEngine。
-    if !loaded.hooks.is_empty() {
-        tracing::info!(
-            plugin = %loaded.plugin_id,
-            count = loaded.hooks.len(),
-            "plugin hooks deferred: ShellHook not implemented yet (Phase B-internal)"
-        );
-        for hook in &loaded.hooks {
-            tracing::debug!(
+    // 4. Hooks —— v1.5 R3:LoadedHook → ShellHook 真挂载。
+    // 每条声明构造一个外部命令 hook(事件 JSON 进 stdin,stdout JSON
+    // 决策回传;超时 / 非零退出 fail-closed)。未知事件名或缺 command
+    // 的声明跳过并 warn,不阻断其余能力挂载。
+    let mut registered_hooks = 0usize;
+    for (i, hook) in loaded.hooks.iter().enumerate() {
+        let Some(kind) = reflect_hooks::shell::ShellHook::parse_kind(&hook.event) else {
+            tracing::warn!(
                 plugin = %loaded.plugin_id,
                 event = %hook.event,
-                matcher = ?hook.matcher,
-                source = %hook.source,
-                "plugin hook stub (not registered)"
+                "plugin hook: unknown event name, skipping"
             );
-        }
+            continue;
+        };
+        let Some(command) = hook
+            .command
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+        else {
+            tracing::warn!(
+                plugin = %loaded.plugin_id,
+                event = %hook.event,
+                "plugin hook: missing command, skipping"
+            );
+            continue;
+        };
+        let timeout = hook
+            .command
+            .get("timeout")
+            .and_then(|v| v.as_u64())
+            .map(std::time::Duration::from_secs)
+            .unwrap_or(reflect_hooks::DEFAULT_SHELL_HOOK_TIMEOUT);
+        // 0.12:hooks.json 可用 `env: ["NAME", ...]` 显式放行本应被剔除的
+        // 敏感环境变量(白名单优先于 secret 剔除)。未声明时 hook 拿不到
+        // ANTHROPIC_API_KEY 等 —— 装插件已等同授权任意代码执行,但没必要
+        // 顺手把凭据也递过去。
+        let env_allowlist: Vec<String> = hook
+            .command
+            .get("env")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let shell = reflect_hooks::ShellHook::new(
+            format!("plugin:{}:{}#{}", loaded.plugin_id, hook.event, i),
+            kind,
+            hook.matcher.clone(),
+            command,
+            timeout,
+        )
+        .with_env_allowlist(env_allowlist);
+        registries.hooks.register(shell);
+        registered_hooks += 1;
+    }
+    if registered_hooks > 0 {
+        tracing::info!(
+            plugin = %loaded.plugin_id,
+            count = registered_hooks,
+            "plugin hooks registered (ShellHook)"
+        );
     }
 
     if errors.is_empty() {
@@ -199,9 +274,10 @@ pub async fn register(
 /// 1. **MCP first** —— 拿回 tool 全名,反注册 `ToolRegistry` 中带 `mcp__` 前缀的项。
 /// 2. **Tools by source** —— `unregister_source(Plugin)` 一次性清掉所有
 ///    `ToolSource::Plugin` 标记的 tool(本插件之前 register 时挂的)。
-/// 3. **Skills** —— `remove_plugin_skills` 走 plugin_id 过滤。
+/// 3. **Skills** —— `remove_plugin_skills` 走 plugin_id 过滤;
+///    **Commands** 同步从 `CommandRegistry` 整体移除。
 /// 4. **Subagent specs** —— `take_plugin_specs` 拿回 spec 列表。
-/// 5. **Hooks** —— 延迟处理。
+/// 5. **Hooks** —— `unregister_by_prefix` 清 ShellHook。
 pub async fn unregister(registries: &LoaderRegistries, plugin_id: &PluginId) -> Result<(), String> {
     // 1. 此插件持有的 MCP 服务器
     let server_names = registries.mcp.server_names().await;
@@ -230,13 +306,30 @@ pub async fn unregister(registries: &LoaderRegistries, plugin_id: &PluginId) -> 
     // 3. 技能(Skills)
     registries.skills.remove_plugin_skills(plugin_id.as_str());
 
+    // 3b. 命令(Commands)—— 注册表按 plugin_id 整体移除。
+    let removed_commands = registries.commands.remove_plugin(plugin_id.as_str());
+    tracing::debug!(
+        plugin = %plugin_id,
+        count = removed_commands,
+        "unregister: 清掉插件 slash 命令"
+    );
+
     // 4. 子 agent 规格(Subagent specs)
     let _specs = registries
         .subagent_factory
         .take_plugin_specs(plugin_id.as_str());
 
-    // 5. Hooks —— ShellHook 未实现;register 阶段仅 log,unregister 无状态可清。
-    tracing::debug!(plugin = %plugin_id, "unregister: plugin hooks stub had no HookEngine entries");
+    // 5. Hooks —— ShellHook 命名前缀 `plugin:{id}:` 整段注销。
+    let removed_hooks = registries
+        .hooks
+        .unregister_by_prefix(&format!("plugin:{}:", plugin_id.as_str()));
+    if removed_hooks > 0 {
+        tracing::debug!(
+            plugin = %plugin_id,
+            count = removed_hooks,
+            "unregister: removed plugin ShellHooks"
+        );
+    }
     Ok(())
 }
 
@@ -489,6 +582,7 @@ mod tests {
                 body: String::new(),
                 plugin_id: Some(id.to_string()),
                 when_paths: vec![],
+                version: None,
             })
             .collect();
         catalog.lock().add_plugin_skills(id.as_str(), &skill_metas);

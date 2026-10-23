@@ -11,6 +11,27 @@ pub const MODEL_INHERIT: &str = "inherit";
 /// 未指定时的默认 agent 名。
 pub const DEFAULT_AGENT_NAME: &str = "default";
 
+/// system prompt 的来源(v1.6)。
+///
+/// 决定 pre_loop 组装 core prompt 的路径:`Custom` 时用户 md 原文不动;
+/// `BuiltinDefault` 时按当前模型 spec 从 `reflect_prompt` 提示词库解析
+/// `system.main` / `system.facade-main`,实现主 prompt 随模型热切换。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemPromptSource {
+    /// 用户显式提供(`.reflect/agents/*.md` body 或 TOML 字段)。
+    Custom,
+    /// 内置默认 —— `system_prompt` 为空,运行时按模型解析。
+    BuiltinDefault,
+}
+
+impl Default for SystemPromptSource {
+    fn default() -> Self {
+        // 代码内构造的空 prompt 视作内置默认;文件解析路径会显式置 Custom。
+        Self::BuiltinDefault
+    }
+}
+
 /// 一条 agent 定义(解析自单个 `agent.md`)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentDefinition {
@@ -49,6 +70,10 @@ pub struct AgentDefinition {
     /// 闭合 `---` 之后的部分。
     #[serde(default)]
     pub system_prompt: String,
+    /// v1.6:prompt 来源。`Custom` = 用户 md 原文直接用;
+    /// `BuiltinDefault` = 空文案,运行时按模型 spec 从提示词库解析。
+    #[serde(default)]
+    pub source: SystemPromptSource,
 }
 
 impl Default for AgentDefinition {
@@ -65,6 +90,7 @@ impl Default for AgentDefinition {
             memory: Vec::new(),
             mcp_collections: Vec::new(),
             system_prompt: String::new(),
+            source: SystemPromptSource::BuiltinDefault,
         }
     }
 }

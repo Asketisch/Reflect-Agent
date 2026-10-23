@@ -67,6 +67,9 @@ impl ReflectConfig {
     /// `api_key = "..."` 单值在 builder 内部 wrap 为
     /// `label = "default"` / `weight = 1` 的单 entry pool。
     pub fn apply_to_registry(&self, registry: &ModelRegistry) -> Result<(), ConfigError> {
+        // provider 池即将重建(可能换了 base_url / 凭据)→ 旧的模型清单缓存
+        // 必须失效,否则新端点的清单会被旧端点的条目顶掉(TTL 内)。
+        crate::discovery::clear_catalog_cache();
         if let Some(anth) = &self.anthropic {
             if let Some(pool) = build_anthropic_pool(anth)? {
                 registry.register_pool("anthropic", pool);
@@ -270,9 +273,24 @@ impl ReflectConfig {
     /// 各 slot 的 `primary` 缺省时,优先用该 slot 的 env 变量:
     /// `REFLECT_COMPACT_MODEL` / `REFLECT_SUBAGENT_MODEL`,否则兜底
     /// active spec。
+    ///
+    /// ⚠️ 本方法用的是**同步**的 `resolved_model_spec()`。当配置里的 model
+    /// 是 `free` 这类「运行时才知道」的特殊值时,同步解析拿到的仍是占位串
+    /// (`"openai/free"`),而 `model_call` 的 spec 优先取 routing 的 main
+    /// slot primary —— 占位串会盖掉已解析出的真实 id。**动态 model 场景
+    /// 必须用 [`Self::routing_policy_with`] 传入解析后的 spec。**
     pub fn routing_policy(&self) -> reflect_llm::RoutingPolicy {
-        use reflect_llm::{Role, RoutingPolicy, SpecSlot};
         let active_spec = self.resolved_model_spec().unwrap_or_default();
+        self.routing_policy_with(&active_spec)
+    }
+
+    /// 同 [`Self::routing_policy`],但 active spec 由调用方传入。
+    ///
+    /// 用于「model 需要运行时解析」的场景:调用方先解析出真实模型 id,再
+    /// 用它构建 policy,保证 routing 的 main slot 与实际请求一致。
+    pub fn routing_policy_with(&self, active_spec: &str) -> reflect_llm::RoutingPolicy {
+        use reflect_llm::{Role, RoutingPolicy, SpecSlot};
+        let active_spec = active_spec.to_string();
 
         let Some(section) = &self.routing else {
             return RoutingPolicy {
@@ -300,10 +318,17 @@ impl ReflectConfig {
             }
         }
 
+        // v1.5 review:单轮重试上限可配 —— 缺省沿用 `RoutingPolicy::default()`
+        // 的 16,`[routing] max_attempts` 覆盖。经 `with_policy` 流入
+        // `model_call` 的重试环。
+        let max_attempts = section
+            .max_attempts
+            .unwrap_or(RoutingPolicy::default().max_attempts);
         RoutingPolicy {
             main: build_slot(&section.main, "REFLECT_MAIN_MODEL", &active_spec),
             compact: build_slot(&section.compact, "REFLECT_COMPACT_MODEL", &active_spec),
             subagent: build_slot(&section.subagent, "REFLECT_SUBAGENT_MODEL", &active_spec),
+            max_attempts,
             ..RoutingPolicy::default()
         }
         // 抑制 Role 导入的 unused 警告(供 Phase 3 caller 用)
@@ -400,7 +425,22 @@ fn build_openai_pool(section: &OpenAISection) -> Result<Option<CredentialPool>, 
         section.credentials.clone()
     } else {
         let key = resolve_openai_key(section);
-        if key.is_empty() {
+        // **免 Key 端点也要注册** —— 显式配了 `base_url` 就是「我把这个
+        // 端点接进来了」,哪怕它不要 key(免费模型池就是这种端点:
+        // `api_key = ""` → client 不发 Authorization 头)。
+        //
+        // 此前这里是「key 空 → 不注册」,于是免 Key 端点**只能绕道
+        // `[[openai.credentials]]` 数组形态**才能用 —— 配置形态被迫分叉,
+        // GUI 也无法表达(plan 编辑器省略 `api_key` → TOML 反序列化失败)。
+        //
+        // 仍然不注册的只有一种:既没 key 也没 base_url —— 那就是「用户没配
+        // 这个 provider」,不该凭空造一个池子。
+        let has_custom_endpoint = section
+            .base_url
+            .as_deref()
+            .map(|b| !b.trim().is_empty())
+            .unwrap_or(false);
+        if key.is_empty() && !has_custom_endpoint {
             return Ok(None);
         }
         vec![CredentialConfig {
@@ -534,6 +574,10 @@ fn has_openai_credential(s: &OpenAISection) -> bool {
     !s.credentials.is_empty()
         || s.api_key.as_deref().is_some_and(|k| !k.is_empty())
         || env_has(ENV_OPENAI_API_KEY)
+        // 免 Key 端点:显式 `base_url` 就是一次「我接了这个端点」的声明 ——
+        // 与 `build_openai_pool` 的注册条件保持同口径(否则配置能注册却
+        // 推不出 active provider,状态栏会显示「未配置」)。
+        || s.base_url.as_deref().is_some_and(|b| !b.trim().is_empty())
 }
 
 fn env_has(name: &str) -> bool {

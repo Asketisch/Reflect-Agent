@@ -36,26 +36,9 @@ pub(crate) fn tools() -> Arc<ToolRegistry> {
 
 // ── M4 引导 ────────────────────────────────────────────────────────────
 
-/// 默认 agent 系统提示(用户未提供 `.reflect/agents/<name>.md` 时的 fallback)。
-///
-/// 只覆盖 5 条最通用的编码 agent 行为约束,刻意保持简短:具体能力由工具
-/// 和 skills 在运行时叠加。借鉴业界通用编码 agent 的安全执行实践
-/// (如「做任务不画蛇添足」「注释解释为什么」等成熟约定),但不绑定技术栈、
-/// 不含外部链接 / 模型身份 / 区域限制等不适用条款。
-const DEFAULT_SYSTEM_PROMPT: &str = "你是一名编码助手。在回答用户请求时遵守以下约定:\n\
-\n\
-1. 先读后改:编辑文件前先用 `read` 读目标文件;做有针对性的修改,而非整文件重写。\n\
-2. 先约定后实现:不要假设库或工具可用。从 README、package manifest(如 \
-Cargo.toml / package.json)、邻近文件确认约定与风格,模仿现有代码的命名与惯用法。\n\
-3. 不过度设计:只做被要求的事,不主动增加范围外的功能、重构或抽象。三行重复 \
-优于过早抽象。任务完成后不要顺手创建未要求的 README / 测试 / 文档。\n\
-4. 注释克制:除非用户要求,不要写注释;需要写注释时,只解释「为什么」, \
-不要复述代码「是什么」。\n\
-5. 破坏性操作前确认:对难以撤销或对外可见的操作,先说明再执行。典型例子包括 \
-`rm -rf`、`git reset --hard`、删除分支、`git push`(含 `--force`)、 \
-发送外部请求或提交等。\n\
-\n\
-语言:用与用户提问相同的语言回答。";
+// 默认 agent 系统提示已外置(v1.6):原 5 条约束迁入提示词库
+// `system.main` section(内嵌 `prompts/default.md`),运行时按当前
+// 模型 spec 解析,可被 `.reflect/prompts/*.md` 按模型覆盖。
 
 /// v1.1.0 Phase 6 P0:在 `$REFLECT_HOME/session-notes/<thread_id>.jsonl`
 /// 上构造 `FileBackedNoteStore`。任何一步失败都返回 `None` —— caller
@@ -104,6 +87,21 @@ pub(crate) fn bootstrap_m4(
     // Agent 定义:从 workspace + home agent 目录加载。
     let home = std::env::var("HOME").unwrap_or_default();
     let home_path = std::path::Path::new(&home);
+
+    // v1.6:按模型匹配的外置提示词库。home 在前、workspace 在后
+    // (workspace 同名层优先),另兼容旧版 `~/.reflect/prompts.md`。
+    let ws_prompts = workspace.join(".reflect").join("prompts");
+    let home_prompts = home_path.join(".reflect").join("prompts");
+    let legacy_prompts_md = home_path.join(".reflect").join("prompts.md");
+    let legacy = std::fs::read_to_string(&legacy_prompts_md).ok();
+    if legacy.is_some() {
+        tracing::warn!(
+            path = %legacy_prompts_md.display(),
+            "~/.reflect/prompts.md is deprecated; migrate to ~/.reflect/prompts/default.md"
+        );
+    }
+    reflect_prompt::init_library(&[&home_prompts, &ws_prompts], legacy.as_deref());
+
     let ws_agents = workspace.join(".reflect").join("agents");
     let home_agents = home_path.join(".reflect").join("agents");
     let mut agents = reflect_agent_def::load_agents_dir(&ws_agents).unwrap_or_default();
@@ -112,10 +110,13 @@ pub(crate) fn bootstrap_m4(
     let active_def = agents.remove(agent_name).unwrap_or_else(|| {
         #[allow(clippy::field_reassign_with_default)] // pre-M5
         {
+            // v1.6:默认 agent 不再携带固定文案 —— `BuiltinDefault` 来源
+            // 标记让 pre_loop 按当前模型 spec 从提示词库解析 `system.main`。
             let mut d = AgentDefinition::default();
             d.name = agent_name.to_string();
             d.description = "default agent".into();
-            d.system_prompt = DEFAULT_SYSTEM_PROMPT.into();
+            d.system_prompt = String::new();
+            d.source = reflect_agent_def::SystemPromptSource::BuiltinDefault;
             d
         }
     });
@@ -141,6 +142,12 @@ pub(crate) fn bootstrap_m4(
     // 利用做静态放行。
     let load_skill = Arc::new(reflect_skills::LoadSkillTool::new(skills_catalog.clone()));
     tools().register_runtime_tool(load_skill);
+    // v1.4 D3:附属资源读取(渐进披露第三级)—— 与 load_skill 同源
+    // catalog,按需读取 skill 目录下的 scripts / references。
+    let read_skill_resource = Arc::new(reflect_skills::ReadSkillResourceTool::new(
+        skills_catalog.clone(),
+    ));
+    tools().register_runtime_tool(read_skill_resource);
 
     // Memory:project + user 走文件,session 走内存。
     // v1.x:接线 `CompositeMemoryStore`(此前孤儿)—— Session scope 走内存
@@ -181,7 +188,7 @@ pub(crate) fn bootstrap_m4(
     // v1.0 多 Provider 路由:用 registry + policy 注入,`LlmSummarizer` 内
     // 部走 `Role::Compact` slot 并在失败时跨 credential failover。
     let summarizer: Arc<dyn Summarizer> = {
-        let policy = cfg.routing_policy();
+        let policy = cfg.routing_policy_with(model);
         // 选 compact slot 的 primary 作 spec 起点(向后兼容 model)
         let spec = {
             let p = policy.resolve(reflect_llm::Role::Compact).primary.clone();
@@ -201,7 +208,34 @@ pub(crate) fn bootstrap_m4(
     // 环境变量;M8 把两者都接入 `CompactorConfig`。
     let compactor_cfg =
         reflect_core::config::compactor_config_from_env_and_toml(toml_trigger_tokens);
-    let compactor = Arc::new(Compactor::new(compactor_cfg, summarizer));
+    // v1.4 D2:记忆固化门控 —— `REFLECT_MEMORY_CONSOLIDATION`:
+    //   未设 / `0` / `false` = 关闭(默认,行为不变);
+    //   `1` / `session` = 写 Session scope(进程内,重启即丢,最安全);
+    //   `project` / `user` = 显式写对应文件 scope(入 VCS / 跨项目,
+    //   需用户显式授权)。
+    // LLM 摘要器在位时才接线(Noop 摘要器提取不出内容,徒劳)。
+    let consolidation_scope = match std::env::var("REFLECT_MEMORY_CONSOLIDATION")
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "1" | "true" | "session" => Some(reflect_memory::MemoryScope::Session),
+        "project" => Some(reflect_memory::MemoryScope::Project),
+        "user" => Some(reflect_memory::MemoryScope::User),
+        _ => None,
+    };
+    let compactor_base = Compactor::new(compactor_cfg, summarizer);
+    let compactor = match consolidation_scope {
+        Some(scope) if registry.next_for(&model, &[]).is_some() => {
+            tracing::info!(?scope, "memory consolidation enabled");
+            Arc::new(compactor_base.with_memory_consolidation(
+                memory.clone(),
+                scope,
+                agent_name.to_string(),
+            ))
+        }
+        _ => Arc::new(compactor_base),
+    };
 
     // Prompt 构建器。
     // v1.1.0 Phase 4:若 `CoordinatorConfig::enabled`,把 coordinator
@@ -236,6 +270,9 @@ pub(crate) fn bootstrap_m4(
         note_store,
         file_recovery,
         subagent_registry,
+        // v1.6.1:`/prompt` Switch 重扫用的目录序(home 在前、workspace 在后,
+        // 与启动时 init_library 同序)。
+        prompt_dirs: vec![home_prompts, ws_prompts],
     })
 }
 
@@ -294,15 +331,21 @@ pub(crate) fn bootstrap_m5(
     let toml_specs = initial_cfg.subagents.clone();
     let mut configs = reflect_subagent::merge_by_priority(vec![home_md, ws_md, toml_specs]);
 
-    // 全部源为空时回退硬编码 explorer(向后兼容)。
+    // 全部源为空时回退硬编码 explorer(向后兼容)。v1.6:文案外置为
+    // `subagent.explorer` section —— 空字符串让 subagent 工厂按模型解析,
+    // section 缺失时由工厂回落本英文短句(内嵌默认仍在提示词库里)。
     if configs.is_empty() {
         configs.push(reflect_config::SubagentSpecConfig {
             name: "Explorer".into(),
             role: "explorer".into(),
             model: None,
-            system_prompt:
-                "You are an explorer subagent. Inspect the codebase and return a concise summary."
-                    .into(),
+            system_prompt: reflect_prompt::library()
+                .resolve("")
+                .get_or(
+                    "subagent.explorer",
+                    "You are an explorer subagent. Inspect the codebase and return a concise summary.",
+                )
+                .into(),
             allowed_tools: vec!["bash".into(), "read".into(), "grep".into(), "glob".into()],
             allowed_skills: vec![],
             max_turns: None,
@@ -315,8 +358,10 @@ pub(crate) fn bootstrap_m5(
     // always-on 可见集,模型请求里就没有子代理工具的 schema,LLM 永远无法
     // 委派(离线 mock provider 无视实际工具列表回放脚本,只能靠运行时
     // 真实 LLM 测试暴露)。
-    let call_tool_names: Vec<String> =
-        configs.iter().map(|sc| format!("call_{}", sc.role)).collect();
+    let call_tool_names: Vec<String> = configs
+        .iter()
+        .map(|sc| format!("call_{}", sc.role))
+        .collect();
 
     // 把合并后的 `SubagentSpecConfig` 映射为 `SubAgentSpec` 并注册为
     // `call_<role>` 工具。`data_transfer` 走默认配置。

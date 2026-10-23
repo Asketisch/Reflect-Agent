@@ -13,7 +13,16 @@
 //! 按并发安全性切分的 `ToolExecutionQueue`。
 
 pub mod approval;
-pub mod bm25;
+pub mod human_input;
+// 0.3:bash 命令参数别名解析下沉到 reflect-protocol(与 ToolError 同一
+// 理由:reflect-tools → reflect-hooks 是单向依赖,而该规范化函数被两边
+// 共用的安全判定点需要)。此处 re-export 保持
+// `reflect_tools::bash_command::*` 路径可用。
+pub use reflect_protocol::bash_command;
+// v1.4 D2:BM25 抽为独立叶 crate(reflect-bm25),memory 检索共用;
+// 此处整体 re-export,`crate::bm25::*` 路径与外部 `reflect_tools::bm25`
+// 使用方保持源码兼容。
+pub use reflect_bm25 as bm25;
 pub mod builtins;
 pub mod checkpoint;
 pub mod plan_approval;
@@ -30,6 +39,7 @@ pub use approval::{
     ApprovalGate, ApprovalWaiters, AskUserInputWaiters, AskUserQuestionWaiters, complete_approval,
     complete_ask_user_input, complete_ask_user_question,
 };
+pub use bash_command::{BASH_COMMAND_KEYS, resolve_bash_command};
 pub use bm25::{Bm25Hit, rank_lines, tokenize};
 pub use builtins::bash::{BashCommandClass, classify_command};
 pub use plan_approval::{PlanApprovalGate, PlanApprovalWaiters, complete_plan_approval};
@@ -38,7 +48,7 @@ pub use registry::{ToolRegistry, ToolSource};
 pub use remote::{RemoteBridge, RemoteTool};
 pub use sanitize::{SanitizeConfig, SanitizeError, Sanitizer, sanitize_text};
 pub use spec::ToolSpec;
-pub use tool::{Tool, ToolContext};
+pub use tool::{BackgroundTaskInfo, TaskSpawner, Tool, ToolContext, ToolEventForwarder};
 pub use worktree::{
     SessionWorktreeState, WorktreeCoordinator, create_worktree, default_worktree_path,
     detach_worktree, git_head_ref, git_root, remove_worktree, run_git, sanitize_branch_name,
@@ -65,3 +75,4 @@ pub const READONLY_DENYLIST: &[&str] = &[
     "NotebookEdit",
     "notebook_edit",
 ];
+pub use human_input::HumanInputStore;

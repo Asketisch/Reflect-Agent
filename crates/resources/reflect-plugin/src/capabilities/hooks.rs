@@ -96,7 +96,7 @@ pub fn load(spec: &HookSpec, plugin_root: &Path) -> Result<Vec<LoadedHook>> {
             }
             SourceOrJson::Inline(v) => ("<inline>".into(), v.clone()),
         };
-        expand(&label, &json, &mut out)?;
+        expand(&label, &json, plugin_root, &mut out)?;
     }
     Ok(out)
 }
@@ -106,7 +106,12 @@ enum SourceOrJson {
     Inline(serde_json::Value),
 }
 
-fn expand(source: &str, json: &serde_json::Value, out: &mut Vec<LoadedHook>) -> Result<()> {
+fn expand(
+    source: &str,
+    json: &serde_json::Value,
+    plugin_root: &Path,
+    out: &mut Vec<LoadedHook>,
+) -> Result<()> {
     let parsed: HooksFile =
         serde_json::from_value(json.clone()).map_err(|e| PluginError::ManifestParse {
             path: PathBuf::from(source),
@@ -115,9 +120,14 @@ fn expand(source: &str, json: &serde_json::Value, out: &mut Vec<LoadedHook>) -> 
     for (event, entries) in parsed.hooks {
         for entry in entries {
             for cmd in entry.hooks {
+                // 命令串里的 `${PLUGIN_ROOT}` 展开为插件安装目录 ——
+                // 插件被复制进 cache 后相对路径不再成立。
+                let command = cmd
+                    .command
+                    .map(|c| super::expand_plugin_root(&c, plugin_root));
                 let cmd_value = serde_json::json!({
                     "type": cmd.kind,
-                    "command": cmd.command,
+                    "command": command,
                     "timeout": cmd.timeout,
                 });
                 out.push(LoadedHook {

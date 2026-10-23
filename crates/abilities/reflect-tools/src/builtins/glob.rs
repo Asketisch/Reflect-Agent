@@ -4,7 +4,7 @@
 //! 遍历 workspace;`pattern` 在相对路径上做子串匹配(v0 阶段为节省成本,
 //! 完整的 globset 匹配推迟到 v1)。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use ignore::WalkBuilder;
@@ -47,15 +47,12 @@ impl Tool for GlobTool {
             .ok_or_else(|| ToolError::InvalidArgs {
                 message: "missing 'pattern'".into(),
             })?;
-        let root: PathBuf = args
-            .get("path")
-            .and_then(|v| v.as_str())
-            .map(PathBuf::from)
-            // review 修复:显式 path 此前无沙箱校验,`glob {path: "../../"}` 可
-            // 遍历 workspace 之外的文件。统一经 resolve_sandbox_path 校验。
-            .map(|p| crate::sandbox::resolve_sandbox_path(&ctx.workspace_path(), &p))
-            .transpose()?
-            .unwrap_or_else(|| ctx.workspace_path());
+        let root: PathBuf = match args.get("path").and_then(|v| v.as_str()) {
+            // 0.6:`path` 此前未做 workspace 包含校验,直接喂给
+            // `WalkBuilder::new(root)` —— 与 grep 同样的信息泄露面。
+            Some(p) => crate::sandbox::resolve_sandbox_dir(&ctx.workspace_path(), Path::new(p))?,
+            None => ctx.workspace_path(),
+        };
 
         // 剥掉开头的 "*." 用作后缀匹配。
         let suffix = pattern.trim_start_matches("*.");
@@ -75,12 +72,11 @@ impl Tool for GlobTool {
             let p = entry.path();
             let rel = p.strip_prefix(&root).unwrap_or(p);
             let rel_str = rel.to_string_lossy();
-            let matches = if pattern.contains('/') {
-                rel_str.contains(pattern)
-            } else {
-                rel_str.contains(pattern)
-                    || (!suffix.is_empty() && p.extension().is_some_and(|e| e == suffix))
-            };
+            // 注:原实现这里有个 `if pattern.contains('/')` 分支,两个臂
+            // 逐字相同(`rel_str.contains(pattern)`)—— 纯死代码。已删除,
+            // 匹配逻辑与是否含 `/` 无关。
+            let matches = rel_str.contains(pattern)
+                || (!suffix.is_empty() && p.extension().is_some_and(|e| e == suffix));
             if matches {
                 let mtime = entry
                     .metadata()
@@ -91,14 +87,20 @@ impl Tool for GlobTool {
             }
         }
 
-        // 按 mtime 倒序排列。
-        paths.sort_by_key(|p| std::cmp::Reverse(p.1));
+        // 按 mtime 倒序排列;**同 mtime 时按路径字典序兜底**。
+        // 原实现只有 `sort_by_key(Reverse(mtime))`:粗粒度 mtime 文件系统
+        // (HFS+ / FAT32 为 1s 分辨率)上大量文件 mtime 相同,而
+        // `sort_by_key` 是稳定排序 → 输出顺序等于 walker 的文件系统枚举
+        // 顺序,不确定且不可复现。加二级键后同 mtime 也有确定顺序。
+        paths.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         let truncated = paths.len() > MAX_RESULTS;
         paths.truncate(MAX_RESULTS);
 
+        // 0.6:输出相对路径 —— 绝对路径每一行都带一遍完整 workspace 前缀。
+        let workspace = ctx.workspace_path();
         let mut body = paths
             .iter()
-            .map(|(p, _)| p.display().to_string())
+            .map(|(p, _)| crate::sandbox::display_path_relative(p, &workspace))
             .collect::<Vec<_>>()
             .join("\n");
         if truncated {
@@ -174,6 +176,103 @@ mod tests {
         match &out.content[0] {
             reflect_protocol::ContentBlock::Text { text } => {
                 assert!(text.contains("src/main.rs"));
+            }
+            _ => panic!("expected text"),
+        }
+    }
+
+    // ── 0.6 回归:path 参数沙箱化 ─────────────────────────────────
+
+    /// 回归(0.6):`path` 指向 workspace 外必须被拒。
+    /// 修复前 glob 的 `path` 直接喂给 `WalkBuilder::new(root)`,
+    /// 遍历整个文件系统并把绝对路径吐给模型。
+    #[tokio::test]
+    async fn rejects_path_outside_workspace() {
+        let ws = tmp_workspace();
+        let outside = ws.parent().unwrap().join("reflect_glob_outside_probe");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.rs"), "").unwrap();
+        let t = GlobTool;
+        let err = t
+            .execute(
+                make_ctx(&ws),
+                serde_json::json!({"pattern": "*.rs", "path": outside.to_string_lossy()}),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ToolError::PathEscape { .. }),
+            "workspace 外的 path 必须被拒,得到: {err:?}"
+        );
+        // 相对穿越同样要拒。
+        let err2 = t
+            .execute(
+                make_ctx(&ws),
+                serde_json::json!({"pattern": "*.rs", "path": "../reflect_glob_outside_probe"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err2, ToolError::PathEscape { .. }),
+            "相对穿越必须被拒,得到: {err2:?}"
+        );
+    }
+
+    /// 回归(0.6):不存在的 path 应给 InvalidArgs 而非裸 Io 错误。
+    #[tokio::test]
+    async fn rejects_missing_path_with_clear_error() {
+        let ws = tmp_workspace();
+        let t = GlobTool;
+        let err = t
+            .execute(
+                make_ctx(&ws),
+                serde_json::json!({"pattern": "*.rs", "path": "nope"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ToolError::InvalidArgs { .. }),
+            "不存在的 path 应报 InvalidArgs,得到: {err:?}"
+        );
+    }
+
+    /// 回归:workspace 内的子目录 path 仍须放行。
+    #[tokio::test]
+    async fn allows_subdir_path_inside_workspace() {
+        let ws = tmp_workspace();
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        std::fs::write(ws.join("src/a.rs"), "").unwrap();
+        std::fs::write(ws.join("b.rs"), "").unwrap();
+        let t = GlobTool;
+        let out = t
+            .execute(
+                make_ctx(&ws),
+                serde_json::json!({"pattern": "*.rs", "path": "src"}),
+            )
+            .await
+            .unwrap();
+        match &out.content[0] {
+            reflect_protocol::ContentBlock::Text { text } => {
+                assert!(text.contains("a.rs"), "应找到子目录内文件: {text}");
+                assert!(!text.contains("b.rs"), "不应越过 path 根: {text}");
+            }
+            _ => panic!("expected text"),
+        }
+    }
+
+    /// 回归:输出应为相对 workspace 的路径(不带冗长绝对前缀)。
+    #[tokio::test]
+    async fn output_paths_are_relative() {
+        let ws = tmp_workspace();
+        std::fs::write(ws.join("a.rs"), "").unwrap();
+        let t = GlobTool;
+        let out = t
+            .execute(make_ctx(&ws), serde_json::json!({"pattern": "*.rs"}))
+            .await
+            .unwrap();
+        match &out.content[0] {
+            reflect_protocol::ContentBlock::Text { text } => {
+                assert_eq!(text.trim(), "a.rs", "应输出相对路径,得到: {text}");
             }
             _ => panic!("expected text"),
         }

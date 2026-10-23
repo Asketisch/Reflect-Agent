@@ -1,0 +1,7 @@
+{
+  "echo": {
+    "command": "python3",
+    "args": ["${PLUGIN_ROOT}/servers/echo_server.py"],
+    "timeout_secs": 30
+  }
+}

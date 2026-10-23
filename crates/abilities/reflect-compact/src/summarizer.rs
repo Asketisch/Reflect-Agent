@@ -96,6 +96,15 @@ pub trait Summarizer: Send + Sync {
         msgs: &[ChatMessage],
         previous_summary: Option<&str>,
     ) -> Result<String, SummarizerError>;
+
+    /// v1.4 D2:记忆固化 —— 从对话切片提取「值得跨会话长期记住」的
+    /// 事实条目(每条一句)。默认不支持(Noop / 测试 stub 免实现)。
+    async fn extract_memories(
+        &self,
+        _msgs: &[ChatMessage],
+    ) -> Result<Vec<String>, SummarizerError> {
+        Err(SummarizerError::Cancelled)
+    }
 }
 
 /// 由 LLM 驱动的 summarizer。流式读取模型响应,拼接
@@ -150,11 +159,25 @@ impl LlmSummarizer {
     }
 }
 
+/// v1.6:按库解析单条摘要 prompt section(`compact.full` /
+/// `compact.recent` / `compact.memory-extract`),缺失时回落编译期
+/// 常量。空 spec → default 层;若需按 compact 子代理的模型覆盖,
+/// 由库的用户层文件即可(子代理继承会话模型)。
+fn resolve_prompt_section(key: &str, fallback: &str) -> String {
+    reflect_prompt::library()
+        .resolve("")
+        .get_or(key, fallback)
+        .to_string()
+}
+
 #[async_trait]
 impl Summarizer for LlmSummarizer {
     async fn summarize_full(&self, msgs: &[ChatMessage]) -> Result<String, SummarizerError> {
         let conversation = serialize_messages(msgs);
-        let prompt = SUMMARIZE_PROMPT_FULL.replace("{{ conversation }}", &conversation);
+        // v1.6:prompt 从提示词库解析(`compact.full`),`{{ conversation }}`
+        // 占位符语义不变(库文件与常量同源)。
+        let template = resolve_prompt_section("compact.full", SUMMARIZE_PROMPT_FULL);
+        let prompt = template.replace("{{ conversation }}", &conversation);
         call_summarizer(self, &prompt, None).await
     }
 
@@ -164,19 +187,51 @@ impl Summarizer for LlmSummarizer {
         previous_summary: Option<&str>,
     ) -> Result<String, SummarizerError> {
         let recent = serialize_messages(msgs);
+        let recent_template = resolve_prompt_section("compact.recent", SUMMARIZE_PROMPT_RECENT);
+        let full_template = resolve_prompt_section("compact.full", SUMMARIZE_PROMPT_FULL);
         let prompt = match previous_summary {
-            Some(prev) if !prev.is_empty() => SUMMARIZE_PROMPT_RECENT
+            Some(prev) if !prev.is_empty() => recent_template
                 .replace("{{ previous_summary }}", prev)
                 .replace("{{ recent_conversation }}", &recent),
             _ => {
                 // 无先前摘要 → 行为等同 full。
-                let full = SUMMARIZE_PROMPT_FULL.replace("{{ conversation }}", &recent);
+                let full = full_template.replace("{{ conversation }}", &recent);
                 return call_summarizer(self, &full, None).await;
             }
         };
         call_summarizer(self, &prompt, Some(previous_summary.unwrap_or(""))).await
     }
+
+    async fn extract_memories(&self, msgs: &[ChatMessage]) -> Result<Vec<String>, SummarizerError> {
+        let conversation = serialize_messages(msgs);
+        let template = resolve_prompt_section("compact.memory-extract", MEMORY_EXTRACT_PROMPT);
+        let prompt = template.replace("{{ conversation }}", &conversation);
+        let text = call_summarizer(self, &prompt, None).await?;
+        Ok(text
+            .lines()
+            .map(|l| l.trim())
+            .filter_map(|l| l.strip_prefix("- ").or_else(|| l.strip_prefix("* ")))
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty() && l.len() <= 500)
+            .take(10)
+            .collect())
+    }
 }
+
+/// v1.4 D2:记忆固化 prompt —— 只提取稳定的、值得跨会话记住的事实
+/// (决策 / 偏好 / 约束),拒绝过程性内容;上限 10 条,每条一句。
+pub const MEMORY_EXTRACT_PROMPT: &str = r#"You are a memory curator. From the conversation below, extract durable facts worth remembering across sessions: decisions made, user preferences, project constraints, key domain knowledge.
+
+Rules:
+- Only stable, reusable facts. NEVER include transient task state, in-progress work, or file lists.
+- At most 10 items; skip if nothing qualifies.
+- One sentence per item, self-contained (no pronouns referring to the conversation).
+
+Output format: a plain markdown bullet list, one item per line (`- fact`). Output NOTHING else.
+
+<conversation>
+{{ conversation }}
+</conversation>"#;
 
 async fn call_summarizer(
     s: &LlmSummarizer,

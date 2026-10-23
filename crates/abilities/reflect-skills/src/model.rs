@@ -31,6 +31,10 @@ pub struct SkillMeta {
     /// Markdown 正文(system-prompt / 工作流)。
     #[serde(default)]
     pub body: String,
+    /// v1.4 D3:skill 版本号(frontmatter `version:` 字段,可选)。
+    /// 仅信息性:catalog 渲染不携带,资源读取结果可附带。
+    #[serde(default)]
+    pub version: Option<String>,
     /// v1.0.0-rc2: 如果该 skill 由 plugin 提供,记 plugin id 以便
     /// `remove_plugin_skills(plugin_id)` 一次性反注册。
     /// `None` = 内置或全局 skill(默认)。
@@ -74,6 +78,7 @@ mod tests {
             body: "body".into(),
             plugin_id: None,
             when_paths: vec![],
+            version: None,
         };
         assert_eq!(m.name, "x");
     }

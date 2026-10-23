@@ -44,7 +44,7 @@ pub use llm::{LlmContext, LlmError, build_context, prompt_for_closure};
 pub use message_bus::{AgentMailbox, BusError, MessageBus};
 pub use models::{
     AgentId, DiscussionConfig, DiscussionId, DiscussionMessage, DiscussionMode, DiscussionResult,
-    MessageId, MessageKind,
+    JudgeVerdict, MessageId, MessageKind,
 };
 pub use orchestrator::{DiscussionOrchestrator, OrchestratorError, OrchestratorEvent};
 pub use runtime::{DiscussionRuntime, RuntimeError};

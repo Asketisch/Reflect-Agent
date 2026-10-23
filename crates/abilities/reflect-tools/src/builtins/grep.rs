@@ -70,22 +70,27 @@ impl Tool for GrepTool {
             .and_then(|v| v.as_u64())
             .map(|n| n as usize)
             .unwrap_or(DEFAULT_MAX_RESULTS);
-        let root: PathBuf = args
-            .get("path")
-            .and_then(|v| v.as_str())
-            .map(PathBuf::from)
-            // review 修复:显式 path 此前无沙箱校验,`grep {path: "/etc"}` 可
-            // 遍历读取 workspace 之外的文件。统一经 resolve_sandbox_path 校验。
-            .map(|p| crate::sandbox::resolve_sandbox_path(&ctx.workspace_path(), &p))
-            .transpose()?
-            .unwrap_or_else(|| ctx.workspace_path());
+        // 0.6:`path` 此前未做任何 workspace 包含校验,直接喂给
+        // `WalkBuilder::new(root)` —— `{"pattern": "x", "path": "/"}`
+        // 会遍历整个文件系统并把匹配行内容(含绝对路径)吐给模型。
+        // 现在与 read / write / edit 一样过沙箱;输出也改成相对路径。
+        let root: PathBuf = match args.get("path").and_then(|v| v.as_str()) {
+            Some(p) => crate::sandbox::resolve_sandbox_dir(&ctx.workspace_path(), Path::new(p))?,
+            None => ctx.workspace_path(),
+        };
         let use_bm25 = args
             .get("rank")
             .and_then(|v| v.as_str())
             .is_some_and(|r| r.eq_ignore_ascii_case("bm25"));
 
         if use_bm25 {
-            return execute_bm25(&root, pattern, include_glob.as_deref(), max_results);
+            return execute_bm25(
+                &root,
+                pattern,
+                include_glob.as_deref(),
+                max_results,
+                &ctx.workspace_path(),
+            );
         }
 
         let re = Regex::new(pattern).map_err(|e| ToolError::InvalidArgs {
@@ -95,6 +100,7 @@ impl Tool for GrepTool {
         let mut out_lines: Vec<String> = Vec::new();
         let mut total_matches: usize = 0;
         let mut truncated = false;
+        let workspace = ctx.workspace_path();
         let walker = build_walker(&root);
         for entry in walker.flatten() {
             if !entry.file_type().is_some_and(|ft| ft.is_file()) {
@@ -111,7 +117,10 @@ impl Tool for GrepTool {
                 if re.is_match(line) {
                     total_matches += 1;
                     if out_lines.len() < max_results {
-                        out_lines.push(format!("{}:{}:{}", path.display(), i + 1, line));
+                        // 0.6:输出相对路径 —— 绝对路径每一行都带一遍完整
+                        // workspace 前缀,既烧 token 又不便读。
+                        let display = crate::sandbox::display_path_relative(path, &workspace);
+                        out_lines.push(format!("{display}:{}:{}", i + 1, line));
                     } else {
                         truncated = true;
                     }
@@ -148,11 +157,14 @@ fn path_matches_include(path: &Path, include_glob: Option<&str>) -> bool {
 }
 
 /// BM25 模式:收集含任一 query term 的行,按相关性降序返回。
+///
+/// 0.6:`workspace` 参数仅用于把输出路径转成相对路径。
 fn execute_bm25(
     root: &Path,
     query: &str,
     include_glob: Option<&str>,
     max_results: usize,
+    workspace: &Path,
 ) -> Result<ToolOutput, ToolError> {
     let query_terms = tokenize(query);
     if query_terms.is_empty() {
@@ -161,7 +173,11 @@ fn execute_bm25(
         });
     }
 
-    let mut out_lines: Vec<String> = Vec::new();
+    // (score, 格式化行)。score 单独存,不从输出字符串 re-parse —— 原实现
+    // 用 `split_whitespace().next().parse::<f64>()` 把分数从 `"{score}
+    // {path}:{line}: {text}"` 里抠出来排序,一旦格式调整(或路径含特殊
+    // 字符)排序就静默失真。
+    let mut hits: Vec<(f64, String)> = Vec::new();
     let mut total_matches: usize = 0;
     let mut truncated = false;
     let walker = build_walker(root);
@@ -193,15 +209,13 @@ fn execute_bm25(
         }
 
         let ranked = rank_lines(&query_terms, &candidates, BM25_K1, BM25_B);
+        let display = crate::sandbox::display_path_relative(path, workspace);
         for hit in ranked {
             total_matches += 1;
-            if out_lines.len() < max_results {
-                out_lines.push(format!(
-                    "{:.3} {}:{}: {}",
+            if hits.len() < max_results {
+                hits.push((
                     hit.score,
-                    path.display(),
-                    hit.line_no,
-                    hit.line
+                    format!("{:.3} {}:{}: {}", hit.score, display, hit.line_no, hit.line),
                 ));
             } else {
                 truncated = true;
@@ -209,20 +223,10 @@ fn execute_bm25(
         }
     }
 
-    // 跨文件全局再按 BM25 分数降序(行格式以 score 开头)。
-    out_lines.sort_by(|a, b| {
-        let score_a = a
-            .split_whitespace()
-            .next()
-            .and_then(|s| s.parse::<f64>().ok());
-        let score_b = b
-            .split_whitespace()
-            .next()
-            .and_then(|s| s.parse::<f64>().ok());
-        score_b
-            .partial_cmp(&score_a)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    // 跨文件全局按 BM25 分数降序。`partial_cmp` 对 NaN 返回 None
+    // (分数不可能是 NaN,但 rank_lines 是外部输入)→ Equal 兜底。
+    hits.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut out_lines: Vec<String> = hits.into_iter().map(|(_, line)| line).collect();
     if out_lines.len() > max_results {
         out_lines.truncate(max_results);
         truncated = true;
@@ -394,6 +398,92 @@ mod tests {
             reflect_protocol::ContentBlock::Text { text } => {
                 assert!(text.contains("a.txt"));
                 assert!(!text.contains("target/b.txt"));
+            }
+            _ => panic!("expected text"),
+        }
+    }
+
+    // ── 0.6 回归:path 参数沙箱化 ─────────────────────────────────
+
+    /// 回归(0.6):`path` 指向 workspace 外必须被拒。
+    /// 修复前 grep 的 `path` 直接喂给 `WalkBuilder::new(root)`,
+    /// `{"pattern": "x", "path": "/"}` 会遍历整个文件系统并把匹配行
+    /// 内容(含绝对路径)吐给模型 —— `read` 虽然还会拒读,但内容已经在
+    /// 工具输出里泄露了。
+    #[tokio::test]
+    async fn rejects_path_outside_workspace() {
+        let ws = tmp_workspace();
+        let outside = ws.parent().unwrap().join("reflect_grep_outside_probe");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "SUPER_SECRET_TOKEN\n").unwrap();
+        let t = GrepTool;
+        let err = t
+            .execute(
+                make_ctx(&ws),
+                serde_json::json!({"pattern": "SECRET", "path": outside.to_string_lossy()}),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ToolError::PathEscape { .. }),
+            "workspace 外的 path 必须被拒,得到: {err:?}"
+        );
+        // 相对穿越同样要拒。
+        let err2 = t
+            .execute(
+                make_ctx(&ws),
+                serde_json::json!({"pattern": "SECRET", "path": "../reflect_grep_outside_probe"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err2, ToolError::PathEscape { .. }),
+            "相对穿越必须被拒,得到: {err2:?}"
+        );
+    }
+
+    /// 回归(0.6):workspace 内的子目录 path 仍须放行。
+    #[tokio::test]
+    async fn allows_subdir_path_inside_workspace() {
+        let ws = tmp_workspace();
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        std::fs::write(ws.join("src/a.txt"), "needle\n").unwrap();
+        std::fs::write(ws.join("b.txt"), "needle\n").unwrap();
+        let t = GrepTool;
+        let out = t
+            .execute(
+                make_ctx(&ws),
+                serde_json::json!({"pattern": "needle", "path": "src"}),
+            )
+            .await
+            .unwrap();
+        match &out.content[0] {
+            reflect_protocol::ContentBlock::Text { text } => {
+                assert!(text.contains("a.txt"), "应搜到子目录内文件: {text}");
+                assert!(!text.contains("b.txt"), "不应越过 path 根: {text}");
+            }
+            _ => panic!("expected text"),
+        }
+    }
+
+    /// 回归(0.6):输出应为相对 workspace 的路径。
+    #[tokio::test]
+    async fn output_paths_are_relative() {
+        let ws = tmp_workspace();
+        std::fs::write(ws.join("a.txt"), "needle\n").unwrap();
+        let t = GrepTool;
+        let out = t
+            .execute(make_ctx(&ws), serde_json::json!({"pattern": "needle"}))
+            .await
+            .unwrap();
+        match &out.content[0] {
+            reflect_protocol::ContentBlock::Text { text } => {
+                let line = text.lines().next().unwrap_or("");
+                assert!(line.starts_with("a.txt:"), "应输出相对路径,得到: {line:?}");
+                assert!(
+                    !line.contains(&ws.to_string_lossy().to_string()),
+                    "不应含绝对 workspace 前缀: {line:?}"
+                );
             }
             _ => panic!("expected text"),
         }

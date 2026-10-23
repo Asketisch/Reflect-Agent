@@ -24,7 +24,8 @@ use reflect_protocol::{
     AbortReason, ContentBlock, EventMsg, PermissionMode, Submission, UserInputItem,
 };
 use reflect_skills::SkillsCatalog;
-use reflect_tools::{Tool, ToolRegistry, builtins::EchoTool};
+use reflect_tools::{Tool, ToolContext, ToolError, ToolOutput, ToolRegistry, builtins::EchoTool};
+use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 struct StubClient {
@@ -107,6 +108,8 @@ fn make_m4_deps(agent_name: &str, system_prompt: &str) -> M4Deps {
         def.name = agent_name.to_string();
         def.description = "test".into();
         def.system_prompt = system_prompt.into();
+        // v1.6:测试注入的文案视为用户自定义 —— pre_loop 不走提示词库。
+        def.source = reflect_agent_def::SystemPromptSource::Custom;
         def.memory = vec![MemoryScope::Project];
     }
     M4Deps {
@@ -119,6 +122,7 @@ fn make_m4_deps(agent_name: &str, system_prompt: &str) -> M4Deps {
         note_store,
         file_recovery,
         subagent_registry,
+        prompt_dirs: Vec::new(),
     }
 }
 
@@ -139,6 +143,7 @@ fn make_sub(text: &str) -> Submission {
         client_user_message_id: None,
         trace: None,
         workspace: None,
+        source_command: None,
     }
 }
 
@@ -1555,6 +1560,7 @@ async fn recorder_refill_respects_rewind_truncation() {
             client_user_message_id: None,
             trace: None,
             workspace: None,
+            source_command: None,
         })
         .await;
     while let Some(ev) = hr.next().await {
@@ -1597,7 +1603,6 @@ async fn recorder_refill_respects_rewind_truncation() {
             .collect::<Vec<_>>()
     );
 }
-
 
 /// v1.4 子代理可见性防回归:`call_<role>` 是运行时动态注册的工具(不在静态
 /// `ALWAYS_ON_TOOLS` 中),bootstrap 注册后必须同步调用
@@ -1660,5 +1665,490 @@ async fn m4_dynamic_always_on_tool_visible_to_model() {
         tool_names.contains(&"call_explorer"),
         "动态补入 always-on 的子代理工具必须出现在模型请求 tools 数组;got {:?}",
         tool_names
+    );
+}
+
+// ── v1.6:按模型匹配的外置提示词(端到端)────────────────────────
+
+/// 构造临时提示词目录:`provider` 层 + `model` 精确层各写一个 section。
+fn make_prompts_dir(dir: &Path, provider: &str, model: &str) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(
+        dir.join(format!("{provider}.md")),
+        format!(
+            "## tool.echo\n{provider}-layer echo description.\n\n## system.main\n{provider}-layer main prompt.\n"
+        ),
+    )?;
+    std::fs::write(
+        dir.join(format!("{model}.md")),
+        format!("## system.main\n{model}-exact main prompt.\n"),
+    )?;
+    Ok(())
+}
+
+/// 集成:精确模型层 `system.main` 与厂商层 `tool.<name>` 描述覆盖
+/// 端到端生效 —— 同一进程先按 spec A 请求(命中精确层),再按 spec B
+/// 请求(命中厂商层),最后一次**不带用户层**重新初始化库(内嵌默认)。
+///
+/// 进程级提示词库是全局单例:与下方 `hot_model_swap_*` 测试共享同一把
+/// 静态互斥锁串行执行,避免并发重扫互相冲掉对方的用户层。测试体是
+/// async,用 tokio 的 async-aware 锁避免 guard 跨 await。
+static PROMPT_LIBRARY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[tokio::test]
+async fn model_layer_prompts_end_to_end() {
+    let _library_guard = PROMPT_LIBRARY_LOCK.lock().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let prompts_dir = tmp.path().join("prompts");
+    make_prompts_dir(&prompts_dir, "stub", "m1").expect("write prompt layers");
+
+    // 1) 装配用户层(与 exec bootstrap 同款调用)。
+    reflect_prompt::init_library(&[prompts_dir.as_path()], None);
+
+    let registry = Arc::new(ModelRegistry::new());
+    let stub = Arc::new(StubClient::new(vec![
+        ChatEvent::MessageStart {
+            id: "m1".into(),
+            model: "stub-1".into(),
+        },
+        ChatEvent::ContentDelta("ok".into()),
+        ChatEvent::MessageStop,
+    ]));
+    registry.register_pool(
+        "stub",
+        CredentialPool {
+            entries: vec![PoolEntry {
+                client: stub.clone(),
+                label: "default".into(),
+                weight: 1,
+            }],
+        },
+    );
+
+    // BuiltinDefault 来源(与 exec 默认 agent 一致)→ pre_loop 从库解析。
+    let mut m4 = make_m4_deps("tester", "");
+    m4.active_agent_def = Arc::new(AgentDefinition {
+        name: "tester".into(),
+        source: reflect_agent_def::SystemPromptSource::BuiltinDefault,
+        ..Default::default()
+    });
+    let thread = build_thread(registry, m4);
+
+    // 2) spec = stub/m1 → 精确层 system.main + 厂商层 tool.echo 描述。
+    let mut handle = thread.submit(make_sub("hi")).await;
+    while let Some(ev) = handle.next().await {
+        if matches!(ev.msg, EventMsg::TurnComplete(_)) {
+            break;
+        }
+    }
+    let req = stub.last_request.lock().clone().expect("model was called");
+    assert!(
+        req.system
+            .0
+            .iter()
+            .any(|b| b.text.contains("m1-exact main prompt.")),
+        "精确模型层 system.main 应在请求 system 中"
+    );
+    let echo_desc = req.tools.iter().find_map(|t| match t {
+        reflect_llm::ToolSpec::Function {
+            name, description, ..
+        } if name == "echo" => Some(description.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        echo_desc.as_deref(),
+        Some("stub-layer echo description."),
+        "厂商层 tool.echo 描述应覆盖内嵌默认"
+    );
+
+    // 3) 重扫为空目录(模拟用户删除覆盖文件)→ 回落内嵌默认。
+    let empty_dir = tmp.path().join("empty-prompts");
+    std::fs::create_dir_all(&empty_dir).unwrap();
+    reflect_prompt::init_library(&[empty_dir.as_path()], None);
+    let set = reflect_prompt::library().resolve("stub/m1");
+    assert!(
+        set.get("system.main")
+            .unwrap_or_default()
+            .contains("先读后改"),
+        "无用户层时应回落内嵌默认 system.main"
+    );
+    assert_ne!(
+        set.get("tool.echo"),
+        Some("stub-layer echo description."),
+        "无用户层时 tool.echo 应回到内嵌默认"
+    );
+
+    // 清理:恢复全局库到内嵌默认,不污染其他测试。
+    reflect_prompt::init_library(&[], None);
+}
+
+/// 实测 E:运行中热切换模型(热重载同款 `set_model` 路径)后,下一请求的
+/// `system.main` 应从旧模型的精确层切到新模型的精确层 —— 提示词库是
+/// 每请求动态 resolve 的,热切换无需重新装配。
+#[tokio::test]
+async fn hot_model_swap_switches_prompt_layer_on_next_request() {
+    let _library_guard = PROMPT_LIBRARY_LOCK.lock().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let prompts_dir = tmp.path().join("prompts");
+    make_prompts_dir(&prompts_dir, "stub", "m1").expect("write prompt layers");
+    // 新模型 m2 的精确层(旧目录里没有的文件,运行中追加)。
+    std::fs::write(
+        prompts_dir.join("m2.md"),
+        "## system.main\nm2-exact main prompt.\n",
+    )
+    .expect("write m2 layer");
+
+    reflect_prompt::init_library(&[prompts_dir.as_path()], None);
+
+    let registry = Arc::new(ModelRegistry::new());
+    let stub = Arc::new(StubClient::new(vec![
+        ChatEvent::MessageStart {
+            id: "m1".into(),
+            model: "stub-1".into(),
+        },
+        ChatEvent::ContentDelta("ok".into()),
+        ChatEvent::MessageStop,
+    ]));
+    registry.register_pool(
+        "stub",
+        CredentialPool {
+            entries: vec![PoolEntry {
+                client: stub.clone(),
+                label: "default".into(),
+                weight: 1,
+            }],
+        },
+    );
+
+    let mut m4 = make_m4_deps("tester", "");
+    m4.active_agent_def = Arc::new(AgentDefinition {
+        name: "tester".into(),
+        source: reflect_agent_def::SystemPromptSource::BuiltinDefault,
+        ..Default::default()
+    });
+    let thread = build_thread(registry, m4);
+
+    // Turn 1:spec = stub/m1 → 命中 m1 精确层。
+    let mut handle = thread.submit(make_sub("first turn")).await;
+    while let Some(ev) = handle.next().await {
+        if matches!(ev.msg, EventMsg::TurnComplete(_)) {
+            break;
+        }
+    }
+    let req1 = stub.last_request.lock().clone().expect("first request");
+    assert!(
+        req1.system
+            .0
+            .iter()
+            .any(|b| b.text.contains("m1-exact main prompt.")),
+        "切换前请求应命中 m1 精确层"
+    );
+
+    // 热切换:与 reflect-exec 热重载同一条 `set_model` 路径(不重建线程)。
+    thread.config().set_model("stub/m2");
+
+    // Turn 2:spec = stub/m2 → 库每请求动态 resolve,应命中 m2 精确层。
+    let mut handle = thread.submit(make_sub("second turn")).await;
+    while let Some(ev) = handle.next().await {
+        if matches!(ev.msg, EventMsg::TurnComplete(_)) {
+            break;
+        }
+    }
+    let req2 = stub.last_request.lock().clone().expect("second request");
+    assert!(
+        req2.system
+            .0
+            .iter()
+            .any(|b| b.text.contains("m2-exact main prompt.")),
+        "热切换后下一请求应命中 m2 精确层"
+    );
+    assert!(
+        !req2
+            .system
+            .0
+            .iter()
+            .any(|b| b.text.contains("m1-exact main prompt.")),
+        "热切换后旧模型层不应残留"
+    );
+
+    // 清理:恢复全局库到内嵌默认,不污染其他测试。
+    reflect_prompt::init_library(&[], None);
+}
+
+/// v1.6.1:`/prompt` slash 的引擎端 —— `Op::PromptCommand` List / Switch
+/// 都不开 turn,应答 `EventMsg::PromptList` / `PromptSwitched` 经
+/// per-submission 通道送达,`SubmissionClosed` 收尾。
+#[tokio::test]
+async fn prompt_command_lists_and_rescans_library() {
+    let _library_guard = PROMPT_LIBRARY_LOCK.lock().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let prompts_dir = tmp.path().join("prompts");
+    std::fs::create_dir_all(&prompts_dir).unwrap();
+    std::fs::write(
+        prompts_dir.join("m1.md"),
+        "## system.main\nm1-exact main prompt.\n",
+    )
+    .expect("write m1 layer");
+
+    let registry = Arc::new(ModelRegistry::new());
+    let stub = Arc::new(StubClient::new(vec![
+        ChatEvent::MessageStart {
+            id: "m1".into(),
+            model: "stub-1".into(),
+        },
+        ChatEvent::ContentDelta("ok".into()),
+        ChatEvent::MessageStop,
+    ]));
+    registry.register_pool(
+        "stub",
+        CredentialPool {
+            entries: vec![PoolEntry {
+                client: stub.clone(),
+                label: "default".into(),
+                weight: 1,
+            }],
+        },
+    );
+
+    let mut m4 = make_m4_deps("tester", "");
+    // BuiltinDefault 来源(与 exec 默认 agent 一致)→ pre_loop 从库解析。
+    m4.active_agent_def = Arc::new(AgentDefinition {
+        name: "tester".into(),
+        source: reflect_agent_def::SystemPromptSource::BuiltinDefault,
+        ..Default::default()
+    });
+    // 模拟 bootstrap:记录目录序,Switch 重扫按它装配。
+    m4.prompt_dirs = vec![prompts_dir.clone()];
+    let thread = build_thread(registry, m4);
+    // 让全局库也指向该目录(与 bootstrap init_library 等效)。
+    reflect_prompt::init_library(&[prompts_dir.as_path()], None);
+
+    let make_op_sub = |op: reflect_protocol::Op| Submission {
+        id: "prompt-op".into(),
+        op,
+        client_user_message_id: None,
+        trace: None,
+        workspace: None,
+        source_command: Some("prompt".into()),
+    };
+
+    // ── List:可用层含目录里的 m1 + 内置厂商层;生效层含 m1(当前 spec stub/m1)。
+    let mut handle = thread
+        .submit(make_op_sub(reflect_protocol::Op::PromptCommand {
+            action: reflect_protocol::PromptAction::List,
+        }))
+        .await;
+    let mut saw_list = false;
+    while let Some(ev) = handle.next().await {
+        if let reflect_protocol::EventMsg::PromptList(info) = ev.msg {
+            assert!(info.available.iter().any(|l| l == "m1"));
+            assert!(info.available.iter().any(|l| l == "claude"));
+            assert_eq!(info.current_spec, "stub/m1");
+            assert!(info.active_layers.iter().any(|l| l == "m1"));
+            saw_list = true;
+        }
+    }
+    assert!(saw_list, "List 应答 PromptList 事件");
+
+    // ── Switch:重扫后应答 PromptSwitched;随后真实请求仍命中该层。
+    std::fs::write(
+        prompts_dir.join("m2.md"),
+        "## system.main\nm2-exact main prompt.\n",
+    )
+    .expect("write m2 layer");
+    let mut handle = thread
+        .submit(make_op_sub(reflect_protocol::Op::PromptCommand {
+            action: reflect_protocol::PromptAction::Switch { layer: None },
+        }))
+        .await;
+    let mut saw_switched = false;
+    while let Some(ev) = handle.next().await {
+        if let reflect_protocol::EventMsg::PromptSwitched(info) = ev.msg {
+            assert_eq!(info.action, "reload");
+            saw_switched = true;
+        }
+    }
+    assert!(saw_switched, "Switch 应答 PromptSwitched 事件");
+
+    // 重扫后 m2 层进入库:set_model 到 stub/m2,下一请求命中 m2 文案。
+    thread.config().set_model("stub/m2");
+    let mut handle = thread.submit(make_sub("after rescan")).await;
+    while let Some(ev) = handle.next().await {
+        if matches!(ev.msg, EventMsg::TurnComplete(_)) {
+            break;
+        }
+    }
+    let req = stub
+        .last_request
+        .lock()
+        .clone()
+        .expect("request after rescan");
+    assert!(
+        req.system
+            .0
+            .iter()
+            .any(|b| b.text.contains("m2-exact main prompt.")),
+        "重扫后的库应在下一请求生效 m2 层"
+    );
+
+    // 清理:恢复全局库到内嵌默认,不污染其他测试。
+    reflect_prompt::init_library(&[], None);
+}
+
+// ── 清单回灌(todo_write → 下一轮模型上下文)────────────────────────────
+
+/// 假 `TodoWrite`:返回与真工具同形的 `metadata.todos`。
+struct TodoStubTool;
+
+#[async_trait]
+impl Tool for TodoStubTool {
+    fn name(&self) -> &str {
+        "TodoWrite"
+    }
+    fn description(&self) -> &str {
+        "write a todo list"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "todos": {"type": "array", "items": {"type": "object"}}
+            }
+        })
+    }
+    fn is_concurrency_safe(&self) -> bool {
+        true
+    }
+    async fn execute(&self, _ctx: ToolContext, _args: Value) -> Result<ToolOutput, ToolError> {
+        Ok(ToolOutput {
+            content: vec![reflect_protocol::ContentBlock::text("Wrote 2 todos.")],
+            is_error: false,
+            // 与 reflect-task 的 TodoWriteTool 同形。
+            metadata: serde_json::json!({
+                "todos": [
+                    {"content": "first item", "status": "completed"},
+                    {"content": "second item", "status": "pending"}
+                ],
+                "count": 2,
+            }),
+            elapsed_ms: 0,
+        })
+    }
+}
+
+/// 按调用序返回不同事件的 stub —— 第一次要求调工具,第二次直接作答。
+struct ScriptedClient {
+    calls: Mutex<u32>,
+    requests: Mutex<Vec<ChatRequest>>,
+}
+
+#[async_trait]
+impl ModelClient for ScriptedClient {
+    fn name(&self) -> &str {
+        "scripted"
+    }
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            tool_use: true,
+            ..Default::default()
+        }
+    }
+    async fn stream(
+        &self,
+        request: ChatRequest,
+        _cancel: CancellationToken,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError> {
+        let n = {
+            let mut c = self.calls.lock();
+            *c += 1;
+            *c
+        };
+        self.requests.lock().push(request);
+        let events = if n == 1 {
+            vec![
+                ChatEvent::MessageStart {
+                    id: "m1".into(),
+                    model: "stub-1".into(),
+                },
+                ChatEvent::ToolUseStart {
+                    id: "call-1".into(),
+                    name: "TodoWrite".into(),
+                    input_json: "{}".into(),
+                },
+                ChatEvent::MessageStop,
+            ]
+        } else {
+            vec![
+                ChatEvent::MessageStart {
+                    id: "m2".into(),
+                    model: "stub-1".into(),
+                },
+                ChatEvent::ContentDelta("done".into()),
+                ChatEvent::MessageStop,
+            ]
+        };
+        Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
+    }
+}
+
+/// 清单必须**进模型上下文** —— 此前它只走 `ToolOutput.metadata`
+/// (输出通道):GUI 能展示,但下一轮模型看不见 → 写完即忘。
+#[tokio::test]
+async fn todo_checklist_is_injected_back_into_model_context() {
+    let registry = Arc::new(ModelRegistry::new());
+    let stub = Arc::new(ScriptedClient {
+        calls: Mutex::new(0),
+        requests: Mutex::new(Vec::new()),
+    });
+    registry.register_pool(
+        "stub",
+        CredentialPool {
+            entries: vec![PoolEntry {
+                client: stub.clone(),
+                label: "default".into(),
+                weight: 1,
+            }],
+        },
+    );
+
+    let m4 = make_m4_deps("tester", "You are a reviewer.");
+    let cfg = AgentConfig::new("stub/m1", Path::new(".")).with_m4(m4);
+    let tools = Arc::new(ToolRegistry::default());
+    tools.register(Arc::new(TodoStubTool));
+    let thread = AgentThread::new(cfg, registry, tools, None, None);
+
+    let mut handle = thread.submit(make_sub("plan the work")).await;
+    while let Some(ev) = handle.next().await {
+        if matches!(ev.msg, EventMsg::TurnComplete(_)) {
+            break;
+        }
+    }
+
+    let requests = stub.requests.lock().clone();
+    assert!(
+        requests.len() >= 2,
+        "应有两次 model call(第一次调工具,第二次基于结果作答),实际 {}",
+        requests.len()
+    );
+    let second = &requests[1];
+    let system_text: String = second
+        .system
+        .0
+        .iter()
+        .map(|b| b.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        system_text.contains("Current Todo List"),
+        "第二次请求的 system prompt 必须带清单段,实际:\n{system_text}"
+    );
+    assert!(
+        system_text.contains("first item") && system_text.contains("second item"),
+        "清单内容必须进模型上下文,实际:\n{system_text}"
+    );
+    // 状态标记:completed → [x],pending → [ ]。
+    assert!(
+        system_text.contains("- [x] first item") && system_text.contains("- [ ] second item"),
+        "清单的三态标记不对,实际:\n{system_text}"
     );
 }

@@ -147,12 +147,72 @@ mod tests {
             RuleMatch::NoMatch,
             "shell_pattern='git *' 不应匹配 'rm -rf /'"
         );
-        // 无 bash 上下文 → shell_pattern 规则被跳过 → NoMatch。
+        // 无 bash 上下文 → **Allow** 类 shell_pattern 规则不参与(它需要
+        // 看到命令才能判断是否放行)→ NoMatch。
         assert_eq!(
             r.resolve_with_context("Bash", None).await,
             RuleMatch::NoMatch,
-            "无 bash 上下文时 shell_pattern 规则不参与"
+            "无 bash 上下文时 Allow 类 shell_pattern 规则不参与"
         );
+    }
+
+    /// 回归(0.4):**Deny** 类 shell_pattern 规则在无 bash 上下文时必须
+    /// fail-closed 返回 Deny,不能被静默跳过。
+    ///
+    /// 修复前 `match_rule` 一开头就是 `let cmd = bash_command?;`,于是
+    /// `{tool="Bash", shell_pattern="rm -rf *", action="deny"}` 在任何
+    /// 忘记传命令的调用点(或未来新增的调用点)上完全失效。
+    #[tokio::test]
+    async fn resolve_deny_shell_pattern_fails_closed_without_context() {
+        let s = Arc::new(InMemoryPermissionStore::new());
+        s.add(PermissionRule {
+            tool: "Bash".into(),
+            action: PermissionAction::Deny,
+            tool_glob: None,
+            shell_pattern: Some("rm -rf *".into()),
+        })
+        .await
+        .unwrap();
+        let r = StorePermissionResolver::new(s);
+        assert_eq!(
+            r.resolve_with_context("Bash", None).await,
+            RuleMatch::Deny,
+            "Deny shell_pattern 规则在无命令上下文时必须 fail-closed"
+        );
+        // 有上下文且命令命中 → 仍 Deny。
+        assert_eq!(
+            r.resolve_with_context("Bash", Some("rm -rf /tmp/x")).await,
+            RuleMatch::Deny
+        );
+    }
+
+    /// 回归(0.4):Deny shell_pattern 必须拦住复合命令里的附加段。
+    /// 修复前整条命令只做一次 glob,`git status; rm -rf /` 作为单个字符串
+    /// 匹配不上 `rm -rf *`(因为开头不是 rm),于是漏过。
+    #[tokio::test]
+    async fn deny_shell_pattern_matches_every_segment() {
+        let s = Arc::new(InMemoryPermissionStore::new());
+        s.add(PermissionRule {
+            tool: "Bash".into(),
+            action: PermissionAction::Deny,
+            tool_glob: None,
+            shell_pattern: Some("rm -rf *".into()),
+        })
+        .await
+        .unwrap();
+        let r = StorePermissionResolver::new(s);
+        for cmd in [
+            "rm -rf /tmp/x",
+            "git status; rm -rf /tmp/x",
+            "echo hi && rm -rf /tmp/x",
+            "cat f | rm -rf /tmp/x",
+        ] {
+            assert_eq!(
+                r.resolve_with_context("Bash", Some(cmd)).await,
+                RuleMatch::Deny,
+                "复合命令中的危险段必须被 deny: {cmd}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -275,42 +275,14 @@ impl JsonlRolloutWriter {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("truncate_after: no active rollout file"))?;
 
-        // 全文读 + 逐行解析,记录每行的 (字节长度, turn_id 若有, 是否 Message)。
+        // 共享纯核心:解析 + 定位 + 计算保留文本。
         let content = std::fs::read_to_string(&path)?;
-        if content.is_empty() {
-            return Ok(0);
-        }
-
-        // 每个 entry:(line_start_byte, line_str, turn_id, is_message)。
-        let mut lines: Vec<(usize, &str, Option<TurnId>, bool)> = Vec::new();
-        let mut offset = 0usize;
-        for line in content.split_inclusive('\n') {
-            let trimmed = line.trim_end_matches('\n');
-            let (turn_id, is_message) = parse_line_meta(trimmed);
-            lines.push((offset, trimmed, turn_id, is_message));
-            offset += line.len();
-        }
-
-        // 定位截断行索引(该行及其后全部丢弃)。
-        let cut_idx = match locate_cut(&lines, to_turn_id) {
-            Some(i) => i,
-            None => return Ok(0), // 未找到目标 turn,no-op。
+        let Some((kept, dropped_messages)) = truncate_content(&content, to_turn_id) else {
+            return Ok(0); // 空文件 / 未找到目标 turn,no-op。
         };
 
         // 备份:整文件复制到 <id>.rewind-<ts>.bak(可恢复)。
         write_backup(&path, &content)?;
-
-        // 保留 cut_idx 之前的行 + 结尾换行。
-        let mut kept = String::new();
-        let mut dropped_messages = 0usize;
-        for (i, (_, line, _, is_message)) in lines.iter().enumerate() {
-            if i < cut_idx {
-                kept.push_str(line);
-                kept.push('\n');
-            } else if *is_message {
-                dropped_messages += 1;
-            }
-        }
 
         // 原子 rewrite:写 `.tmp` → 用 `fs::rename` 覆盖
         // (匹配 reflect-task/reflect-plugin 的约定)。
@@ -329,6 +301,60 @@ impl JsonlRolloutWriter {
 
         Ok(dropped_messages)
     }
+}
+
+/// `truncate_inner` 与文件级 [`truncate_file_after_turn`] 共享的纯核心:
+/// 全文解析 → 定位截断行(`to_turn_id` 含)→ 返回 `(保留文本, 丢弃的
+/// Message 记录数)`。空文件或未找到目标 turn → `None`(调用方 no-op)。
+fn truncate_content(content: &str, to_turn_id: Option<&TurnId>) -> Option<(String, usize)> {
+    if content.is_empty() {
+        return None;
+    }
+
+    // 每个 entry:(line_str, turn_id 若有, 是否 Message)。
+    let mut lines: Vec<(&str, Option<TurnId>, bool)> = Vec::new();
+    for line in content.split_inclusive('\n') {
+        let trimmed = line.trim_end_matches('\n');
+        let (turn_id, is_message) = parse_line_meta(trimmed);
+        lines.push((trimmed, turn_id, is_message));
+    }
+
+    // 定位截断行索引(该行及其后全部丢弃)。
+    let cut_idx = locate_cut(&lines, to_turn_id)?;
+
+    // 保留 cut_idx 之前的行 + 结尾换行。
+    let mut kept = String::new();
+    let mut dropped_messages = 0usize;
+    for (i, (line, _, is_message)) in lines.iter().enumerate() {
+        if i < cut_idx {
+            kept.push_str(line);
+            kept.push('\n');
+        } else if *is_message {
+            dropped_messages += 1;
+        }
+    }
+    Some((kept, dropped_messages))
+}
+
+/// 文件级对话回退:把 `path` 指向的 session JSONL 截断到 `to_turn_id`
+/// (含)之前,`None` = 丢弃最后一个 turn。与
+/// [`JsonlRolloutWriter::truncate_after`] 共享定位/备份/原子重写逻辑,
+/// 但**不持有 writer 内锁与缓冲状态** —— 供工具层(`rewind` 工具的
+/// conversation / both 作用域)与 CLI 跨进程使用。writer 侧每次
+/// `record()` 都 flush,故同进程内先截断、后追加的 interleaving 也是
+/// 一致的(截断后追加的记录天然落在截断点之后)。
+///
+/// 返回被丢弃的 `Message` 记录数;未找到目标 turn 时 no-op 返回 0。
+pub fn truncate_file_after_turn(path: &Path, to_turn_id: Option<&TurnId>) -> anyhow::Result<usize> {
+    let content = std::fs::read_to_string(path)?;
+    let Some((kept, dropped)) = truncate_content(&content, to_turn_id) else {
+        return Ok(0);
+    };
+    write_backup(path, &content)?;
+    let tmp = path.with_extension("jsonl.tmp");
+    std::fs::write(&tmp, &kept)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(dropped)
 }
 
 /// 解析一行 JSONL,返回 (该行关联的 turn_id 若有, 是否为 Message 记录)。
@@ -352,19 +378,15 @@ fn parse_line_meta(line: &str) -> (Option<TurnId>, bool) {
 /// `Some(tid)` → 第一行 turn_id == tid 的索引。
 /// `None` → 最后一个有 turn_id 的 turn 的「首行」索引(丢弃整个最后 turn)。
 fn locate_cut(
-    lines: &[(usize, &str, Option<TurnId>, bool)],
+    lines: &[(&str, Option<TurnId>, bool)],
     to_turn_id: Option<&TurnId>,
 ) -> Option<usize> {
     match to_turn_id {
-        Some(target) => lines
-            .iter()
-            .position(|(_, _, tid, _)| *tid == Some(*target)),
+        Some(target) => lines.iter().position(|(_, tid, _)| *tid == Some(*target)),
         None => {
             // 找最后一个 turn_id 的值,再回到该 turn 在文件中的第一次出现。
-            let last_tid = lines.iter().rev().find_map(|(_, _, tid, _)| *tid)?;
-            lines
-                .iter()
-                .position(|(_, _, tid, _)| *tid == Some(last_tid))
+            let last_tid = lines.iter().rev().find_map(|(_, tid, _)| *tid)?;
+            lines.iter().position(|(_, tid, _)| *tid == Some(last_tid))
         }
     }
 }

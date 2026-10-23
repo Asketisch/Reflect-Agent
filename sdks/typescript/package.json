@@ -2,6 +2,20 @@
   "name": "reflect-agent",
   "version": "0.1.0",
   "description": "Reflect Agent SDK for TypeScript: spawn `reflect serve` and drive it over JSONL stdio.",
+  "author": "Reflect Agent Contributors",
+  "homepage": "https://github.com/Asketisch/Reflect-Agent#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Asketisch/Reflect-Agent.git"
+  },
+  "bugs": "https://github.com/Asketisch/Reflect-Agent/issues",
+  "keywords": [
+    "ai",
+    "agent",
+    "llm",
+    "jsonl",
+    "subprocess"
+  ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "type": "module",

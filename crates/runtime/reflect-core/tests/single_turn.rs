@@ -42,7 +42,6 @@ impl StubClient {
         s
     }
 
-    #[allow(dead_code)]
     fn with_mid_stream_error(events: Vec<ChatEvent>, err: LlmError) -> Self {
         let s = Self::new(events);
         *s.mid_stream_error.lock() = Some(err);
@@ -142,6 +141,7 @@ fn make_sub(text: &str) -> Submission {
         client_user_message_id: None,
         trace: None,
         workspace: None,
+        source_command: None,
     }
 }
 
@@ -948,5 +948,411 @@ async fn thinking_delta_is_forwarded_as_event() {
     assert_eq!(
         thinking_text, "let me think... step by step",
         "多段 thinking delta 应被原样顺序转发"
+    );
+}
+
+// ── v1.5 review:重试上限(failover cap)语义回归 ─────────────────
+
+use reflect_llm::RoutingPolicy;
+
+/// 自定义 `RoutingPolicy` 的线程构造(`build_thread` 用默认策略)。
+fn build_thread_with_policy(registry: Arc<ModelRegistry>, policy: RoutingPolicy) -> AgentThread {
+    let cfg = AgentConfig::new("stub/m1", Path::new(".")).with_policy(Arc::new(policy));
+    let tools = Arc::new(ToolRegistry::default());
+    tools.register(Arc::new(EchoTool));
+    AgentThread::new(cfg, registry, tools, None, None)
+}
+
+/// G2:总尝试上限触顶 → `MAX_ATTEMPTS` 错误事件收尾,不产生 TurnComplete,
+/// 且排在后面的凭证不再被尝试。
+///
+/// 场景:4 个凭证全部在 stream 初始化即失败(SseParse → RetrySame 500ms
+/// 退避),`max_attempts = 2`。第 3 次尝试前触顶 —— c1/c2 各被调 1 次,
+/// c3/c4 不应被调用。此前该终态路径零测试覆盖。
+#[tokio::test]
+async fn max_attempts_cap_ends_turn_with_error_event() {
+    let registry = Arc::new(ModelRegistry::new());
+    let c1 = Arc::new(StubClient::with_sync_error(LlmError::SseParse(
+        "bad-1".into(),
+    )));
+    let c2 = Arc::new(StubClient::with_sync_error(LlmError::SseParse(
+        "bad-2".into(),
+    )));
+    let c3 = Arc::new(StubClient::with_sync_error(LlmError::SseParse(
+        "bad-3".into(),
+    )));
+    let c4 = Arc::new(StubClient::with_sync_error(LlmError::SseParse(
+        "bad-4".into(),
+    )));
+    registry.register_pool(
+        "stub",
+        CredentialPool {
+            entries: vec![
+                PoolEntry {
+                    client: c1.clone(),
+                    label: "w1".into(),
+                    weight: 1,
+                },
+                PoolEntry {
+                    client: c2.clone(),
+                    label: "w2".into(),
+                    weight: 1,
+                },
+                PoolEntry {
+                    client: c3.clone(),
+                    label: "w3".into(),
+                    weight: 1,
+                },
+                PoolEntry {
+                    client: c4.clone(),
+                    label: "w4".into(),
+                    weight: 1,
+                },
+            ],
+        },
+    );
+    let policy = RoutingPolicy {
+        max_attempts: 2,
+        ..RoutingPolicy::default()
+    };
+    let thread = build_thread_with_policy(registry, policy);
+    let mut handle = thread.submit(make_sub("retry cap")).await;
+
+    let mut saw_max_attempts = false;
+    let mut saw_complete = false;
+    while let Some(ev) = handle.next().await {
+        match ev.msg {
+            EventMsg::Error(e) if e.code == "MAX_ATTEMPTS" => {
+                saw_max_attempts = true;
+            }
+            EventMsg::TurnComplete(_) => saw_complete = true,
+            _ => {}
+        }
+    }
+    assert!(saw_max_attempts, "触顶必须发 MAX_ATTEMPTS 错误事件");
+    assert!(!saw_complete, "触顶的回合不应发 TurnComplete");
+    // 注意:池按加权轮询派位,具体命中哪两个凭证不定 —— 只断言总量:
+    // 恰好 2 次尝试(分布在不重复的 2 个凭证上,各 1 次)。
+    let total: u32 = [c1.calls(), c2.calls(), c3.calls(), c4.calls()]
+        .into_iter()
+        .sum();
+    assert_eq!(total, 2, "max_attempts=2 应恰好尝试 2 次后触顶");
+    let per_cred = [c1.calls(), c2.calls(), c3.calls(), c4.calls()];
+    assert_eq!(
+        per_cred.iter().filter(|&&n| n == 1).count(),
+        2,
+        "应有 2 个凭证各被尝试 1 次: {per_cred:?}"
+    );
+    assert_eq!(
+        per_cred.iter().filter(|&&n| n == 0).count(),
+        2,
+        "其余 2 个凭证不应被尝试: {per_cred:?}"
+    );
+}
+
+/// G3:mid-stream RetrySame 的同凭证上限 —— 同一凭证最多尝试 2 次,
+/// 超限强制 failover(exclude),池耗尽后以 `ALL_CREDENTIALS_EXHAUSTED`
+/// 快速收场,而不是烧满 `max_attempts`。
+///
+/// 修复前:mid-stream 错误路径没有上限检查,两个凭证交替重试到
+/// `max_attempts`(16 次)才以 MAX_ATTEMPTS 结束,多空转 12 次。
+#[tokio::test]
+async fn mid_stream_retry_same_is_capped_then_fails_over() {
+    let registry = Arc::new(ModelRegistry::new());
+    // 两个凭证都在流出一段文本后 SSE 解析爆炸(持久性 mid-stream 错误)。
+    let c1 = Arc::new(StubClient::with_mid_stream_error(
+        vec![ChatEvent::ContentDelta("partial-a".into())],
+        LlmError::SseParse("garbled-a".into()),
+    ));
+    let c2 = Arc::new(StubClient::with_mid_stream_error(
+        vec![ChatEvent::ContentDelta("partial-b".into())],
+        LlmError::SseParse("garbled-b".into()),
+    ));
+    registry.register_pool(
+        "stub",
+        CredentialPool {
+            entries: vec![
+                PoolEntry {
+                    client: c1.clone(),
+                    label: "broken-a".into(),
+                    weight: 1,
+                },
+                PoolEntry {
+                    client: c2.clone(),
+                    label: "broken-b".into(),
+                    weight: 1,
+                },
+            ],
+        },
+    );
+    let thread = build_thread(registry.clone());
+    let mut handle = thread.submit(make_sub("cap me")).await;
+
+    let mut saw_all_exhausted = false;
+    let mut saw_max_attempts = false;
+    let mut saw_switched_exhausted = false;
+    while let Some(ev) = handle.next().await {
+        match ev.msg {
+            EventMsg::Error(e) if e.code == "ALL_CREDENTIALS_EXHAUSTED" => {
+                saw_all_exhausted = true;
+            }
+            EventMsg::Error(e) if e.code == "MAX_ATTEMPTS" => {
+                saw_max_attempts = true;
+            }
+            EventMsg::Routing(r)
+                if r.reason == "retry_same_exhausted"
+                    && matches!(r.kind, RoutingEventKind::Switched) =>
+            {
+                saw_switched_exhausted = true;
+            }
+            _ => {}
+        }
+    }
+    let total = c1.calls() + c2.calls();
+    assert_eq!(
+        total, 4,
+        "2 个凭证 × 同凭证上限 2 次 = 恰好 4 次尝试(修复前为 16 次)"
+    );
+    assert_eq!(c1.calls(), 2, "c1 应恰好尝试 2 次");
+    assert_eq!(c2.calls(), 2, "c2 应恰好尝试 2 次");
+    assert!(
+        saw_all_exhausted,
+        "双凭证全部超限后应以 ALL_CREDENTIALS_EXHAUSTED 收场"
+    );
+    assert!(!saw_max_attempts, "上限生效时不应烧满 max_attempts 才结束");
+    assert!(
+        saw_switched_exhausted,
+        "超限 failover 应发 Switched(retry_same_exhausted) 路由事件"
+    );
+}
+
+/// provider 把 usage 放在**结束原因之后**的额外 chunk 里
+/// (OpenAI `stream_options.include_usage` / Kilo 免费池实测均如此)时,
+/// `token_count` 必须仍能拿到真实用量 —— 否则配额与成本统计全部失真。
+///
+/// 回归:此前在 `MessageStop` 处直接 break,尾部的 usage chunk 被丢弃。
+#[tokio::test]
+async fn usage_after_message_stop_is_still_reported() {
+    let registry = Arc::new(ModelRegistry::new());
+    // 事件顺序刻意复刻真实 wire:先 finish_reason,后 usage。
+    let stub = Arc::new(StubClient::new(vec![
+        ChatEvent::MessageStart {
+            id: "m1".into(),
+            model: "stub-1".into(),
+        },
+        ChatEvent::ContentDelta("hi".into()),
+        ChatEvent::MessageStop,
+        // 真实 wire 形状:每个 chunk 都先产出一个 MessageStart(id/model 每帧都有),
+        // usage chunk 前面还隔着一个 MessageStart —— 排空逻辑必须跳过它。
+        ChatEvent::MessageStart {
+            id: "m1".into(),
+            model: "stub-1".into(),
+        },
+        ChatEvent::Usage {
+            input_tokens: 42,
+            output_tokens: 7,
+            cached_tokens: 3,
+            cache_write_tokens: 0,
+        },
+    ]));
+    registry.register_pool(
+        "stub",
+        CredentialPool {
+            entries: vec![PoolEntry {
+                client: stub.clone(),
+                label: "default".into(),
+                weight: 1,
+            }],
+        },
+    );
+    let thread = build_thread(registry);
+
+    let mut handle = thread.submit(make_sub("echo hi")).await;
+    let mut got: Vec<EventMsg> = Vec::new();
+    while let Some(ev) = handle.next().await {
+        got.push(ev.msg.clone());
+    }
+
+    let token = got
+        .iter()
+        .find_map(|m| match m {
+            EventMsg::TokenCount(t) => Some(t.clone()),
+            _ => None,
+        })
+        .expect("应有 TokenCount 事件");
+    assert_eq!(token.input_tokens, 42, "结束原因之后的 usage 必须被采集");
+    assert_eq!(token.output_tokens, 7);
+    assert_eq!(token.cached_tokens, 3);
+    assert_eq!(token.total_tokens, 49);
+}
+
+// ── 工具参数投递:整包形态 ────────────────────────────────────────────────
+//
+// provider 投递工具参数有两种形态:
+// - **分片形态**:ToolUseStart 带空 `input_json`,参数由若干 ToolUseDelta
+//   分片送来(Anthropic / OpenAI / Responses)。
+// - **整包形态**:ToolUseStart 直接带**完整** `input_json`,**没有** delta
+//   (Ollama 原生格式;mock provider 发整包 + 一份重复 delta)。
+//
+// 此前核心只累积 delta、把 `input_json` 整个忽略 → 整包形态的 provider
+// (Ollama)**参数全丢**,工具收到 `args = null`,表现为「missing 'cmd'」
+// 这类假故障(实测于 L6 实模型演练层跑本地 Ollama 时)。
+
+/// 记录收到的参数的探针工具。
+struct ArgsProbeTool {
+    seen: Arc<Mutex<Vec<serde_json::Value>>>,
+}
+
+#[async_trait]
+impl reflect_tools::Tool for ArgsProbeTool {
+    fn name(&self) -> &str {
+        "probe"
+    }
+    fn description(&self) -> &str {
+        "records the args it received"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": { "cmd": { "type": "string" } },
+            "required": ["cmd"]
+        })
+    }
+    fn is_concurrency_safe(&self) -> bool {
+        true
+    }
+    async fn execute(
+        &self,
+        _ctx: reflect_tools::ToolContext,
+        args: serde_json::Value,
+    ) -> Result<reflect_tools::ToolOutput, reflect_tools::ToolError> {
+        self.seen.lock().push(args.clone());
+        Ok(reflect_tools::ToolOutput {
+            content: vec![reflect_protocol::ContentBlock::text("ok")],
+            is_error: false,
+            metadata: serde_json::Value::Null,
+            elapsed_ms: 0,
+        })
+    }
+}
+
+/// 整包形态(ToolUseStart 带完整 input_json、**没有** delta)→ 参数必须送达工具。
+#[tokio::test]
+async fn tool_args_from_start_only_are_not_lost() {
+    let registry = Arc::new(ModelRegistry::new());
+    let stub = Arc::new(SequentialStubClient::new(vec![
+        // 第 1 次:整包形态 —— 没有 ToolUseDelta。
+        vec![
+            ChatEvent::MessageStart {
+                id: "m1".into(),
+                model: "stub-1".into(),
+            },
+            ChatEvent::ToolUseStart {
+                id: "tc1".into(),
+                name: "probe".into(),
+                input_json: r#"{"cmd":"echo hi"}"#.into(),
+            },
+            ChatEvent::MessageStop,
+        ],
+        // 第 2 次:纯文本收尾。
+        vec![
+            ChatEvent::MessageStart {
+                id: "m2".into(),
+                model: "stub-1".into(),
+            },
+            ChatEvent::ContentDelta("done".into()),
+            ChatEvent::MessageStop,
+        ],
+    ]));
+    registry.register_pool(
+        "stub",
+        CredentialPool {
+            entries: vec![PoolEntry {
+                client: stub.clone(),
+                label: "default".into(),
+                weight: 1,
+            }],
+        },
+    );
+
+    let seen: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let cfg = AgentConfig::new("stub/m1", Path::new("."));
+    let tools = Arc::new(ToolRegistry::default());
+    tools.register(Arc::new(ArgsProbeTool { seen: seen.clone() }));
+    let thread = AgentThread::new(cfg, registry, tools, None, None);
+
+    let mut handle = thread.submit(make_sub("go")).await;
+    while let Some(ev) = handle.next().await {
+        if matches!(ev.msg, EventMsg::TurnComplete(_)) {
+            break;
+        }
+    }
+
+    let seen = seen.lock().clone();
+    assert_eq!(seen.len(), 1, "探针工具应被调用一次,实际 {seen:?}");
+    assert_eq!(
+        seen[0]["cmd"], "echo hi",
+        "整包形态的工具参数必须送达工具,实际:{:?}",
+        seen[0]
+    );
+}
+
+// ── 目标模式:没有 LLM 客户端时必须**如实上报** ──────────────────────────
+
+/// 目标模式在**没有可用 LLM 客户端**时必须**如实上报**,不能静默丢弃。
+///
+/// 此前是 `warn` + `continue`:命令返回了 submission id(看着像成功),
+/// GUI 的「目标模式」投影还亮着,而引擎里**根本没有** controller ——
+/// 校验永不发生,用户无从得知。现在发一条 `GOAL_NO_CLIENT` 的 error 事件。
+#[tokio::test]
+async fn goal_mode_without_client_reports_error() {
+    // 空 registry —— 没有任何 provider / 凭据 → `next_for` 必然 None。
+    let registry = Arc::new(ModelRegistry::new());
+    let thread = build_thread(registry);
+    let mut session_rx = thread.subscribe_session();
+
+    let submission = Submission {
+        id: "goal-sub".into(),
+        op: reflect_protocol::Op::EnterGoalMode {
+            goal: "probe goal".into(),
+            verify_command: None,
+            token_budget: None,
+        },
+        client_user_message_id: None,
+        trace: None,
+        workspace: None,
+        source_command: None,
+    };
+    let mut handle = thread.submit(submission).await;
+
+    // 收事件:要么是 error(GOAL_NO_CLIENT),要么是 submission_closed。
+    let mut saw_error = false;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        match tokio::time::timeout(std::time::Duration::from_secs(2), session_rx.recv()).await {
+            Ok(Some(ev)) => {
+                if let reflect_protocol::EventMsg::Error(e) = &ev.msg {
+                    assert_eq!(e.code, "GOAL_NO_CLIENT", "错误码不对:{e:?}");
+                    assert!(
+                        e.message.contains("目标模式"),
+                        "错误文案应说明目标模式没开成:{e:?}"
+                    );
+                    saw_error = true;
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => continue,
+        }
+    }
+    // turn 侧也应收尾(不能挂住)。
+    while let Some(ev) = handle.next().await {
+        if matches!(ev.msg, reflect_protocol::EventMsg::TurnComplete(_)) {
+            break;
+        }
+    }
+    assert!(
+        saw_error,
+        "没有 LLM 客户端时目标模式必须发 GOAL_NO_CLIENT 错误事件,而不是静默丢弃"
     );
 }

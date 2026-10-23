@@ -2,6 +2,7 @@
 
 pub mod ask_user;
 pub mod ask_user_question;
+pub mod background_status;
 pub mod bash;
 pub mod brief;
 pub mod context_remaining;
@@ -49,6 +50,8 @@ pub use web_fetch::WebFetchTool;
 pub use web_search::WebSearchTool;
 pub use write::WriteTool;
 
+pub use background_status::BackgroundStatusTool;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -60,10 +63,11 @@ mod tests {
         let web_fetch = WebFetchTool::default();
         let web_search = WebSearchTool::new();
         let ask_uq = AskUserQuestionTool::default();
+        let bash = BashTool::default();
         let descriptions = [
             AskUserTool.description(),
             ask_uq.description(),
-            BashTool.description(),
+            bash.description(),
             BriefTool.description(),
             GetContextRemainingTool.description(),
             DeleteTool.description(),
