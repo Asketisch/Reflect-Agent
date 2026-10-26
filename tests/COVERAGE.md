@@ -16,7 +16,7 @@
 | **实模型演练层**(可选) | `tests/live/` | **真实模型**下的引擎行为(协议形状) | ❌ | 12 条 |
 
 **新增能力断言只落能力覆盖层一处** —— 不要在 SDK 测试里重复写协议/能力断言。
-理由:SDK 自身的 bug 会把 Rust 的 bug 遮住(见 §6 已知缺陷 D1)。
+理由:SDK 自身的 bug 会把 Rust 的 bug 遮住(见 §6 已修复项 D1)。
 
 ⚠️ **实模型演练层不算能力覆盖** —— 它断言的是**协议形状与运行时行为**
 (事件序 / 终态 / usage 字段 / 工具成对),**不断言具体回答文本**。
@@ -30,13 +30,13 @@
 |---|---|---|---|---|---|
 | 基础通信(握手/单轮/多轮/事件流/终态/工具参数增量) | D1–D5、D9 | cli_core | K1–K2 | ✅ | L1–L4 |
 | 并发与路由 | S1–S3 | — | — | — | — |
-| 内置工具调用 | T1–T2 | tools_drive | — | ✅ | T1–T3 |
+| 内置工具调用与 OS 沙箱 | T1–T2、T8–T10 | tools_drive | — | ✅ | T1–T3 |
 | 远程工具(注册/往返/失败/超时) | T3–T4、X4 | serve_ops | K3、K8 | ✅ | — |
-| 审批交互(approve / deny / bubble) | T5–T6 | integrations | — | ✅ | — |
-| 会话状态 Op(19 Op) | A1–A12 | serve_ops | K4 | ✅ | — |
+| 审批交互(approve / deny / bubble / shell 规则) | T5–T7 | integrations | — | ✅ | — |
+| 会话状态 Op(19 Op) | A1–A12 | serve_ops | K4、K9 | ✅ | — |
 | 重连与恢复(resume / -c / -r / 崩溃 / EOF) | R1–R5 | cli_core(exec --resume) | — | ✅ | P2 |
 | 容错与失败恢复 | X1–X6 | — | — | ✅ | X1 |
-| 持久化(rollout / 截断 / 索引) | P1–P4 | cli_deep(session) | — | ✅ | P1–P2 |
+| 持久化(rollout / 截断 / 索引) | P1–P5 | cli_deep(session) | — | ✅ | P1–P2 |
 | 编排(子代理/讨论/任务/团队/流水线/goal) | O1–O5 | cli_modules、cli_deep | — | ✅ | — |
 | CLI 能力面 | C1–C6 | cli_deep(194 断言) | — | — | — |
 | 模型发现(清单接口 / 免费判定 / 动态 model) | — | models_* | — | ✅ | — |
@@ -80,6 +80,10 @@
   `turn_complete`。
 - **T6** 审批 deny → 工具**未执行**、`tool_call_end(is_error=true, 含 deny 理由)`、
   turn 仍收尾。
+- **T7** Bash 显式拒绝规则覆盖换行、后台执行附加命令(错误字段与无副作用)。
+- **T8** OS 沙箱拒绝 workspace 外写入时,错误标记与非零退出码正确返回。
+- **T9** macOS Seatbelt 按真实 HOME 拦截假密钥读取,不把星号当成 subpath 通配符。
+- **T10** stdout/stderr 同时截断后,`tool_call_end` 仍返回失败、原始退出码与捕获字节数。
 
 ### A 组 会话状态 Op(`test_serve.py`)
 `user_input`+`thread_settings`(四字段) / `set_effort`(静默) / 权限模式切换
@@ -106,7 +110,7 @@
 ### P 组 持久化(`test_persistence.py`)
 `session_meta` 首行 + `message` 记录集 / 权限模式 `from→to+at` 轨迹 /
 rewind 物理截断(记录减少 + `.rewind-<ts>.bak` 备份)/ `reflect session ls`
-能列出该会话。
+能列出该会话。P5 覆盖旧日期会话通过 thread id、内部 session id、`-c`、`-r 1` 恢复后续写原文件。
 
 ### O 组 编排(`test_orchestration.py`)
 子代理 `call_explorer`(子代理执行 → 回执进历史)/ 讨论编排(transcript +
@@ -171,25 +175,25 @@ Result + rounds_completed)/ 任务与团队(create → ls)/ 流水线错误路�
 - `web_search` / `web_fetch` 离线时优雅报错(无 provider key / 无网络)。
 - **并发 turn 是真并发**:core 对每个 `UserInput` 提交 `tokio::spawn` 一个
   独立 task(`submission_loop.rs:621`),两个 turn 的模型调用先后不保证 ——
-  与 `sdks/PROTOCOL.md` §4「core 侧串行排队」的措辞不符(见 §6 D5)。
+  已与 `sdks/PROTOCOL.md` §4 的并发语义对齐(见 §6 D5)。
 - **三个 id 互不相同**:`session_configured.session_id`、rollout 内
   `session_meta.session_id`、会话**文件名**里的 thread id 是三个不同的
-  uuid(exec/serve 路径未注入 `with_session_id`)。`--resume` 的参数必须用
-  **文件名**里的 id;`reflect session ls` 显示的是 SessionMeta 里的 id。
+  uuid(exec/serve 路径未注入 `with_session_id`)。`--resume` 支持**文件名**
+  thread id 与 SessionMeta 内部 id;`reflect session ls` 显示后者(P5 覆盖双 ID)。
 
-## 6. 已知缺陷(本次只记录不修,供后续独立任务)
+## 6. 已知缺陷与修复状态
 
-| # | 缺陷 | 证据 | 影响 |
-|---|---|---|---|
-| D1 | **Python SDK `close()` 从不发出 shutdown op**:先置 `_closed=True` 再调 `_write_submission`,后者因 `_closed` 抛 `RuntimeError("agent is closed")` 被 `except Exception: pass` 吞掉 | `sdks/python/reflect/agent.py:259-266` + `:373-382` | 文档承诺的"发 Shutdown → 等 ShutdownComplete"未兑现;实际靠关 stdin(EOF)兜底。TS 侧用 `writeSubmissionUnchecked` 正常发出 —— **两客户端行为相反** |
-| D2 | 协议类型与 wire 不符:`TurnComplete.status` 类型写 `ok/cancelled/aborted/error`,wire 实为 `success/max_iterations/stopped/token_budget_exceeded`;`TurnAborted.reason` 类型写 `str`,wire 实为 `{"type":"user_interrupt"}`;`PlanApprovalChoice` 类型写 `auto_mode/prompt_mode/reject`,wire 实为 `auto_mode/manual_approve/revise` | `sdks/python/reflect/protocol.py:228-245` vs `event_msg/turn.rs:75-92`、`item.rs:249-260`;TS 侧前两处同样错 | 按类型注解写代码即错 |
-| D3 | Python `ReviewDecision` TypedDict 建模为 `{"type":"approve"}`,wire 实为裸字符串 `"approve"` / `"approve_for_session"` / `{"deny":{"reason":...}}` | `sdks/python/reflect/protocol.py:62-71` vs `item.rs:236-241` | 按类型注解传 `{"type":"approve"}` → 服务端反序列化失败 → `invalid_submission` → **审批永久挂起**(TS 侧 v1.3 已修) |
-| D4 | 全局事件(`id=""`)无公开读取口:`permission_mode_changed` / `config_reloaded` / `mcp_server_started` / `error` 只能读私有 `_global_queue` | `sdks/python/reflect/agent.py:322-345` | SDK 用户拿不到全局事件;本次能力层用原始 wire 覆盖,SDK 侧仍缺 |
-| D5 | 协议文档与实现不符:`sdks/PROTOCOL.md` §4 称「core 侧串行排队」,实测每个 `UserInput` 提交一个独立 task(真并发) | `submission_loop.rs:621`;能力层 S1/S2 实测 | 依赖"第二个 turn 一定在第一个之后开始"的客户端会踩坑;文档应改为"并发执行、事件按 id 路由" |
-| D6 | `tests/` 套件此前从未进 CI,导致**已存在的失败用例**长期未被发现(原 `test_sdk_real_bin.py` 的 interrupt 断言与当前 core 行为不符;`cli_core.sh` 的 `exec --plan-mode` 期望 0 而实际按约定 122;`serve_ops.sh` 期望「不 emit plan_approved」而引擎现在会发;`tools_drive.sh` 的 grep 期望 `./` 前缀而实际无前缀) | 本批次修正前实测失败 | 本批次已修正断言(不改服务端行为),并由 CI job `functional-suite` 收口 |
-| D7 | **bash 工具对被沙箱拒绝的命令仍报成功**:macOS Seatbelt 下越界写被拦下(stderr 含 `Operation not permitted`、文件不落地),但工具输出 `is_error=false`(退出码经 sentinel 回报为 0) | 本地实测 `reflect exec` + bash 越界写;`tests/rust/tools_drive.sh` 的沙箱用例 | 模型看不到失败信号,可能误以为写成功;安全不变量(文件不落地)成立,但错误信号缺失 |
-| D8 | **`InvalidRequest`(400)被归到 `CooldownReason::Auth`**(默认 1 小时冷却) | `crates/runtime/reflect-core/src/graph/nodes/model_call/stream.rs` 的 `build_cooldown_reason` 兜底分支 | 一次 400(如模型不支持 tools)会让该凭据停摆一小时,远超合理范围;本次未改(超出最小改动边界),记此备查 |
-| D10 | **两个 SDK 都未类型化上游的 `tool_call_output_delta`**(v1.4 additive 变体):SDK 走 `UnknownEventMsg` 降级不崩,但 SDK 用户拿不到该事件的类型化形态 | `sdks/python/reflect/protocol.py` 与 `sdks/typescript/src/protocol.ts` 的 `EventMsg` 联合(均无此项);Rust 侧见 `event_msg/tool.rs` | 客户端想消费"长工具输出实时增量"只能自己收窄 `dict`/`Record`;本次只同步了本批新增的 `tool_call_args_delta`(v1.5),`tool_call_output_delta` 仍缺,记此备查 |
+### 已修复或经复核排除
+
+- D1:Python `close()` 在写锁内发送 shutdown,禁止后续写入;mock 区分 shutdown 与仅 EOF 退出,验证关闭协议与幂等性。
+- D2/D3:双 SDK 的 turn 状态、结构化中止原因、plan 审批选择与 Python 审批 wire 类型已与 Rust 对齐。
+- D4:Python 新增 `next_global_event(timeout_secs)` 公开读取口;K9 验证绑定层全局事件路由,逻辑测试覆盖超时与 EOF 重复读取。
+- D5:协议文档改为并发 turn 与按 submission id 路由。
+- D6:此前已修正测试断言并纳入 CI;本轮审批用例改为等待 MCP 就绪事件,权限轨迹按记录的 `at` 时间戳还原,避免误把异步落盘顺序当成状态变化顺序;examples 冒烟逐一检查全部六个产物,缺失任一个时重新构建,构建失败计入失败;TS mock 测试为每个 SDK 实例提供独占流,未知事件断言检查实际透传字段,避免争抢握手造成未处理拒绝;配额持久化用例迁入独立集成测试进程,隔离全局路径变量与其他 tracker 的并发写入。
+- D7:流式输出分支保留内部状态行用于退出码解析,只从增量事件中过滤它;T8/T9 已验证 OS 沙箱拒绝后的 `is_error=true` 与非零退出码;T10 验证双流截断、状态行丢失后仍回退到原命令退出码。
+- D8:当前 `classify_action` 对 `InvalidRequest` 返回 `GiveUp`,不会进入构造冷却原因的分支;旧记录所述一小时冷却不成立。
+- D10:双 SDK 新增 `ToolCallOutputDelta` 类型,逻辑测试覆盖输出增量字段透传及未知变体兼容。
+- Python 3.10 兼容性:移除 Python 3.11 才提供的 `typing.NotRequired` 依赖,用 `TypedDict` 继承区分必填与可选字段,保持零运行时依赖。
 
 ### 实模型层观测到的上游限制(非 Reflect 缺陷)
 
@@ -209,17 +213,17 @@ Result + rounds_completed)/ 任务与团队(create → ls)/ 流水线错误路�
 | 文件 | 规模 |
 |---|---|
 | `functional/test_serve.py` | 22 条(D6 + S3 + A13) |
-| `functional/test_tools.py` | 6 条(T6) |
+| `functional/test_tools.py` | 11 条(T1–T10) |
 | `functional/test_recovery.py` | 11 条(R5 + X6) |
-| `functional/test_persistence.py` | 4 条(P4) |
+| `functional/test_persistence.py` | 8 条(P1–P5) |
 | `functional/test_orchestration.py` | 5 条(O5) |
 | `functional/test_cli.py` | 6 条(C6) |
-| **能力覆盖层合计** | **54 条** |
+| **能力覆盖层合计** | **63 条** |
 | `live/test_live_basic.py` | 4 条(L1–L4) |
 | `live/test_live_tools.py` | 3 条(T1–T3) |
 | `live/test_live_persistence.py` | 3 条(P1–P2、X1) |
 | **实模型演练层合计** | **10 条**(默认 SKIP,需 `REFLECT_LIVE=1`) |
-| `sdk-python/test_sdk_real_bin.py` | 9 条(K1–K8) |
+| `sdk-python/test_sdk_real_bin.py` | 10 条(K1–K9) |
 | `sdk-ts/real-bin.test.mjs` | 5 条 |
 | `rust/cli_core.sh` | 71 断言 |
 | `rust/cli_deep.sh` | 194 断言 |
