@@ -167,6 +167,8 @@ async fn drain_pipe<R: tokio::io::AsyncRead + Unpin>(
                 match reader.read_until(b'\n', &mut line).await {
                     Ok(0) | Err(_) => break,
                     Ok(_) => {
+                        // sentinel 只从增量事件过滤;完整捕获必须保留,供解析退出码。
+                        buf.extend_from_slice(&line);
                         if line.starts_with(SENTINEL_PREFIX.as_bytes()) {
                             if pending.as_deref() == Some(b"\n".as_slice()) {
                                 pending = None;
@@ -176,9 +178,6 @@ async fn drain_pipe<R: tokio::io::AsyncRead + Unpin>(
                         if let Some(p) = pending.take() {
                             sink.emit(is_stderr, &String::from_utf8_lossy(&p));
                         }
-                        // 捕获缓冲不落后于发射(sentinel 行也入缓冲,由 execute
-                        // 统一解析剥除;这里只过滤「给模型看的增量」)。
-                        buf.extend_from_slice(&line);
                         pending = Some(line.clone());
                     }
                 }
@@ -338,7 +337,7 @@ impl Tool for BashTool {
             ));
         }
         script.push_str(&format!(
-            "{{ {cmd}\n}} ; __reflect_rc=$? ; printf '\\n{SENTINEL_PREFIX}rc=%s cwd=%s' \"$__reflect_rc\" \"$PWD\" ; printf '\\n{SENTINEL_PREFIX}rc=%s cwd=%s' \"$__reflect_rc\" \"$PWD\" >&2\n"
+            "{{ {cmd}\n}} ; __reflect_rc=$? ; printf '\\n{SENTINEL_PREFIX}rc=%s cwd=%s' \"$__reflect_rc\" \"$PWD\" ; printf '\\n{SENTINEL_PREFIX}rc=%s cwd=%s' \"$__reflect_rc\" \"$PWD\" >&2 ; exit \"$__reflect_rc\"\n"
         ));
 
         // v1.3:OS 沙箱。`OsSandbox::default()` v1.3 起 enabled + strict,
@@ -574,7 +573,7 @@ impl Tool for BashTool {
         // 输出中剥除(sentinel 同时打到 stdout 与 stderr —— 单一流被
         // OUTPUT_LIMIT 截断时另一条仍存活)。两处都缺失(shell 被 exit/
         // 杀死 / 解析错误提前终止)→ 沿用进程退出码,持久状态不动。
-        // `sh -c` 的进程退出码此时是 `printf` 的 0,必须以 sentinel rc 为准。
+        // 包装脚本也以原命令退出码结束,两条流都截断而丢失状态行时仍能正确回退。
         let (state_out, cleaned_out) = extract_shell_state(&out_bytes);
         let (state_err, cleaned_err) = extract_shell_state(&err_bytes);
         let shell_state = state_out.or(state_err);
@@ -849,6 +848,45 @@ mod tests {
             "exit 1 命令应记录 exit_code=1"
         );
         assert!(fail.is_error, "exit 1 应标记为 error");
+    }
+
+    /// 启用流式输出后,内部状态行仍须用于还原失败退出码,且不能泄露给消费者。
+    #[tokio::test]
+    async fn progress_sink_preserves_failure_exit_code() {
+        let deltas = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let captured = deltas.clone();
+        let mut ctx = ToolContext::for_workspace("/tmp");
+        ctx.os_sandbox = Some(false);
+        ctx.progress = Some(crate::tool::ProgressSink(std::sync::Arc::new(
+            move |_, delta| {
+                captured.lock().unwrap().push_str(delta);
+            },
+        )));
+        let output = BashTool::default()
+            .execute(ctx, serde_json::json!({"cmd": "printf failed >&2; false"}))
+            .await
+            .unwrap();
+        assert!(output.is_error);
+        assert_eq!(output.metadata["exit_code"], 1);
+        let deltas = deltas.lock().unwrap();
+        assert!(deltas.contains("failed"));
+        assert!(!deltas.contains(SENTINEL_PREFIX));
+    }
+
+    /// 两条流都超过捕获上限时,状态行可能丢失,进程退出码仍须保留失败。
+    #[tokio::test]
+    async fn truncated_streams_preserve_failure_exit_code() {
+        let mut ctx = ToolContext::for_workspace("/tmp");
+        ctx.os_sandbox = Some(false);
+        ctx.progress = Some(crate::tool::ProgressSink(std::sync::Arc::new(|_, _| {})));
+        let bytes = OUTPUT_LIMIT + 1024;
+        let output = BashTool::default().execute(ctx, serde_json::json!({
+            "cmd": format!("head -c {bytes} /dev/zero; head -c {bytes} /dev/zero >&2; false")
+        })).await.unwrap();
+        assert!(output.is_error);
+        assert_eq!(output.metadata["exit_code"], 1);
+        assert_eq!(output.metadata["stdout_bytes"], OUTPUT_LIMIT);
+        assert_eq!(output.metadata["stderr_bytes"], OUTPUT_LIMIT);
     }
 
     #[tokio::test]
