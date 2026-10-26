@@ -51,6 +51,16 @@ for ev in agent.submit("第二轮"):
 agent.close()
 ```
 
+## 全局事件
+
+`next_global_event(timeout_secs=5)` 读取 `id=""` 的会话事件,与 `submit()` 的
+按 submission 路由的事件迭代器独立。超时抛 `queue.Empty`,进程 stdout
+关闭后返回 `None`;未知变体原样返回。
+
+```python
+handshake = agent.next_global_event(timeout_secs=5)
+```
+
 ## 环境变量
 
 | 变量 | 作用 |
@@ -68,7 +78,7 @@ pytest -ra
 
 mock serve 进程跑在 Node 上(Node ≥ 18),不依赖真 `reflect` 二进制 —— 测试完全离线,也不需要网络/API key。
 
-端到端测试(对真 `reflect serve` 子进程的集成)在仓库 CI 里跑(配置好 `REFLECT_BIN` 后 `pytest tests/test_protocol.py`)。
+端到端测试(对真 `reflect serve` 子进程的集成)在仓库 CI 里跑;在仓库根配置好 `REFLECT_BIN` 后执行 `./tests/run_all.sh sdk-python`。
 
 ## 协议
 

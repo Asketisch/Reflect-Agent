@@ -62,8 +62,8 @@ export type PermissionMode = 'auto' | 'prompt' | 'plan' | 'deny' | 'bubble';
 
 export type PlanApprovalChoice =
   | 'auto_mode'
-  | 'prompt_mode'
-  | 'reject';
+  | 'manual_approve'
+  | 'revise';
 
 /**
  * `ReviewDecision` 的 wire 形态(serde snake_case)。
@@ -136,6 +136,7 @@ export type EventMsg =
   | TokenCount
   | ToolCallBegin
   | ToolCallArgsDelta
+  | ToolCallOutputDelta
   | ToolCallEnd
   | ToolExecutionRequest
   | ApprovalRequest
@@ -185,7 +186,7 @@ export interface TurnStarted {
 export interface TurnComplete {
   type: 'turn_complete';
   turn_id: string;
-  status: 'ok' | 'cancelled' | 'aborted' | 'error';
+  status: 'success' | 'max_iterations' | 'stopped' | 'token_budget_exceeded';
   usage: TokenUsage;
 }
 
@@ -196,11 +197,9 @@ export interface TurnAborted {
 }
 
 export type AbortReason =
-  | 'user_interrupt'
-  | 'cancelled'
-  | 'error'
-  | 'approval_denied'
-  | string;
+  | { type: 'user_interrupt' }
+  | { type: 'shutdown' }
+  | { type: 'error'; code: string; message: string };
 
 export interface TurnRewound {
   type: 'turn_rewound';
@@ -275,6 +274,14 @@ export interface ToolCallArgsDelta {
   type: 'tool_call_args_delta';
   call_id: string;
   delta: string;
+}
+
+/** 工具执行期间的输出预览,最终结果以 tool_call_end 为准。 */
+export interface ToolCallOutputDelta {
+  type: 'tool_call_output_delta';
+  call_id: string;
+  delta: string;
+  is_stderr: boolean;
 }
 
 export interface ToolCallEnd {
