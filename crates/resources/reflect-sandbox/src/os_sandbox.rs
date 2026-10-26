@@ -340,7 +340,12 @@ impl OsSandbox {
 
         let write_rules = allow_write
             .iter()
-            .map(|p| format!("(allow file-write* (subpath \"{}\"))", p))
+            .map(|p| {
+                format!(
+                    "(allow file-write* (subpath {}))",
+                    serde_json::to_string(p).expect("路径字符串可序列化")
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n            ");
         let net_rule = if self.allow_network {
@@ -354,6 +359,49 @@ impl OsSandbox {
             "拒绝"
         };
 
+        // subpath 按字面路径匹配,不展开星号;必须为真实用户目录生成规则。
+        let mut homes = Vec::new();
+        if let Some(home) = std::env::var_os("HOME") {
+            let home = PathBuf::from(home);
+            homes.push(home.canonicalize().unwrap_or(home));
+        }
+        if let Ok(entries) = std::fs::read_dir("/Users") {
+            for entry in entries.flatten() {
+                if entry.path().is_dir() {
+                    homes.push(entry.path());
+                }
+            }
+        }
+        homes.sort();
+        homes.dedup();
+        let sensitive_reads = homes
+            .iter()
+            .flat_map(|home| {
+                [
+                    ".ssh",
+                    ".aws",
+                    ".gnupg",
+                    ".kube",
+                    ".docker",
+                    ".config/gh",
+                    ".netrc",
+                    ".npmrc",
+                    ".pypirc",
+                    ".cargo/credentials",
+                    ".config/git/credentials",
+                    "Library/Keychains",
+                ]
+                .map(|suffix| {
+                    format!(
+                        "(deny file-read* (subpath {}))",
+                        serde_json::to_string(&home.join(suffix).to_string_lossy())
+                            .expect("路径字符串可序列化")
+                    )
+                })
+            })
+            .collect::<Vec<_>>()
+            .join("\n            ");
+
         format!(
             "(version 1)
             (deny default)
@@ -362,18 +410,7 @@ impl OsSandbox {
             ;; deny 永远优先于 allow)。其他读路径全放行,保持可用性。
             (allow file-read*)
             ;; v1.3:敏感读兜底 —— 拒绝读取凭据 / SSH / 钥匙串。
-            (deny file-read* (subpath \"/Users/*/.ssh\"))
-            (deny file-read* (subpath \"/Users/*/.aws\"))
-            (deny file-read* (subpath \"/Users/*/.gnupg\"))
-            (deny file-read* (subpath \"/Users/*/.kube\"))
-            (deny file-read* (subpath \"/Users/*/.docker\"))
-            (deny file-read* (subpath \"/Users/*/.config/gh\"))
-            (deny file-read* (subpath \"/Users/*/.netrc\"))
-            (deny file-read* (subpath \"/Users/*/.npmrc\"))
-            (deny file-read* (subpath \"/Users/*/.pypirc\"))
-            (deny file-read* (subpath \"/Users/*/.cargo/credentials\"))
-            (deny file-read* (subpath \"/Users/*/.config/git/credentials\"))
-            (deny file-read* (subpath \"/Users/*/Library/Keychains\"))
+            {sensitive_reads}
             ;; 写:仅 workspace + 额外目录 + 临时目录
             {write_rules}
             ;; /dev/null 放行:shell 里 `cmd 2>/dev/null` 是高频写法,重定向
@@ -1042,22 +1079,16 @@ mod tests {
     fn seatbelt_profile_denies_sensitive_reads() {
         let s = OsSandbox::enabled(Vec::new());
         let prof = s.seatbelt_profile(Path::new("/Users/x/project"));
-        assert!(
-            prof.contains("(deny file-read* (subpath \"/Users/*/.ssh\"))"),
-            "profile must deny SSH read; got: {prof}"
-        );
-        assert!(
-            prof.contains("(deny file-read* (subpath \"/Users/*/.aws\"))"),
-            "profile must deny AWS read"
-        );
-        assert!(
-            prof.contains("(deny file-read* (subpath \"/Users/*/.gnupg\"))"),
-            "profile must deny GPG read"
-        );
-        assert!(
-            prof.contains("(deny file-read* (subpath \"/Users/*/Library/Keychains\"))"),
-            "profile must deny Keychain read"
-        );
+        let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+        let home = home.canonicalize().unwrap_or(home);
+        for suffix in [".ssh", ".aws", ".gnupg", "Library/Keychains"] {
+            let path = serde_json::to_string(&home.join(suffix).to_string_lossy()).unwrap();
+            assert!(
+                prof.contains(&format!("(deny file-read* (subpath {path}))")),
+                "未保护 {suffix}: {prof}"
+            );
+        }
+        assert!(!prof.contains("/Users/*/"));
     }
 
     #[cfg(target_os = "macos")]
