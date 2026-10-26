@@ -755,6 +755,45 @@ fn default_tool_registry() -> ToolRegistry {
 mod tests {
     use super::*;
 
+    /// 测试用临时凭据环境,在断言失败时也恢复调用者的设置。
+    struct ProviderEnvGuard(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl ProviderEnvGuard {
+        fn clear() -> Self {
+            let keys = [
+                "OPENAI_API_KEY",
+                "ANTHROPIC_API_KEY",
+                "OLLAMA_HOST",
+                "OLLAMA_API_KEY",
+                "REFLECT_PROVIDER",
+                "REFLECT_MODEL",
+            ];
+            let prior = keys
+                .into_iter()
+                .map(|key| (key, std::env::var_os(key)))
+                .collect();
+            for key in keys {
+                unsafe {
+                    std::env::remove_var(key);
+                }
+            }
+            Self(prior)
+        }
+    }
+
+    impl Drop for ProviderEnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.0 {
+                unsafe {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     #[ignore = "requires real OPENAI_API_KEY"]
     async fn builder_returns_thread_with_approvals() {
@@ -776,27 +815,9 @@ mod tests {
     async fn builder_rejects_when_no_keys_present() {
         // 与同样会动 OPENAI_API_KEY 的并发测试串行化。
         let _g = env_lock().lock().unwrap();
-        let prior_openai = std::env::var("OPENAI_API_KEY").ok();
-        let prior_anthropic = std::env::var("ANTHROPIC_API_KEY").ok();
-        unsafe {
-            std::env::remove_var("OPENAI_API_KEY");
-        }
-        unsafe {
-            std::env::remove_var("ANTHROPIC_API_KEY");
-        }
+        let _env = ProviderEnvGuard::clear();
         let err = Reflect::builder("openai/gpt-4o").build().unwrap_err();
         assert!(err.to_string().contains("OPENAI_API_KEY"));
-        if let Some(v) = prior_openai {
-            let _g = env_lock().lock().unwrap();
-            unsafe {
-                std::env::set_var("OPENAI_API_KEY", v);
-            }
-        }
-        if let Some(v) = prior_anthropic {
-            unsafe {
-                std::env::set_var("ANTHROPIC_API_KEY", v);
-            }
-        }
     }
 
     /// 回归:门面此前**完全不认识** mock provider —— `Reflect::builder("mock")`
@@ -806,41 +827,12 @@ mod tests {
     #[tokio::test]
     async fn builder_accepts_mock_model_without_api_key() {
         let _g = env_lock().lock().unwrap();
-        let prior_openai = std::env::var("OPENAI_API_KEY").ok();
-        let prior_anthropic = std::env::var("ANTHROPIC_API_KEY").ok();
-        let prior_provider = std::env::var("REFLECT_PROVIDER").ok();
-        let prior_model = std::env::var("REFLECT_MODEL").ok();
-        unsafe {
-            std::env::remove_var("OPENAI_API_KEY");
-            std::env::remove_var("ANTHROPIC_API_KEY");
-            std::env::remove_var("REFLECT_PROVIDER");
-            std::env::remove_var("REFLECT_MODEL");
-        }
+        let _env = ProviderEnvGuard::clear();
         let agent = Reflect::builder("mock")
             .workspace("/tmp")
             .build()
             .expect("mock provider 必须免 key 可用");
         assert_eq!(agent.thread().config().current_model(), "mock");
-        if let Some(v) = prior_openai {
-            unsafe {
-                std::env::set_var("OPENAI_API_KEY", v);
-            }
-        }
-        if let Some(v) = prior_anthropic {
-            unsafe {
-                std::env::set_var("ANTHROPIC_API_KEY", v);
-            }
-        }
-        if let Some(v) = prior_provider {
-            unsafe {
-                std::env::set_var("REFLECT_PROVIDER", v);
-            }
-        }
-        if let Some(v) = prior_model {
-            unsafe {
-                std::env::set_var("REFLECT_MODEL", v);
-            }
-        }
     }
 
     /// `is_mock_provider` 的判定口径:只认**显式 opt-in**,
