@@ -5,10 +5,8 @@
 
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-use crate::path::session_path_at;
 use reflect_protocol::{RolloutRecord, ThreadId};
 
 /// 逐行读取 `path` 里的所有 record。
@@ -54,22 +52,50 @@ pub async fn replay_path(path: &Path) -> anyhow::Result<Vec<RolloutRecord>> {
     Ok(out)
 }
 
-/// 读取 `session_id` 的全部 record,在 `<base>/YYYY/MM/DD/` 下查找。
-/// 依次尝试今天、昨天、前天 —— 覆盖跨日期边界的 session
-/// midnight UTC,无需完整目录遍历。
+/// 按时间顺序读取会话的全部保留记录,包括任意日期目录和轮转副本。
 pub async fn replay(base: &Path, session_id: ThreadId) -> anyhow::Result<Vec<RolloutRecord>> {
-    let mut combined: Vec<RolloutRecord> = Vec::new();
-    for offset in 0..3 {
-        let at: DateTime<Utc> = (chrono::Utc::now() - chrono::Duration::days(offset))
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string()
-            .parse()
-            .unwrap_or_else(|_| chrono::Utc::now());
-        let path: PathBuf = session_path_at(base, session_id, at);
-        let mut chunk = replay_path(&path).await?;
-        combined.append(&mut chunk);
+    let mut combined = Vec::new();
+    for path in session_files(base, session_id)? {
+        combined.extend(replay_path(&path).await?);
     }
     Ok(combined)
+}
+
+/// 同一日期内先读较旧的高编号副本,最后读活跃文件;跨日期按目录升序。
+/// 同时支持文件名 thread id 和首行内部 session id 两种入口。
+pub(crate) fn session_files(base: &Path, session_id: ThreadId) -> std::io::Result<Vec<PathBuf>> {
+    let mut stem = session_id.to_string();
+    let mut paths = crate::index::find_files_by_name_prefix(base, &stem)?;
+    if paths.is_empty()
+        && let Some(path) = crate::index::find_file_by_session_id(base, &session_id)?
+        && let Some(name) = path.file_stem().and_then(|s| s.to_str())
+    {
+        stem = name.split('.').next().unwrap_or(name).to_owned();
+        paths = crate::index::find_files_by_name_prefix(base, &stem)?;
+    }
+    let mut ranked = Vec::new();
+    for path in paths {
+        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let rank = if name == stem {
+            0
+        } else if let Some(n) = name
+            .strip_prefix(&format!("{stem}."))
+            .and_then(|n| n.parse::<usize>().ok())
+        {
+            n
+        } else {
+            continue;
+        };
+        ranked.push((
+            path.parent().map(Path::to_path_buf),
+            std::cmp::Reverse(rank),
+            path,
+        ));
+    }
+    ranked.sort();
+    Ok(ranked.into_iter().map(|(_, _, path)| path).collect())
 }
 
 #[cfg(test)]
