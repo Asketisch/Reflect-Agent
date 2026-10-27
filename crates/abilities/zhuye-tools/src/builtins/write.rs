@@ -343,30 +343,34 @@ mod tests {
         std::fs::create_dir_all(&outside_dir).ok();
         let outside_file = outside_dir.join("exists.txt");
         std::fs::write(&outside_file, "original").unwrap();
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&outside_file, ws.join("link.txt")).unwrap();
         #[cfg(not(unix))]
         {
+            // 非 Unix(Windows):创建 symlink 需要管理员/开发者模式,
+            // 本回归仅在 Unix 上执行。
             let _ = outside_file;
             return;
         }
-        let t = WriteTool;
-        let err = t
-            .execute(
-                make_ctx(&ws),
-                serde_json::json!({"path": "link.txt", "content": "pwned"}),
-            )
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(err, ToolError::PathEscape { .. }),
-            "指向外部已存在文件的 symlink 必须被拒,得到: {err:?}"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&outside_file).unwrap(),
-            "original",
-            "symlink 目标内容不得被改写"
-        );
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside_file, ws.join("link.txt")).unwrap();
+            let t = WriteTool;
+            let err = t
+                .execute(
+                    make_ctx(&ws),
+                    serde_json::json!({"path": "link.txt", "content": "pwned"}),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, ToolError::PathEscape { .. }),
+                "指向外部已存在文件的 symlink 必须被拒,得到: {err:?}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&outside_file).unwrap(),
+                "original",
+                "symlink 目标内容不得被改写"
+            );
+        }
     }
 
     /// 回归(0.2):**悬空** symlink(target 不存在)不得把文件写到 workspace 外。
@@ -380,34 +384,38 @@ mod tests {
         let ws = tmp_workspace();
         let outside_file = ws.parent().unwrap().join("zhuye_write_dangling_target.txt");
         let _ = std::fs::remove_file(&outside_file);
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&outside_file, ws.join("dangling.txt")).unwrap();
         #[cfg(not(unix))]
         {
+            // 非 Unix(Windows):创建 symlink 需要管理员/开发者模式,
+            // 本回归仅在 Unix 上执行。
             let _ = outside_file;
             return;
         }
-        let t = WriteTool;
-        let out = t
-            .execute(
-                make_ctx(&ws),
-                serde_json::json!({"path": "dangling.txt", "content": "pwned"}),
-            )
-            .await;
-        assert!(
-            !outside_file.exists(),
-            "悬空 symlink 不得导致 workspace 外被写入: {}",
-            outside_file.display()
-        );
-        // 落盘成功时,workspace 内的 symlink 已被替换为普通文件。
-        if out.is_ok() {
-            assert!(ws.join("dangling.txt").is_file());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside_file, ws.join("dangling.txt")).unwrap();
+            let t = WriteTool;
+            let out = t
+                .execute(
+                    make_ctx(&ws),
+                    serde_json::json!({"path": "dangling.txt", "content": "pwned"}),
+                )
+                .await;
             assert!(
-                !std::fs::symlink_metadata(ws.join("dangling.txt"))
-                    .unwrap()
-                    .file_type()
-                    .is_symlink()
+                !outside_file.exists(),
+                "悬空 symlink 不得导致 workspace 外被写入: {}",
+                outside_file.display()
             );
+            // 落盘成功时,workspace 内的 symlink 已被替换为普通文件。
+            if out.is_ok() {
+                assert!(ws.join("dangling.txt").is_file());
+                assert!(
+                    !std::fs::symlink_metadata(ws.join("dangling.txt"))
+                        .unwrap()
+                        .file_type()
+                        .is_symlink()
+                );
+            }
         }
     }
 
