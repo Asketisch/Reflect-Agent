@@ -29,10 +29,14 @@
 //! 验证标准(gap doc):sandbox 内执行 `rm -rf /` 应被阻止。
 
 use std::path::{Path, PathBuf};
+// 仅 seatbelt(macOS)使用;其余平台保持 import 干净,避免 -D warnings 下
+// unused import 报错。
+#[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// seatbelt 临时 profile 文件序号:同一进程内并发调用 `seatbelt_argv`
 /// 时 pid 相同,必须靠自增序号区分(见 `seatbelt_argv` 内注释)。
+#[cfg(target_os = "macos")]
 static SEATBELT_PROFILE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// 沙箱后端状态。
@@ -321,6 +325,7 @@ impl OsSandbox {
     /// - 网络:`allow_network` 控制(`(allow network*)` / deny)。
     /// - **显式 deny** `(deny file-write*)` 到系统敏感路径作为兜底,即使
     ///   上面 allow 有遗漏也挡 `rm -rf /`。
+    #[cfg(target_os = "macos")]
     pub fn seatbelt_profile(&self, workspace: &Path) -> String {
         let mut allow_write: Vec<String> = Vec::new();
         // workspace(规范化,展开符号链接)。
@@ -440,6 +445,7 @@ impl OsSandbox {
     /// 返回 `(program, args)` 供 BashTool 用 `Command::new(program).args(args)`。
     /// profile 较长时 `-p` 内联可能有 shell 转义问题,故优先写临时文件用
     /// `-f <file>`;写失败则回退 `-p`(仍可用,只是 argv 长)。
+    #[cfg(target_os = "macos")]
     pub fn seatbelt_argv(
         &self,
         workspace: &Path,
@@ -478,6 +484,22 @@ impl OsSandbox {
                 "-c".to_string(),
                 shell_cmd.to_string(),
             ],
+        ))
+    }
+
+    /// 非 macOS 平台的占位实现:Seatbelt 是 macOS 专属后端,`status()` 在
+    /// 其他平台不会返回 `Seatbelt`,调用方按 status 运行时分派,此实现
+    /// 运行时不可达,仅为满足跨平台编译(函数体用到 `std::os::unix`,
+    /// Windows 上无法编译)。
+    #[cfg(not(target_os = "macos"))]
+    pub fn seatbelt_argv(
+        &self,
+        _workspace: &Path,
+        _shell_cmd: &str,
+    ) -> std::io::Result<(String, Vec<String>)> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "Seatbelt 沙箱仅在 macOS 上可用",
         ))
     }
 
