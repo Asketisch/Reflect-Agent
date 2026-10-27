@@ -103,6 +103,12 @@ fn user_input(text: &str) -> Op {
 /// (spawn EACCES → 无沙箱重试)会被本测试真实覆盖。
 #[tokio::test]
 async fn background_bash_full_link() {
+    // Windows 无 OS 沙箱后端:严格模式 fail-closed 会直接拒绝后台 bash,
+    // 而本测试覆盖的是后台任务链路本身。按引擎文档在 Windows 上临时降级。
+    #[cfg(target_os = "windows")]
+    unsafe {
+        std::env::set_var("ZHUYE_SANDBOX_STRICT", "0");
+    }
     let client = Arc::new(ScriptedClient {
         scripts: std::sync::Mutex::new(vec![
             // turn1:发起后台任务 → 收口。
