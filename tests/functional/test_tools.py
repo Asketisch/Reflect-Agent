@@ -8,7 +8,11 @@
 - T3 远程工具往返(register_tools → tool_execution_request → 回执 → tool_call_end);
 - T4 远程工具失败回执(is_error=true);
 - T5 工具审批全链路(ZHUYE_APPROVALS=1 + MCP 工具);
-- T6 审批 deny 分支(工具不执行 + 错误输出)。
+- T6 审批 deny 分支(工具不执行 + 错误输出);
+- T7 shell 拒绝规则覆盖换行与后台命令;
+- T8 OS 沙箱拒绝写入的错误退出码;
+- T9 macOS 真实 HOME 敏感目录读取保护;
+- T10 stdout/stderr 同时截断后的失败退出码。
 
 运行:tests/run_all.sh functional,或
   ZHUYE_BIN=... python3 -m pytest tests/functional/test_tools.py -v
@@ -232,7 +236,9 @@ def test_T5_工具审批全链路(serve_session, mock_script, sandbox) -> None:
             "ZHUYE_APPROVALS": "1",
         }
     ) as s:
-        time.sleep(2.0)  # MCP 注册是异步的:握手 + list_tools 完成前调用会报 unknown tool
+        ready = s.wait_global(lambda e: e.get("msg", {}).get("type") in {"mcp_server_started", "mcp_server_failed"} and e["msg"].get("server") == "fsx")
+        assert ready["msg"]["type"] == "mcp_server_started", ready
+        assert ready["msg"]["tool_count"] >= 1, ready
         sid = s.send(
             {"type": "user_input", "items": [{"type": "text", "text": "调 echo 工具"}]}
         )
@@ -285,7 +291,9 @@ def test_T6_审批deny_工具不执行(serve_session, mock_script, sandbox) -> N
             "ZHUYE_APPROVALS": "1",
         }
     ) as s:
-        time.sleep(2.0)
+        ready = s.wait_global(lambda e: e.get("msg", {}).get("type") in {"mcp_server_started", "mcp_server_failed"} and e["msg"].get("server") == "fsx")
+        assert ready["msg"]["type"] == "mcp_server_started", ready
+        assert ready["msg"]["tool_count"] >= 1, ready
         sid = s.send(
             {"type": "user_input", "items": [{"type": "text", "text": "调 echo 工具"}]}
         )
@@ -309,3 +317,96 @@ def test_T6_审批deny_工具不执行(serve_session, mock_script, sandbox) -> N
     assert end["is_error"] is True, f"deny 后工具应报错:{end}"
     assert "DENY-REASON-XYZ" in _tool_text(end), f"deny 理由未透传:{_tool_text(end)!r}"
     assert "turn_complete" in msg_types(evs), f"deny 后 turn 未收尾:{msg_types(evs)}"
+
+
+@pytest.mark.parametrize("separator", ["\n", " & "])
+def test_T7_shell拒绝规则覆盖换行与后台命令(serve_session, mock_script, sandbox, separator) -> None:
+    """附加段命中显式拒绝规则时,整条 Bash 命令应拒绝执行。"""
+    import json
+
+    require_binary()
+    sandbox.write_config('''
+[[permissions.rule]]
+tool = "bash"
+action = "deny"
+shell_pattern = "touch *"
+''')
+    script = mock_script([
+        json.dumps({"type": "tool_call", "name": "bash", "args": {"cmd": f"echo harmless{separator}touch denied-marker"}}),
+        '{"type":"text","text":"done"}',
+    ])
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script), "ZHUYE_APPROVALS": "1"}) as s:
+        events = s.submit({"type": "user_input", "items": [{"type": "text", "text": "测试拒绝规则"}]}, timeout=DRAIN_TIMEOUT)
+    end = _tool_end(events)
+    assert end["is_error"] is True, end
+    assert "denied" in _tool_text(end).lower(), end
+    assert not (sandbox.cwd / "denied-marker").exists()
+
+
+def test_T8_沙箱拒绝写入必须报错(serve_session, mock_script, sandbox) -> None:
+    """OS 沙箱拒绝 workspace 外的写入时,工具必须返回失败与非零退出码。"""
+    import json
+    import sys
+    import uuid
+    from pathlib import Path
+
+    if sys.platform not in ("darwin", "linux"):
+        pytest.skip("当前平台没有 OS 沙箱后端")
+    require_binary()
+    outside = Path("/etc") / ("zhuye-sandbox-" + uuid.uuid4().hex)
+    script = mock_script([
+        json.dumps({"type": "tool_call", "name": "bash", "args": {"cmd": f"printf blocked > '{outside}'"}}),
+        '{"type":"text","text":"done"}',
+    ])
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script), "ZHUYE_SANDBOX_OS_LEVEL": "1", "ZHUYE_SANDBOX_STRICT": "1"}) as s:
+        events = s.submit({"type": "user_input", "items": [{"type": "text", "text": "测试沙箱拒绝"}]}, timeout=DRAIN_TIMEOUT)
+    end = _tool_end(events)
+    assert end["is_error"] is True, end
+    assert end["output"]["metadata"]["exit_code"] != 0, end
+    assert not outside.exists()
+
+
+def test_T9_macOS沙箱保护真实HOME凭据路径(serve_session, mock_script, sandbox) -> None:
+    """HOME 位于临时目录时,显式敏感读拒绝仍覆盖全盘读放行规则。"""
+    import json
+    import sys
+
+    if sys.platform != "darwin":
+        pytest.skip("仅验证 Seatbelt 敏感路径规则")
+    secret = sandbox.home / ".ssh" / "dummy-key"
+    secret.parent.mkdir()
+    secret.write_text("FAKE-SECRET-MUST-NOT-BE-READ")
+    script = mock_script([
+        json.dumps({"type": "tool_call", "name": "bash", "args": {"cmd": f"cat '{secret}'"}}),
+        '{"type":"text","text":"done"}',
+    ])
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script), "ZHUYE_SANDBOX_OS_LEVEL": "1", "ZHUYE_SANDBOX_STRICT": "1"}) as s:
+        events = s.submit({"type": "user_input", "items": [{"type": "text", "text": "测试敏感路径"}]}, timeout=DRAIN_TIMEOUT)
+    end = _tool_end(events)
+    assert end["is_error"] is True, end
+    assert end["output"]["metadata"]["exit_code"] != 0, end
+    assert "FAKE-SECRET-MUST-NOT-BE-READ" not in _tool_text(end)
+
+
+def test_T10_双流截断后保留失败退出码(serve_session, mock_script) -> None:
+    """两条流超过捕获上限后,tool_call_end 仍保留原命令的失败状态。"""
+    import json
+    import sys
+
+    if sys.platform not in ("darwin", "linux"):
+        pytest.skip("需要 Unix head 与 /dev/zero")
+    require_binary()
+    script = mock_script([
+        json.dumps({"type": "tool_call", "name": "bash", "args": {
+            "cmd": "head -c 110000 /dev/zero; head -c 110000 /dev/zero >&2; false"
+        }}),
+        '{"type":"text","text":"done"}',
+    ])
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
+        events = s.submit({"type": "user_input", "items": [{"type": "text", "text": "测试截断后的错误状态"}]}, timeout=DRAIN_TIMEOUT)
+    end = _tool_end(events)
+    assert end["is_error"] is True, end
+    metadata = end["output"]["metadata"]
+    assert metadata["exit_code"] == 1, metadata
+    assert metadata["stdout_bytes"] == 100 * 1024, metadata
+    assert metadata["stderr_bytes"] == 100 * 1024, metadata

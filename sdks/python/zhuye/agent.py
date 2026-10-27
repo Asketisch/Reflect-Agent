@@ -5,7 +5,7 @@
     from zhuye import ZhuyeAgent, ToolOutput, ContentBlock
 
     agent = ZhuyeAgent.spawn()
-    await agent.register_tool(
+    agent.register_tool(
         name="get_weather",
         description="查询指定城市的天气",
         parameters={"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
@@ -47,6 +47,7 @@ from .protocol import (
     EventMsg,
     Op,
     RemoteToolSpec,
+    ReviewDecision,
     Submission,
     ToolOutput,
 )
@@ -242,7 +243,7 @@ class ZhuyeAgent:
     def approve(
         self,
         approval_id: str,
-        decision: "str | dict[str, Any]",
+        decision: ReviewDecision,
     ) -> None:
         """响应 `EventMsg::ApprovalRequest` / `HookApprovalRequest`。
 
@@ -256,21 +257,32 @@ class ZhuyeAgent:
             )
         )
 
+    def next_global_event(self, timeout_secs: Optional[float] = None) -> Optional[Event]:
+        """读取一条全局事件;超时抛 queue.Empty,stdout EOF 后返回 None。
+
+        与 submit 的事件迭代器独立;未知事件也原样返回。
+        """
+        event = self._global_queue.get(timeout=timeout_secs)
+        if event is None:
+            self._global_queue.put(None)
+        return event
+
     def close(self) -> None:
         """发 Shutdown → 等 ShutdownComplete → 关子进程。幂等。"""
-        if self._closed:
-            return
-        self._closed = True
-        try:
-            self._write_submission(_build_submission({"type": "shutdown"}))
-        except Exception:
-            pass
-        # 关 stdin 让 mock 端感知 EOF;真 serve 会在 Shutdown 后 exit。
-        if self._proc.stdin:
+        with self._write_lock:
+            if self._closed:
+                return
+            self._closed = True
             try:
-                self._proc.stdin.close()
+                self._write_submission_unchecked(_build_submission({"type": "shutdown"}))
             except Exception:
                 pass
+            # 关 stdin 让子进程也能在写入失败时感知 EOF。
+            if self._proc.stdin:
+                try:
+                    self._proc.stdin.close()
+                except Exception:
+                    pass
         # 等待子进程优雅退出(短上限,超时强杀)。
         try:
             self._proc.wait(timeout=2.0)
@@ -367,19 +379,26 @@ class ZhuyeAgent:
             q.put(ev)
         with self._sub_lock:
             self._sub_listeners[sub_id] = _push
-        self._write_submission(_build_submission(op, sub_id))
+        try:
+            self._write_submission(_build_submission(op, sub_id))
+        except Exception:
+            with self._sub_lock:
+                self._sub_listeners.pop(sub_id, None)
+            raise
         return _SubmissionIterator(q, sub_id, self)
 
     def _write_submission(self, sub: dict[str, Any]) -> None:
-        if self._closed:
-            raise RuntimeError("agent is closed")
-        assert self._proc.stdin is not None
-        line = json.dumps(sub) + "\n"
-        # 写锁:远程工具回执来自多个 worker 线程,与主线程的 submit /
-        # approve 并发写 stdin 时避免行交错。
+        # 检查与写入在同一把锁内,避免 close 与工具回执并发写入。
         with self._write_lock:
-            self._proc.stdin.write(line.encode("utf-8"))
-            self._proc.stdin.flush()
+            if self._closed:
+                raise RuntimeError("agent is closed")
+            self._write_submission_unchecked(sub)
+
+    def _write_submission_unchecked(self, sub: dict[str, Any]) -> None:
+        """调用方持有写锁;允许 close 在标记关闭后发送最后一条 shutdown。"""
+        assert self._proc.stdin is not None
+        self._proc.stdin.write((json.dumps(sub) + "\n").encode("utf-8"))
+        self._proc.stdin.flush()
 
     def _handle_tool_request_safely(
         self,

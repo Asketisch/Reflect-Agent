@@ -65,7 +65,7 @@ pub fn resolve_bash_command(args: &Value) -> Option<&str> {
     })
 }
 
-/// 按 `||` / `&&` / `|` / `;` 切分复合 shell 命令,返回各段(含首尾空白,
+/// 按 `||` / `&&` / `|` / `;` / `&` / 换行切分复合 shell 命令,返回各段(含首尾空白,
 /// 由调用方 trim)。
 ///
 /// ## 为什么权限匹配必须切段(0.4)
@@ -92,10 +92,30 @@ pub fn split_shell_segments(cmd: &str) -> Vec<&str> {
     let mut segments = vec![cmd];
     // 顺序有讲究:先切两字符分隔符(`||` / `&&`),再切单字符(`|` / `;`)。
     // 若先切 `|`,`a || b` 会被切成 `a ` / `` / ` b`,段结构失真。
-    for sep in ["||", "&&", "|", ";"] {
+    for sep in ["||", "&&", "|", ";", "\n"] {
         segments = segments.into_iter().flat_map(|s| s.split(sep)).collect();
     }
+    // 单个 & 是后台执行符;重定向操作符中的 & 不应切开,否则
+    // `ls 2>&1` 会多出伪命令 `1`,破坏安全分类与权限规则匹配。
     segments
+        .into_iter()
+        .flat_map(|segment| {
+            let bytes = segment.as_bytes();
+            let mut out = Vec::new();
+            let mut start = 0;
+            for (i, byte) in bytes.iter().enumerate() {
+                if *byte == b'&'
+                    && (i == 0 || !matches!(bytes[i - 1], b'>' | b'<'))
+                    && bytes.get(i + 1) != Some(&b'>')
+                {
+                    out.push(&segment[start..i]);
+                    start = i + 1;
+                }
+            }
+            out.push(&segment[start..]);
+            out
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -202,6 +222,32 @@ mod tests {
     fn splits_double_pipe_before_single() {
         let segs = split_shell_segments("a || b");
         assert_eq!(segs.len(), 2, "a || b 应切为 2 段,得到 {segs:?}");
+    }
+
+    /// 后台执行符和换行同样可以启动附加命令,必须独立检查。
+    #[test]
+    fn splits_background_and_newline_commands() {
+        assert_eq!(
+            split_shell_segments("git status & echo changed"),
+            vec!["git status ", " echo changed"]
+        );
+        assert_eq!(
+            split_shell_segments("git status\necho changed"),
+            vec!["git status", "echo changed"]
+        );
+        assert_eq!(split_shell_segments("a && b"), vec!["a ", " b"]);
+    }
+
+    /// 文件描述符复制和合并重定向中的 & 不能被当成后台命令分隔符。
+    #[test]
+    fn keeps_redirect_ampersands_in_their_segment() {
+        for command in ["ls 2>&1", "cat <&0", "echo hi &>log", "echo hi &>>log"] {
+            assert_eq!(split_shell_segments(command), vec![command]);
+        }
+        assert_eq!(
+            split_shell_segments("ls 2>&1 & touch marker"),
+            vec!["ls 2>&1 ", " touch marker"]
+        );
     }
 
     #[test]

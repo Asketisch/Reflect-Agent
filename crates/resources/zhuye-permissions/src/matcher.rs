@@ -349,4 +349,26 @@ mod tests {
             "Allow 规则必须全覆盖所有段,否则附加命令可搭便车"
         );
     }
+    /// 换行和后台符不能让附加命令绕过放行或拒绝规则。
+    #[test]
+    fn shell_rules_cover_newline_and_background_segments() {
+        for cmd in ["git status\nrm -rf /tmp/x", "git status & rm -rf /tmp/x"] {
+            assert_eq!(
+                evaluate_with_context(
+                    &[shell_rule("git *", PermissionAction::Allow)],
+                    "bash",
+                    Some(cmd)
+                ),
+                RuleMatch::NoMatch
+            );
+            assert_eq!(
+                evaluate_with_context(
+                    &[shell_rule("rm -rf *", PermissionAction::Deny)],
+                    "bash",
+                    Some(cmd)
+                ),
+                RuleMatch::Deny
+            );
+        }
+    }
 }

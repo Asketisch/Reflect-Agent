@@ -24,7 +24,7 @@ examples_e2e() {
     export ZHUYE_MODEL=mock
     export OPENAI_API_KEY="${OPENAI_API_KEY:-e2e-dummy-key}"
 
-    # examples 需先构建(存在即跳过)。
+    # examples 需先构建;逐一检查,避免部分缓存存在时漏掉 discussion_demo 等产物。
     #
     # 必须在 **仓库根** 执行:rustup 选 toolchain 的顺序是
     # `+toolchain` 参数 → RUSTUP_TOOLCHAIN 环境变量 → 当前目录及祖先
@@ -33,9 +33,16 @@ examples_e2e() {
     # CI runner(GHA ubuntu)也没配默认 toolchain → cargo 直接报
     # "rustup could not choose a version of cargo to run"。
     # 回到仓库根构建,rust-toolchain.toml 生效。
-    if [ ! -x "$EX_BIN_DIR/headless_run" ]; then
-        (cd "$ROOT" && cargo build --release -p zhuye --examples --quiet)
-    fi
+    local example
+    for example in headless_run custom_tool multi_turn custom_provider hook_listener discussion_demo; do
+        if [ ! -x "$EX_BIN_DIR/$example" ]; then
+            if ! (cd "$ROOT" && cargo build --release -p zhuye --examples --quiet); then
+                tcase "examples 构建成功" false
+                return 1
+            fi
+            break
+        fi
+    done
 
     # headless_run 需要 prompt 参数
     "$EX_BIN_DIR/headless_run" "e2e prompt" > ex1.out 2>ex1.err

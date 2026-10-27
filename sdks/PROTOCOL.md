@@ -120,7 +120,7 @@ hook 会在宿主 cwd 执行 `cargo test` 并否决 turn 完成,对嵌入方既�
 
 ## 4. 并发与顺序
 
-- 允许上一个 turn 未结束就提交下一个 submission;core 侧串行排队,各
+- 允许上一个 turn 未结束就提交下一个 submission;core 侧并发执行,各
   submission 的事件以各自 `id` 路由,互不干扰。
 - 所有事件经单一 writer task 串行写 stdout,**全局顺序有保证**。
 - `interrupt` 会打断当前 turn(该 turn 以 `turn_aborted` 收尾)。

@@ -36,6 +36,8 @@ console.log(JSON.stringify({
 }));
 const readline = require('node:readline');
 const rl = readline.createInterface({ input: process.stdin });
+// 未收到 shutdown 就关闭 stdin 属于异常退出,用于验证客户端关闭流程。
+rl.on('close', () => process.exit(23));
 rl.on('line', (line) => {
   let sub;
   try { sub = JSON.parse(line); } catch { return; }
@@ -82,13 +84,16 @@ rl.on('line', (line) => {
         type: 'tool_call_args_delta', call_id: 'c1', delta: '{"text":"pi',
       },
     }));
+    console.log(JSON.stringify({
+      id: sub.id, msg: { type: 'tool_call_output_delta', call_id: 'c1', delta: 'preview', is_stderr: true },
+    }));
     // 未知变体:SDK 不得因不认识而抛错(按未知 type 降级)。
     console.log(JSON.stringify({
       id: sub.id, msg: { type: 'some_future_event', payload: { x: 1 } },
     }));
     console.log(JSON.stringify({
       id: sub.id, msg: {
-        type: 'turn_complete', turn_id: 't', status: 'ok',
+        type: 'turn_complete', turn_id: 't', status: 'success',
         usage: { input_tokens: 0, output_tokens: 1 },
       },
     }));
@@ -113,7 +118,7 @@ def _spawn_mock() -> subprocess.Popen:
 def agent() -> ZhuyeAgent:
     proc = _spawn_mock()
     try:
-        ag = ZhuyeAgent.from_popen(proc, handshake_timeout_secs=5.0)
+        ag = ZhuyeAgent.from_popen(proc, handshake_timeout_secs=30.0)
     except Exception:
         proc.kill()
         raise
@@ -149,9 +154,13 @@ def test_register_tool_then_submit_iterates_turn_events(agent: ZhuyeAgent) -> No
 
 
 def test_close_sends_shutdown(agent: ZhuyeAgent) -> None:
-    # close 内部向 mock 发 shutdown,应不抛错。
+    # mock 在收到 shutdown 时退出 0,只收到 EOF 时退出 23。
+    agent.close()
     agent.close()
     assert agent._closed is True
+    assert agent._proc.returncode == 0
+    with pytest.raises(RuntimeError, match="agent is closed"):
+        agent.submit("closed")
 
 
 def test_tool_execution_response_handled(agent: ZhuyeAgent) -> None:
@@ -189,7 +198,7 @@ def test_tool_execution_response_handled(agent: ZhuyeAgent) -> None:
     echo: dict[str, Any] | None = None
     while time.monotonic() < deadline:
         try:
-            ev = agent._global_queue.get(timeout=0.1)
+            ev = agent.next_global_event(timeout_secs=0.1)
         except queue.Empty:
             continue
         if ev is not None and ev.get("msg", {}).get("type") == "tool_echo":
@@ -246,3 +255,47 @@ def test_tool_output_wire_format() -> None:
     assert "elapsed_ms" in enc
     assert "isError" not in enc
     assert "elapsedMs" not in enc
+
+def test_optional_fields_preserve_required_keys() -> None:
+    """零依赖类型声明保留必填与可选字段,不依赖 Python 3.11 的 NotRequired。"""
+    from zhuye import protocol
+
+    assert protocol.UserInputOp.__required_keys__ == {"type", "items"}
+    assert protocol.UserInputOp.__optional_keys__ == {"thread_settings"}
+    assert protocol.Submission.__required_keys__ == {"id", "op"}
+    assert protocol.Submission.__optional_keys__ == {"client_user_message_id"}
+    assert protocol.ThreadSettings.__required_keys__ == set()
+    assert protocol.ThreadSettings.__optional_keys__ == {"effort", "permission_mode", "model"}
+    assert protocol.ErrorEvent.__required_keys__ == {"type", "code", "message"}
+    assert protocol.ErrorEvent.__optional_keys__ == {"details"}
+
+
+def test_global_events_and_eof(agent: ZhuyeAgent) -> None:
+    """全局事件有公开读取口,EOF 后重复读取也不会挂起。"""
+    event = agent.next_global_event(timeout_secs=1)
+    assert event["msg"]["type"] == "session_configured"
+    with pytest.raises(queue.Empty):
+        agent.next_global_event(timeout_secs=0.01)
+    agent.close()
+    assert agent.next_global_event(timeout_secs=1) is None
+    assert agent.next_global_event(timeout_secs=0.01) is None
+
+
+def test_tool_output_delta_forwarded(agent: ZhuyeAgent) -> None:
+    """输出增量经过 SDK 路由后保持字段与顺序。"""
+    messages = [e["msg"] for e in agent.submit("hi")]
+    delta = next(m for m in messages if m["type"] == "tool_call_output_delta")
+    assert delta == {"type": "tool_call_output_delta", "call_id": "c1", "delta": "preview", "is_stderr": True}
+    assert messages[-1]["type"] == "turn_complete"
+
+
+@pytest.mark.skipif(sys.version_info < (3, 10), reason="联合类型求值需要受支持的 Python 版本")
+def test_wire_type_annotations() -> None:
+    """公开注解必须描述 Rust 实际发送与接收的 wire 值。"""
+    from typing import get_args, get_type_hints
+    from zhuye import protocol
+
+    assert set(get_args(get_type_hints(protocol.TurnComplete)["status"])) == {"success", "max_iterations", "stopped", "token_budget_exceeded"}
+    assert set(get_args(get_type_hints(protocol.PlanApprovalOp)["choice"])) == {"auto_mode", "manual_approve", "revise"}
+    assert get_type_hints(protocol.TurnAborted)["reason"] == protocol.AbortReason
+    assert protocol.ReviewDecisionDeny.__required_keys__ == {"deny"}

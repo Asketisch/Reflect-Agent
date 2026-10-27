@@ -12,9 +12,9 @@
 //! - 收到 `shutdown` op → 发 shutdown_complete 后退出。
 
 import { spawn, ChildProcessWithoutNullStreams } from 'node:child_process';
-import { Readable, Writable } from 'node:stream';
+import { Readable, Writable, PassThrough } from 'node:stream';
 
-import { describe, expect, it, beforeEach, afterEach } from 'vitest';
+import { describe, expect, it, beforeEach, afterEach, expectTypeOf } from 'vitest';
 
 import {
   EVENT_ID_NONE,
@@ -22,6 +22,16 @@ import {
   EventMsg,
   ZhuyeAgent,
 } from '../src/index.js';
+
+import type { TurnComplete, AbortReason, PlanApprovalChoice, ReviewDecision, ToolCallOutputDelta } from '../src/index.js';
+
+it('公开类型与 Rust wire 值一致', () => {
+  expectTypeOf<TurnComplete['status']>().toEqualTypeOf<'success' | 'max_iterations' | 'stopped' | 'token_budget_exceeded'>();
+  expectTypeOf<AbortReason>().toEqualTypeOf<{ type: 'user_interrupt' } | { type: 'shutdown' } | { type: 'error'; code: string; message: string }>();
+  expectTypeOf<PlanApprovalChoice>().toEqualTypeOf<'auto_mode' | 'manual_approve' | 'revise'>();
+  expectTypeOf<ReviewDecision>().toEqualTypeOf<'approve' | 'approve_for_session' | { deny: { reason: string } }>();
+  expectTypeOf<ToolCallOutputDelta>().toEqualTypeOf<{ type: 'tool_call_output_delta'; call_id: string; delta: string; is_stderr: boolean }>();
+});
 
 /**
  * spawn 一个本地 Node "mock serve" 子进程:读 stdin JSONL、写 stdout JSONL。
@@ -82,8 +92,11 @@ function spawnMockServe(): ChildProcessWithoutNullStreams {
           },
         }) + '\\n');
         process.stdout.write(JSON.stringify({
+          id: sub.id, msg: { type: 'tool_call_output_delta', call_id: 'c1', delta: 'preview', is_stderr: true },
+        }) + '\\n');
+        process.stdout.write(JSON.stringify({
           id: sub.id, msg: {
-            type: 'turn_complete', turn_id: 't', status: 'ok',
+            type: 'turn_complete', turn_id: 't', status: 'success',
             usage: { input_tokens: 0, output_tokens: 1 },
           },
         }) + '\\n');
@@ -144,34 +157,31 @@ describe('ZhuyeAgent 协议回路(mock serve 驱动)', () => {
   }, 10_000);
 
   it('UnknownEventMsg 降级不抛错', async () => {
-    // mock serve 默认只回已知事件;此处通过 fromStdio 直接灌一个
-    // 未知 type 验证 SDK 不抛。
-    const customAgent = await ZhuyeAgent.fromStdio(
-      child.stdin as Writable,
-      child.stdout as Readable,
-      2000,
-    );
-    // 触发协议握手,然后再灌未知事件。
-    (child.stdout as Readable).push(
-      JSON.stringify({
-        id: EVENT_ID_NONE,
-        msg: {
-          type: 'session_configured',
-          session_id: 's',
-          model: 'mock/mock-1',
-          provider: 'mock',
-          approval_policy: 'auto',
-          sandbox_policy: 'workspace_only',
-        },
-      } as Event) + '\n',
-    );
-    await new Promise((r) => setTimeout(r, 20));
-    (child.stdout as Readable).push(
-      JSON.stringify({ id: '', msg: { type: 'telemetry_event', payload: { x: 1 } } }) + '\n',
-    );
-    // 不报错即通过。
-    expect(true).toBe(true);
-    await customAgent.close().catch(() => {});
+    // 每个 SDK 实例独占输入输出流,避免两个消费者争抢同一子进程的握手。
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const customAgent = await ZhuyeAgent.fromStdio(stdin, stdout, 5000);
+    try {
+      stdout.write(JSON.stringify({ id: '', msg: {
+        type: 'session_configured', session_id: 's', model: 'mock/mock-1',
+        provider: 'mock', approval_policy: 'auto', sandbox_policy: 'workspace_only',
+      } }) + '\n');
+      const stream = await customAgent.submit(
+        { type: 'user_input', items: [{ type: 'text', text: 'probe' }] },
+        { submissionId: 'unknown-probe' },
+      );
+      stdout.write(JSON.stringify({ id: 'unknown-probe', msg: { type: 'telemetry_event', payload: { x: 1 } } }) + '\n');
+      stdout.write(JSON.stringify({ id: 'unknown-probe', msg: {
+        type: 'turn_complete', turn_id: 't', status: 'success', usage: {},
+      } }) + '\n');
+      const events: Event[] = [];
+      for await (const event of stream) events.push(event);
+      expect(events[0].msg).toEqual({ type: 'telemetry_event', payload: { x: 1 } });
+      expect(events.at(-1)?.msg.type).toBe('turn_complete');
+    } finally {
+      await customAgent.close();
+      stdout.end();
+    }
   }, 10_000);
 
   it('tool_call_args_delta 透传到 turn 事件流(additive 变体)', async () => {
@@ -189,6 +199,15 @@ describe('ZhuyeAgent 协议回路(mock serve 驱动)', () => {
       call_id: 'c1',
       delta: '{"text":"pi',
     });
+  }, 10_000);
+
+  it('工具输出增量字段透传', async () => {
+    const events: EventMsg[] = [];
+    for await (const ev of await agent.submit('foo')) events.push(ev.msg);
+    expect(events.find((e) => e.type === 'tool_call_output_delta')).toEqual({
+      type: 'tool_call_output_delta', call_id: 'c1', delta: 'preview', is_stderr: true,
+    });
+    expect(events.at(-1)?.type).toBe('turn_complete');
   }, 10_000);
 
   it('未知事件变体降级不崩', async () => {

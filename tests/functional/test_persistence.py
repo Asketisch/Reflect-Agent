@@ -6,7 +6,8 @@
 - P1 rollout 记录集(session_meta 首行 + message);
 - P2 权限模式轨迹(from/to/at);
 - P3 rewind 物理截断(记录被丢弃 + `.rewind-<ts>.bak` 备份);
-- P4 会话索引(`zhuye session ls` 能列出该会话)。
+- P4 会话索引(`zhuye session ls` 能列出该会话);
+- P5 旧日期会话通过双 ID、继续与序号入口恢复后续写原文件。
 
 运行:tests/run_all.sh functional,或
   ZHUYE_BIN=... python3 -m pytest tests/functional/test_persistence.py -v
@@ -15,6 +16,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime
 from typing import Any
 
 import pytest
@@ -83,11 +85,13 @@ def test_P2_权限模式轨迹落盘(serve_session, mock_script, sandbox) -> Non
     recs = rollout_records(sandbox.home)
     pmc = [r for r in recs if r.get("type") == "permission_mode_changed"]
     assert pmc, f"无 permission_mode_changed 记录:{[r.get('type') for r in recs]}"
+    assert all(r.get("at") for r in pmc), f"pmc 记录缺 at:{pmc}"
+    # 持久化任务可并发落盘,按每条记录自带的时间戳还原权限轨迹。
+    pmc.sort(key=lambda r: datetime.fromisoformat(r["at"].replace("Z", "+00:00")))
     assert [(r.get("from"), r.get("to")) for r in pmc] == [
         ("auto", "plan"),
         ("plan", "auto"),
     ], f"pmc 轨迹不符:{pmc}"
-    assert all(r.get("at") for r in pmc), f"pmc 记录缺 at:{pmc}"
 
 
 def test_P3_rewind_物理截断并备份(serve_session, mock_script, sandbox) -> None:
@@ -151,3 +155,32 @@ def test_P4_会话索引可列出(serve_session, mock_script, sandbox) -> None:
     assert session_id in proc.stdout, (
         f"session ls 未列出该会话:{session_id!r}\nstdout={proc.stdout!r}"
     )
+
+
+@pytest.mark.parametrize("resume_args", ["thread", "session", "continue", "index"])
+def test_P5_旧日期会话恢复后续写原文件(serve_session, mock_script, sandbox, resume_args) -> None:
+    """任意日期的会话可按双 ID 或序号恢复,新消息写回原活跃文件。"""
+    import json
+    import uuid
+
+    require_binary()
+    thread_id, session_id, turn_id = (str(uuid.uuid4()) for _ in range(3))
+    day = sandbox.home / ".zhuye/sessions/2020/01/02"
+    day.mkdir(parents=True)
+    meta = {"type": "session_meta", "session_id": session_id,
+            "model": "mock", "started_at": "2020-01-02T00:00:00Z"}
+    history = {"type": "message", "turn_id": turn_id, "role": "user", "content": "旧消息"}
+    active = day / f"{thread_id}.jsonl"
+    active.write_text(json.dumps(meta) + "\n" + json.dumps(history) + "\n")
+    args = {"thread": ["--resume", thread_id], "session": ["--resume", session_id],
+            "continue": ["-c"], "index": ["-r", "1"]}[resume_args]
+    script = mock_script(['{"type":"text","text":"continued"}'])
+    with serve_session(args=args, env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
+        events = s.submit({"type": "user_input", "items": [{"type": "text", "text": "新消息"}]}, timeout=DRAIN_TIMEOUT)
+    assert any(e["msg"]["type"] == "turn_complete" for e in events)
+    records = [json.loads(line) for line in active.read_text().splitlines()]
+    assert records[0] == meta
+    assert history in records
+    messages = [r for r in records if r.get("type") == "message"]
+    assert any(r["role"] == "assistant" and "continued" in json.dumps(r["content"]) for r in messages)
+    assert list((sandbox.home / ".zhuye/sessions").glob("*/*/*/*.jsonl")) == [active]

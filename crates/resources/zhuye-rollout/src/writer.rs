@@ -104,7 +104,16 @@ impl JsonlRolloutWriter {
         if g.current_path.is_some() {
             return Ok(());
         }
-        let path = session_path_at(&self.base_dir, self.session_id, chrono::Utc::now());
+        // 恢复旧会话时继续写原日期目录,避免同一会话被拆成多份活跃文件。
+        let path = crate::reader::session_files(&self.base_dir, self.session_id)?
+            .last()
+            .and_then(|path| {
+                let name = path.file_stem()?.to_str()?.split('.').next()?;
+                Some(path.with_file_name(format!("{name}.jsonl")))
+            })
+            .unwrap_or_else(|| {
+                session_path_at(&self.base_dir, self.session_id, chrono::Utc::now())
+            });
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -226,19 +235,7 @@ impl RolloutRecorder for JsonlRolloutWriter {
     }
 
     async fn replay(&self, session_id: ThreadId) -> anyhow::Result<Vec<RolloutRecord>> {
-        let path = if session_id != self.session_id {
-            session_path_at(&self.base_dir, session_id, chrono::Utc::now())
-        } else {
-            let g = self.inner.lock();
-            let Some(path) = g.current_path.clone() else {
-                // 从未写入 —— 返回空。
-                drop(g);
-                return Ok(Vec::new());
-            };
-            drop(g);
-            path
-        };
-        crate::reader::replay_path(&path).await
+        crate::reader::replay(&self.base_dir, session_id).await
     }
 
     async fn list_sessions(&self) -> anyhow::Result<Vec<SessionInfo>> {

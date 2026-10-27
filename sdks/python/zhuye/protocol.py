@@ -8,11 +8,13 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, NotRequired, TypedDict, Union
+from typing import Any, Literal, TypedDict, Union
 
 # ── 常量 ─────────────────────────────────────────────────────────────────
 
 EVENT_ID_NONE = ""
+
+# 可选字段通过 total=False 基类声明,兼容 Python 3.10 且无需 typing_extensions。
 
 # ── Submission / Op ──────────────────────────────────────────────────────
 
@@ -30,44 +32,53 @@ UserInputItem = Union[TextItem, ImageItem]
 
 
 class ThreadSettings(TypedDict, total=False):
-    effort: NotRequired[Literal["low", "medium", "high"] | None]
-    permission_mode: NotRequired[str | None]
-    model: NotRequired[str | None]
+    effort: Literal["low", "medium", "high"] | None
+    permission_mode: str | None
+    model: str | None
 
 
-class UserInputOp(TypedDict):
+class _UserInputOpOptionalFields(TypedDict, total=False):
+    thread_settings: ThreadSettings
+
+
+class UserInputOp(_UserInputOpOptionalFields):
     type: Literal["user_input"]
     items: list[UserInputItem]
-    thread_settings: NotRequired[ThreadSettings]
 
 
 class CompactOp(TypedDict):
     type: Literal["compact"]
 
 
-class InterruptOp(TypedDict):
+class _InterruptOpOptionalFields(TypedDict, total=False):
+    child_id: str | None
+
+
+class InterruptOp(_InterruptOpOptionalFields):
     type: Literal["interrupt"]
-    child_id: NotRequired[str | None]
 
 
-class RewindOp(TypedDict):
+class _RewindOpOptionalFields(TypedDict, total=False):
+    to_turn_id: str | None
+
+
+class RewindOp(_RewindOpOptionalFields):
     type: Literal["rewind"]
-    to_turn_id: NotRequired[str | None]
 
 
 class ShutdownOp(TypedDict):
     type: Literal["shutdown"]
 
 
-class ReviewDecisionApprove(TypedDict):
-    type: Literal["approve"]
-
-
-class ReviewDecisionDeny(TypedDict):
-    type: Literal["deny"]
+class ReviewDecisionDenyReason(TypedDict):
     reason: str
 
 
+class ReviewDecisionDeny(TypedDict):
+    deny: ReviewDecisionDenyReason
+
+
+ReviewDecisionApprove = Literal["approve", "approve_for_session"]
 ReviewDecision = Union[ReviewDecisionApprove, ReviewDecisionDeny]
 
 
@@ -95,7 +106,7 @@ class ExitPlanModeOp(TypedDict):
 class PlanApprovalOp(TypedDict):
     type: Literal["plan_approval"]
     id: str
-    choice: Literal["auto_mode", "prompt_mode", "reject"]
+    choice: Literal["auto_mode", "manual_approve", "revise"]
 
 
 class SetEffortOp(TypedDict):
@@ -105,7 +116,7 @@ class SetEffortOp(TypedDict):
 
 class Answer(TypedDict, total=False):
     selected: list[int]
-    custom: NotRequired[str | None]
+    custom: str | None
 
 
 class AskUserAnswer(TypedDict):
@@ -133,11 +144,14 @@ class CyclePermissionModeOp(TypedDict):
     type: Literal["cycle_permission_mode"]
 
 
-class EnterGoalModeOp(TypedDict):
+class _EnterGoalModeOpOptionalFields(TypedDict, total=False):
+    verify_command: str | None
+    token_budget: int | None
+
+
+class EnterGoalModeOp(_EnterGoalModeOpOptionalFields):
     type: Literal["enter_goal_mode"]
     goal: str
-    verify_command: NotRequired[str | None]
-    token_budget: NotRequired[int | None]
 
 
 class ExitGoalModeOp(TypedDict):
@@ -188,10 +202,13 @@ Op = Union[
 ]
 
 
-class Submission(TypedDict):
+class _SubmissionOptionalFields(TypedDict, total=False):
+    client_user_message_id: str
+
+
+class Submission(_SubmissionOptionalFields):
     id: str
     op: dict[str, Any]  # 宽化为 dict 便于 unknown op 透传
-    client_user_message_id: NotRequired[str]
 
 
 # ── EventMsg ──────────────────────────────────────────────────────────────
@@ -205,18 +222,21 @@ class ContentBlock(TypedDict):
 class TokenUsage(TypedDict, total=False):
     input_tokens: int
     output_tokens: int
-    cached_tokens: NotRequired[int]
-    cache_write_tokens: NotRequired[int]
+    cached_tokens: int
+    cache_write_tokens: int
 
 
-class SessionConfigured(TypedDict):
+class _SessionConfiguredOptionalFields(TypedDict, total=False):
+    context_window_size: int | None
+
+
+class SessionConfigured(_SessionConfiguredOptionalFields):
     type: Literal["session_configured"]
     session_id: str
     model: str
     provider: str
     approval_policy: Literal["auto", "prompt"]
     sandbox_policy: Literal["workspace_only", "full_access"]
-    context_window_size: NotRequired[int | None]
 
 
 class TurnStarted(TypedDict):
@@ -228,14 +248,27 @@ class TurnStarted(TypedDict):
 class TurnComplete(TypedDict):
     type: Literal["turn_complete"]
     turn_id: str
-    status: Literal["ok", "cancelled", "aborted", "error"]
+    status: Literal["success", "max_iterations", "stopped", "token_budget_exceeded"]
     usage: TokenUsage
+
+
+class AbortReasonSimple(TypedDict):
+    type: Literal["user_interrupt", "shutdown"]
+
+
+class AbortReasonError(TypedDict):
+    type: Literal["error"]
+    code: str
+    message: str
+
+
+AbortReason = Union[AbortReasonSimple, AbortReasonError]
 
 
 class TurnAborted(TypedDict):
     type: Literal["turn_aborted"]
     turn_id: str
-    reason: str
+    reason: AbortReason
 
 
 class TurnRewound(TypedDict):
@@ -267,19 +300,22 @@ class TokenCount(TypedDict, total=False):
     type: Literal["token_count"]
     input_tokens: int
     output_tokens: int
-    cached_tokens: NotRequired[int]
-    cache_write_tokens: NotRequired[int]
-    total_tokens: NotRequired[int]
-    provider: NotRequired[str]
-    credential_label: NotRequired[str]
+    cached_tokens: int
+    cache_write_tokens: int
+    total_tokens: int
+    provider: str
+    credential_label: str
 
 
-class ToolCallBegin(TypedDict):
+class _ToolCallBeginOptionalFields(TypedDict, total=False):
+    child_id: str | None
+
+
+class ToolCallBegin(_ToolCallBeginOptionalFields):
     type: Literal["tool_call_begin"]
     call_id: str
     tool_name: str
     args: dict[str, Any]
-    child_id: NotRequired[str | None]
 
 
 class ToolCallArgsDelta(TypedDict):
@@ -295,13 +331,25 @@ class ToolCallArgsDelta(TypedDict):
     delta: str
 
 
-class ToolCallEnd(TypedDict):
+class ToolCallOutputDelta(TypedDict):
+    """工具执行期间的输出预览,最终结果以 tool_call_end 为准。"""
+
+    type: Literal["tool_call_output_delta"]
+    call_id: str
+    delta: str
+    is_stderr: bool
+
+
+class _ToolCallEndOptionalFields(TypedDict, total=False):
+    child_id: str | None
+
+
+class ToolCallEnd(_ToolCallEndOptionalFields):
     type: Literal["tool_call_end"]
     call_id: str
     output: dict[str, Any]
     is_error: bool
     elapsed_ms: int
-    child_id: NotRequired[str | None]
 
 
 class ToolExecutionRequest(TypedDict):
@@ -338,14 +386,14 @@ class ApprovalRequest(TypedDict):
 class QuestionOption(TypedDict, total=False):
     label: str
     description: str
-    preview: NotRequired[str]
+    preview: str
 
 
 class Question(TypedDict, total=False):
     header: str
     question: str
     options: list[QuestionOption]
-    multi_select: NotRequired[bool]
+    multi_select: bool
 
 
 class AskUserQuestion(TypedDict):
@@ -354,33 +402,45 @@ class AskUserQuestion(TypedDict):
     questions: list[Question]
 
 
-class AskUserInput(TypedDict):
+class _AskUserInputOptionalFields(TypedDict, total=False):
+    secret: bool
+    placeholder: str | None
+
+
+class AskUserInput(_AskUserInputOptionalFields):
     type: Literal["ask_user"]
     request_id: str
     prompt: str
-    secret: NotRequired[bool]
-    placeholder: NotRequired[str | None]
 
 
-class PermissionBubble(TypedDict):
+class _PermissionBubbleOptionalFields(TypedDict, total=False):
+    args_preview: str | None
+
+
+class PermissionBubble(_PermissionBubbleOptionalFields):
     type: Literal["permission_bubble"]
     tool_name: str
-    args_preview: NotRequired[str | None]
     risk: Literal["low", "medium", "high"]
 
 
-class ContextCompacted(TypedDict):
+class _ContextCompactedOptionalFields(TypedDict, total=False):
+    before_tokens: int
+    after_tokens: int
+
+
+class ContextCompacted(_ContextCompactedOptionalFields):
     type: Literal["context_compacted"]
     strategy: Literal["truncate", "summarize"]
-    before_tokens: NotRequired[int]
-    after_tokens: NotRequired[int]
 
 
-class ErrorEvent(TypedDict):
+class _ErrorEventOptionalFields(TypedDict, total=False):
+    details: dict[str, Any]
+
+
+class ErrorEvent(_ErrorEventOptionalFields):
     type: Literal["error"]
     code: str
     message: str
-    details: NotRequired[dict[str, Any]]
 
 
 class StreamError(TypedDict):
@@ -390,9 +450,12 @@ class StreamError(TypedDict):
     retry_in_ms: int
 
 
-class ConfigReloaded(TypedDict):
+class _ConfigReloadedOptionalFields(TypedDict, total=False):
+    sections_changed: list[str]
+
+
+class ConfigReloaded(_ConfigReloadedOptionalFields):
     type: Literal["config_reloaded"]
-    sections_changed: NotRequired[list[str]]
 
 
 class CollabStarted(TypedDict):
@@ -401,26 +464,35 @@ class CollabStarted(TypedDict):
     topic: str
 
 
-class CollabMessage(TypedDict):
+class _CollabMessageOptionalFields(TypedDict, total=False):
+    token_usage: TokenUsage
+
+
+class CollabMessage(_CollabMessageOptionalFields):
     type: Literal["collab_message"]
     discussion_id: str
     participant: str
     text: str
-    token_usage: NotRequired[TokenUsage]
 
 
-class CollabFinished(TypedDict):
+class _CollabFinishedOptionalFields(TypedDict, total=False):
+    result: str | None
+
+
+class CollabFinished(_CollabFinishedOptionalFields):
     type: Literal["collab_finished"]
     discussion_id: str
-    result: NotRequired[str | None]
 
 
-class McpServerStarted(TypedDict):
+class _McpServerStartedOptionalFields(TypedDict, total=False):
+    tool_names: list[str]
+    transport: str
+
+
+class McpServerStarted(_McpServerStartedOptionalFields):
     type: Literal["mcp_server_started"]
     server: str
     tool_count: int
-    tool_names: NotRequired[list[str]]
-    transport: NotRequired[str]
 
 
 class McpServerFailed(TypedDict):
@@ -465,13 +537,16 @@ class PlanReady(TypedDict):
 class PlanApproved(TypedDict):
     type: Literal["plan_approved"]
     plan_id: str
-    choice: Literal["auto_mode", "prompt_mode", "reject"]
+    choice: Literal["auto_mode", "manual_approve", "revise"]
 
 
-class PlanRejected(TypedDict):
+class _PlanRejectedOptionalFields(TypedDict, total=False):
+    reason: str | None
+
+
+class PlanRejected(_PlanRejectedOptionalFields):
     type: Literal["plan_rejected"]
     plan_id: str
-    reason: NotRequired[str | None]
 
 
 class PermissionModeChanged(TypedDict):
@@ -502,17 +577,23 @@ class PluginLoaded(TypedDict):
     command_count: int
 
 
-class QuotaExhausted(TypedDict):
+class _QuotaExhaustedOptionalFields(TypedDict, total=False):
+    cooldown_until: str | None
+
+
+class QuotaExhausted(_QuotaExhaustedOptionalFields):
     type: Literal["quota_exhausted"]
     credential: str
-    cooldown_until: NotRequired[str | None]
 
 
-class Routing(TypedDict):
+class _RoutingOptionalFields(TypedDict, total=False):
+    detail: str
+
+
+class Routing(_RoutingOptionalFields):
     type: Literal["routing"]
     role: str
     kind: str
-    detail: NotRequired[str]
 
 
 class UnknownEventMsg(TypedDict):
@@ -534,6 +615,7 @@ EventMsg = Union[
     TokenCount,
     ToolCallBegin,
     ToolCallArgsDelta,
+    ToolCallOutputDelta,
     ToolCallEnd,
     ToolExecutionRequest,
     ApprovalRequest,

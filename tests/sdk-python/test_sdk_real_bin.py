@@ -233,3 +233,18 @@ def test_K8_handler抛异常_转错误回执(env_home: Path) -> None:
         assert "turn_complete" in msg_types(evs), f"turn 未收尾:{msg_types(evs)}"
     finally:
         agent.close()
+
+
+def test_K9_全局事件公开读取口(env_home: Path) -> None:
+    """全局事件通过公开 API 读取,不会混入 submission 的事件迭代器。"""
+    agent = ZhuyeAgent.spawn(make_options())
+    try:
+        handshake = agent.next_global_event(timeout_secs=5)
+        assert handshake["id"] == ""
+        assert handshake["msg"]["type"] == "session_configured"
+        drain(agent.submit_op({"type": "set_permission_mode", "mode": "plan"}))
+        event = agent.next_global_event(timeout_secs=5)
+        assert event["id"] == ""
+        assert event["msg"]["type"] == "permission_mode_changed"
+    finally:
+        agent.close()
