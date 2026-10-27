@@ -1,6 +1,6 @@
-"""reflect-agent Python SDK 测试:用本地 Node "mock serve" 驱动协议。
+"""zhuye-agent Python SDK 测试:用本地 Node "mock serve" 驱动协议。
 
-不依赖真 `reflect` 二进制 —— mock 子进程用 Node 简单回显 JSONL,
+不依赖真 `zhuye` 二进制 —— mock 子进程用 Node 简单回显 JSONL,
 覆盖 SDK 的协议回路(handshake / submit / prompt / register_tool /
 shutdown)。
 """
@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from reflect import ReflectAgent, ToolOutput, ContentBlock
+from zhuye import ZhuyeAgent, ToolOutput, ContentBlock
 
 
 MOCK_SERVE_JS = r"""
@@ -110,10 +110,10 @@ def _spawn_mock() -> subprocess.Popen:
 
 
 @pytest.fixture
-def agent() -> ReflectAgent:
+def agent() -> ZhuyeAgent:
     proc = _spawn_mock()
     try:
-        ag = ReflectAgent.from_popen(proc, handshake_timeout_secs=5.0)
+        ag = ZhuyeAgent.from_popen(proc, handshake_timeout_secs=5.0)
     except Exception:
         proc.kill()
         raise
@@ -122,11 +122,11 @@ def agent() -> ReflectAgent:
         ag.close()
 
 
-def test_prompt_aggregates_deltas(agent: ReflectAgent) -> None:
+def test_prompt_aggregates_deltas(agent: ZhuyeAgent) -> None:
     assert agent.prompt("hi") == "mock-reply"
 
 
-def test_register_tool_then_submit_iterates_turn_events(agent: ReflectAgent) -> None:
+def test_register_tool_then_submit_iterates_turn_events(agent: ZhuyeAgent) -> None:
     calls = []
 
     def handler(args):
@@ -148,13 +148,13 @@ def test_register_tool_then_submit_iterates_turn_events(agent: ReflectAgent) -> 
     assert calls == []
 
 
-def test_close_sends_shutdown(agent: ReflectAgent) -> None:
+def test_close_sends_shutdown(agent: ZhuyeAgent) -> None:
     # close 内部向 mock 发 shutdown,应不抛错。
     agent.close()
     assert agent._closed is True
 
 
-def test_tool_execution_response_handled(agent: ReflectAgent) -> None:
+def test_tool_execution_response_handled(agent: ZhuyeAgent) -> None:
     """喂一个全局(id="")的 tool_execution_request:SDK 应在 reader 线程外
     调本地 handler 并写回正确回执(与真实 serve 的 wire 行为一致,
     见 PROTOCOL.md §5)。mock 把回执以全局 `tool_echo` 事件回显供断言。
@@ -202,7 +202,7 @@ def test_tool_execution_response_handled(agent: ReflectAgent) -> None:
     assert received == {"q": "hi"}
 
 
-def test_tool_call_args_delta_透传到事件流(agent: ReflectAgent) -> None:
+def test_tool_call_args_delta_透传到事件流(agent: ZhuyeAgent) -> None:
     """v1.5:additive 变体 `tool_call_args_delta` 应原样出现在 turn 事件流里。
 
     协议变更是 additive 也必须同步 SDK —— 客户端要能拿到工具参数增量做
@@ -216,7 +216,7 @@ def test_tool_call_args_delta_透传到事件流(agent: ReflectAgent) -> None:
     assert d["delta"] == '{"text":"pi', f"delta 不对:{d}"
 
 
-def test_未知事件变体降级不崩(agent: ReflectAgent) -> None:
+def test_未知事件变体降级不崩(agent: ZhuyeAgent) -> None:
     """协议新增变体时,SDK 不得因不认识而抛错(按未知 type 降级)。"""
     events = list(agent.submit("hi"))
     types = [ev["msg"]["type"] for ev in events]

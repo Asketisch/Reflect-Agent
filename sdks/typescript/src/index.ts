@@ -1,8 +1,8 @@
-//! `reflect-agent` —— TS SDK 公共入口。
+//! `zhuye-agent` —— TS SDK 公共入口。
 
 export * from './protocol.js';
 export {
-  ReflectAgent,
+  ZhuyeAgent,
   ToolHandler,
-  ReflectAgentOptions,
+  ZhuyeAgentOptions,
 } from './agent.js';

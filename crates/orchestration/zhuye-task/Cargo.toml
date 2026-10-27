@@ -1,0 +1,29 @@
+[package]
+name = "zhuye-task"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ZhuYe: 结构化任务与团队管理 (TaskCreate/Get/Update/List/Stop/Output + TeamCreate/Delete + TodoWrite + Coordinator)"
+
+[dependencies]
+zhuye-protocol = { workspace = true }
+zhuye-hooks    = { workspace = true }
+zhuye-tools    = { workspace = true }
+zhuye-subagent = { workspace = true }
+zhuye-config   = { workspace = true }
+zhuye-prompt   = { workspace = true }
+async-trait        = { workspace = true }
+parking_lot        = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+thiserror          = { workspace = true }
+tokio              = { workspace = true }
+tokio-util         = { workspace = true }
+tracing            = { workspace = true }
+
+[dev-dependencies]
+zhuye-llm       = { workspace = true }
+zhuye-tools     = { workspace = true }
+parking_lot       = { workspace = true }
+tempfile = "3"
+tokio     = { workspace = true, features = ["macros", "rt-multi-thread", "time", "fs"] }

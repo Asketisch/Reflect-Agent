@@ -175,7 +175,7 @@ cmd_tag() {
     read -r -p "确认推送?输入 yes 继续:" ans
     [ "$ans" = "yes" ] || die "已取消。"
   fi
-  git -C "$ROOT" tag -a "v$ver" -m "reflect v$ver(CLI + Python/TS SDK 统一版本)"
+  git -C "$ROOT" tag -a "v$ver" -m "zhuye v$ver(CLI + Python/TS SDK 统一版本)"
   git -C "$ROOT" push origin "v$ver"
   echo "tag v$ver 已推送,发布流水线已触发(可在 Actions 页查看进度)。"
 }

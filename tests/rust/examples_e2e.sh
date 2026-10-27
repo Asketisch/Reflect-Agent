@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# tests/rust/examples_e2e.sh —— 库门面(reflect crate)examples 冒烟。
+# tests/rust/examples_e2e.sh —— 库门面(zhuye crate)examples 冒烟。
 #
-# 全部以 REFLECT_MODEL=mock 离线运行,断言退出码 0 + 关键输出:
+# 全部以 ZHUYE_MODEL=mock 离线运行,断言退出码 0 + 关键输出:
 #   headless_run     —— 最小单轮(headless 入门)
 #   custom_tool      —— 自定义工具注册
 #   multi_turn       —— 多轮对话
@@ -19,9 +19,9 @@ examples_e2e() {
     make_isolated_env
     trap cleanup_isolated_env RETURN
     # examples 走与 exec 相同的 env 兜底:mock provider 离线注册;
-    # 部分 example 自带「必须显式给 key」的前置检查(不认 REFLECT_MODEL),
+    # 部分 example 自带「必须显式给 key」的前置检查(不认 ZHUYE_MODEL),
     # 补一个 dummy OPENAI_API_KEY 让 precheck 通过,实际仍走 mock。
-    export REFLECT_MODEL=mock
+    export ZHUYE_MODEL=mock
     export OPENAI_API_KEY="${OPENAI_API_KEY:-e2e-dummy-key}"
 
     # examples 需先构建(存在即跳过)。
@@ -34,7 +34,7 @@ examples_e2e() {
     # "rustup could not choose a version of cargo to run"。
     # 回到仓库根构建,rust-toolchain.toml 生效。
     if [ ! -x "$EX_BIN_DIR/headless_run" ]; then
-        (cd "$ROOT" && cargo build --release -p reflect --examples --quiet)
+        (cd "$ROOT" && cargo build --release -p zhuye --examples --quiet)
     fi
 
     # headless_run 需要 prompt 参数

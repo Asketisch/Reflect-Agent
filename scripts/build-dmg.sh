@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
 # ── scripts/build-dmg.sh ──────────────────────────────────────────────
-# 把 `reflect` CLI 打包成 macOS DMG 安装镜像,用于全局安装后使用。
+# 把 `zhuye` CLI 打包成 macOS DMG 安装镜像,用于全局安装后使用。
 #
 # DMG 打开后的画面(Finder 图标视图):
 #
 #   ┌───────────────────────────────────────┐
-#   │  Reflect <version>                    │
+#   │  ZhuYe <version>                    │
 #   │                                       │
 #   │   ┌─────────────┐   ┌─────────────┐  │
-#   │   │  reflect    │   │ Applications │  │  ← 拖入即装
+#   │   │  zhuye    │   │ Applications │  │  ← 拖入即装
 #   │   └─────────────┘   └─────────────┘  │
 #   │                                       │
 #   │   install.sh   uninstall.sh   README  │  ← 命令行安装脚本
 #   └───────────────────────────────────────┘
 #
 # 安装方式(任选其一):
-#   1. 图形界面:把 `reflect` 拖到 `Applications`(装到 /Applications/reflect.app)
+#   1. 图形界面:把 `zhuye` 拖到 `Applications`(装到 /Applications/zhuye.app)
 #   2. 命令行(推荐,装到全局 PATH):
-#        sh /Volumes/Reflect\\ <version>/install.sh
-#      → 装到 /usr/local/bin/reflect
+#        sh /Volumes/ZhuYe\\ <version>/install.sh
+#      → 装到 /usr/local/bin/zhuye
 #      → 加 --local 改装到 ~/.local/bin(无需 sudo)
 #
 # 流程(hdiutil 自带,无需 create-dmg 等第三方工具):
@@ -28,9 +28,9 @@
 #   4) detach → hdiutil convert → UDZO 压缩只读镜像(分发格式)
 #
 # 用法:
-#   scripts/build-dmg.sh                 # 用 target/release/reflect
+#   scripts/build-dmg.sh                 # 用 target/release/zhuye
 #   scripts/build-dmg.sh --rebuild       # 先 cargo build --release
-#   scripts/build-dmg.sh --binary <path> # 指定一个预构建的 reflect 二进制
+#   scripts/build-dmg.sh --binary <path> # 指定一个预构建的 zhuye 二进制
 #   scripts/build-dmg.sh --open          # 打包后自动挂载预览
 #
 # ────────────────────────────────────────────────────────────────────────
@@ -40,8 +40,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # 元数据 ──────────────────────────────────────────────────────────────
-APP_NAME="reflect"
-FINAL_VOL_NAME_TEMPLATE="Reflect {}"   # {} 占位 version
+APP_NAME="zhuye"
+FINAL_VOL_NAME_TEMPLATE="ZhuYe {}"   # {} 占位 version
 ARCH="$(uname -m)"
 TARGET_TRIPLE="${ARCH}-apple-darwin"
 
@@ -81,8 +81,8 @@ if [[ -n "${CUSTOM_BINARY}" ]]; then
     SOURCE_BIN="${CUSTOM_BINARY}"
 elif [[ "${DO_REBUILD}" == true ]]; then
     SOURCE_BIN="${REPO_ROOT}/target/release/${APP_NAME}"
-    echo "→ cargo build --release -p reflect-cli ..."
-    (cd "${REPO_ROOT}" && cargo build --release -p reflect-cli)
+    echo "→ cargo build --release -p zhuye-cli ..."
+    (cd "${REPO_ROOT}" && cargo build --release -p zhuye-cli)
 else
     SOURCE_BIN="${REPO_ROOT}/target/release/${APP_NAME}"
 fi
@@ -104,9 +104,9 @@ if [[ -z "${VERSION}" ]]; then
 fi
 
 # 路径 ────────────────────────────────────────────────────────────────
-FINAL_VOL_NAME="Reflect ${VERSION}"
-STAGING_DIR="$(mktemp -d -t reflect-dmg-staging)"
-RW_DMG="$(mktemp -t reflect-rw -u).dmg"
+FINAL_VOL_NAME="ZhuYe ${VERSION}"
+STAGING_DIR="$(mktemp -d -t zhuye-dmg-staging)"
+RW_DMG="$(mktemp -t zhuye-rw -u).dmg"
 DIST_DIR="${REPO_ROOT}/dist"
 DMG_NAME="${APP_NAME}-${VERSION}-${TARGET_TRIPLE}.dmg"
 DMG_PATH="${DIST_DIR}/${DMG_NAME}"
@@ -129,19 +129,19 @@ echo "→ Staging DMG contents at ${STAGING_DIR} ..."
 
 # ── 1. 准备 staging 内容 ────────────────────────────────────────────
 
-# (a) 二进制本体(放最外层,可直接 ./reflect 运行 / 拖入 Applications)
+# (a) 二进制本体(放最外层,可直接 ./zhuye 运行 / 拖入 Applications)
 cp "${SOURCE_BIN}" "${STAGING_DIR}/${APP_NAME}"
 chmod +x "${STAGING_DIR}/${APP_NAME}"
 
 # (b) install.sh:全局安装到 /usr/local/bin(或 ~/.local/bin)
 cat > "${STAGING_DIR}/install.sh" <<'INSTALL_EOF'
 #!/usr/bin/env bash
-# Reflect 全局安装脚本(随 DMG 分发)。
+# ZhuYe 全局安装脚本(随 DMG 分发)。
 # 默认装到 /usr/local/bin(需要 sudo);用 --local 装到 ~/.local/bin(无需 sudo)。
 set -euo pipefail
 
 INSTALL_DIR="/usr/local/bin"
-BIN_NAME="reflect"
+BIN_NAME="zhuye"
 SUDO=""
 
 while [[ $# -gt 0 ]]; do
@@ -189,7 +189,7 @@ if [[ "${INSTALL_DIR}" == "${HOME}/.local/bin" ]]; then
             for rc in "${HOME}/.zshrc" "${HOME}/.bashrc"; do
                 [[ -f "${rc}" ]] || continue
                 if ! grep -q "export PATH=\"${INSTALL_DIR}:\$PATH\"" "${rc}"; then
-                    printf '\n# Added by Reflect installer\nexport PATH="%s:$PATH"\n' "${INSTALL_DIR}" >> "${rc}"
+                    printf '\n# Added by ZhuYe installer\nexport PATH="%s:$PATH"\n' "${INSTALL_DIR}" >> "${rc}"
                     echo "→ Added ${INSTALL_DIR} to PATH in $(basename "${rc}")"
                 fi
             done
@@ -217,9 +217,9 @@ chmod +x "${STAGING_DIR}/install.sh"
 # (c) 卸载脚本(uninstall.sh)
 cat > "${STAGING_DIR}/uninstall.sh" <<'UNINSTALL_EOF'
 #!/usr/bin/env bash
-# 卸载全局安装的 Reflect CLI。
+# 卸载全局安装的 ZhuYe CLI。
 set -euo pipefail
-BIN_NAME="reflect"
+BIN_NAME="zhuye"
 REMOVED=0
 
 for dir in /usr/local/bin "${HOME}/.local/bin"; do
@@ -237,8 +237,8 @@ done
 
 # 顺手提示用户数据目录(默认不删,避免误删配置 / 会话历史)
 echo ""
-echo "Note: user data remains in ~/.reflect/ (config, sessions, plugins)."
-echo "      To wipe it: rm -rf ~/.reflect"
+echo "Note: user data remains in ~/.zhuye/ (config, sessions, plugins)."
+echo "      To wipe it: rm -rf ~/.zhuye"
 [[ "${REMOVED}" == 1 ]] || echo "(nothing to remove in /usr/local/bin or ~/.local/bin)"
 UNINSTALL_EOF
 chmod +x "${STAGING_DIR}/uninstall.sh"
@@ -248,40 +248,40 @@ ln -sf /Applications "${STAGING_DIR}/Applications"
 
 # (e) README.txt — DMG 打开后用户第一眼看到的说明
 cat > "${STAGING_DIR}/README.txt" <<README_EOF
-Reflect ${VERSION}  (${ARCH}-apple-darwin)
+ZhuYe ${VERSION}  (${ARCH}-apple-darwin)
 =========================================================
 
-Reflect 是一个 Rust 编写的 agent 运行时(默认进入 TUI)。
+烛夜是一个 Rust 编写的 agent 运行时(默认进入 TUI)。
 
 【安装】两种方式任选其一:
 
   方式 A(推荐,命令行全局安装):
     打开「终端」,执行:
-      sh /Volumes/Reflect\\ ${VERSION}/install.sh
-    默认装到 /usr/local/bin/reflect(需要 sudo 输密码)。
+      sh /Volumes/ZhuYe\\ ${VERSION}/install.sh
+    默认装到 /usr/local/bin/zhuye(需要 sudo 输密码)。
     想装到不需要 sudo 的位置:
-      sh /Volumes/Reflect\\ ${VERSION}/install.sh --local
+      sh /Volumes/ZhuYe\\ ${VERSION}/install.sh --local
 
   方式 B(图形界面):
-    把 reflect 拖到右侧的 Applications 文件夹。
+    把 zhuye 拖到右侧的 Applications 文件夹。
 
 【验证】安装后新开一个终端:
-    reflect --version
-    reflect --help
-    reflect              # 进入交互式 TUI
+    zhuye --version
+    zhuye --help
+    zhuye              # 进入交互式 TUI
 
 【首次配置】登录 LLM provider:
-    reflect login --provider anthropic
-    reflect login --provider openai
-    或直接编辑 ~/.reflect/config.toml
+    zhuye login --provider anthropic
+    zhuye login --provider openai
+    或直接编辑 ~/.zhuye/config.toml
 
 【卸载】
-    sh /Volumes/Reflect\\ ${VERSION}/uninstall.sh
+    sh /Volumes/ZhuYe\\ ${VERSION}/uninstall.sh
 
 【平台】本包仅适用于 macOS ${ARCH}(Apple Silicon)。
         Intel Mac 请使用 x86_64 包;Linux 请使用 tar.gz 包。
 
-详见 https://github.com/CNB/Reflect
+详见 https://github.com/Asketisch/ZhuYe
 README_EOF
 
 # (f) 许可证文件(LICENSE)
@@ -340,7 +340,7 @@ tell application "Finder"
     set arrangement of opts to not arranged
     set icon size of opts to 80
     try
-        set position of item "reflect"       of volDisk to {120, 160}
+        set position of item "zhuye"       of volDisk to {120, 160}
     end try
     try
         set position of item "Applications"  of volDisk to {420, 160}
@@ -400,7 +400,7 @@ echo "  Volume: ${FINAL_VOL_NAME}"
 echo ""
 echo "  Install:"
 echo "    open  '${DMG_PATH}'"
-echo "    sh    '/Volumes/Reflect ${VERSION}/install.sh'"
+echo "    sh    '/Volumes/ZhuYe ${VERSION}/install.sh'"
 
 if [[ "${DO_OPEN}" == true ]]; then
     open "${DMG_PATH}"

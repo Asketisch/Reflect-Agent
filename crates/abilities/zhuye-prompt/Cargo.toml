@@ -1,0 +1,19 @@
+[package]
+name = "zhuye-prompt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ZhuYe: layered system prompt and Anthropic cache_control injection"
+
+[dependencies]
+zhuye-protocol = { workspace = true }
+zhuye-llm      = { workspace = true }
+minijinja          = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+sha1               = "0.10"
+thiserror          = { workspace = true }
+tracing            = { workspace = true }
+
+[dev-dependencies]
+tempfile           = "3"

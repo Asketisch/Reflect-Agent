@@ -14,12 +14,12 @@ from liveutil import all_events, assert_turn_shape, submit_with_retry, turn_stat
 
 
 def test_P1_会话落盘(live_session, live_sandbox) -> None:
-    """一轮对话后 `~/.reflect/sessions/` 下应有 JSONL 记录。"""
+    """一轮对话后 `~/.zhuye/sessions/` 下应有 JSONL 记录。"""
     events = submit_with_retry(
         live_session, {"type": "user_input", "items": [{"type": "text", "text": "落盘测试"}]}
     )
     assert_turn_shape(events)
-    files = sorted((live_sandbox.home / ".reflect/sessions").glob("*/*/*/*.jsonl"))
+    files = sorted((live_sandbox.home / ".zhuye/sessions").glob("*/*/*/*.jsonl"))
     assert files, "会话文件未落盘"
     records = [
         json.loads(line)
@@ -37,7 +37,7 @@ def test_P2_多轮累积在同一会话文件(live_session, live_sandbox) -> Non
     submit_with_retry(
         live_session, {"type": "user_input", "items": [{"type": "text", "text": "第二轮"}]}
     )
-    files = sorted((live_sandbox.home / ".reflect/sessions").glob("*/*/*/*.jsonl"))
+    files = sorted((live_sandbox.home / ".zhuye/sessions").glob("*/*/*/*.jsonl"))
     assert files, "会话文件未落盘"
     records = [
         json.loads(line) for line in files[-1].read_text().splitlines() if line.strip()

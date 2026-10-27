@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# ── Reflect-Agent 跨平台构建脚本 ─────────────────────────────────────
-# 编译 `reflect` CLI 二进制,可选打包成平台分发包。
+# ── 烛夜跨平台构建脚本 ─────────────────────────────────────
+# 编译 `zhuye` CLI 二进制,可选打包成平台分发包。
 #
 # 用法(从仓库根目录执行):
 #   scripts/build.sh                              # 编译(release-fast,默认,快)
@@ -23,8 +23,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="${SCRIPT_DIR}"
-BINARY_NAME="reflect"
-PACKAGE="reflect-cli"
+BINARY_NAME="zhuye"
+PACKAGE="zhuye-cli"
 INSTALL_DIR="/usr/local/bin"
 
 usage() {
@@ -93,7 +93,7 @@ case "$OS_NAME" in
     MINGW*|MSYS*|CYGWIN*) PLATFORM="windows" ;;
     *)
         echo "不支持的 OS: $OS_NAME" >&2
-        echo "Reflect 可在 macOS / Linux / Windows(Git Bash)上构建。" >&2
+        echo "烛夜可在 macOS / Linux / Windows(Git Bash)上构建。" >&2
         exit 1
         ;;
 esac
@@ -125,7 +125,7 @@ fi
 # 二进制产物路径
 BIN_PATH="${REPO_ROOT}/target/${TARGET_SUBDIR}${BIN_SUBDIR}/${BINARY_NAME}"
 
-echo "── Reflect-Agent 构建 ──────────────────────────────────────"
+echo "── 烛夜构建 ──────────────────────────────────────"
 echo "平台:          $PLATFORM ($OS_NAME)"
 echo "profile:       $PROFILE"
 echo "target:        ${TARGET_OVERRIDE:-<host>}"

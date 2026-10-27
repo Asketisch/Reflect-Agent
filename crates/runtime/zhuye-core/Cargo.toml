@@ -1,0 +1,51 @@
+[package]
+name = "zhuye-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ZhuYe: AgentThread, 4-node StateGraph and ThreadManager"
+
+[dependencies]
+zhuye-protocol = { workspace = true }
+zhuye-llm      = { workspace = true }
+zhuye-tools    = { workspace = true }
+# v1.5 R2:后台 bash 与前台 BashTool 同等沙箱(Seatbelt / Landlock +
+# 严格 fail-closed),杜绝「run_in_background 绕过 OS 沙箱」的逃逸口。
+zhuye-sandbox  = { workspace = true }
+zhuye-hooks    = { workspace = true }
+zhuye-compact  = { workspace = true }
+zhuye-memory   = { workspace = true }
+zhuye-skills   = { workspace = true }
+zhuye-agent-def = { workspace = true }
+zhuye-prompt   = { workspace = true }
+zhuye-notes    = { workspace = true }
+zhuye-recovery = { workspace = true }
+zhuye-permissions = { workspace = true }
+zhuye-telemetry = { workspace = true }
+zhuye-goal = { workspace = true }
+async-trait        = { workspace = true }
+futures            = { workspace = true }
+parking_lot        = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+thiserror          = { workspace = true }
+tokio              = { workspace = true }
+tokio-util         = { workspace = true }
+tracing            = { workspace = true }
+uuid               = { workspace = true }
+anyhow             = { workspace = true }
+chrono             = { workspace = true }
+
+[dev-dependencies]
+async-stream = "0.3"
+tempfile = "3"
+# v1.4:全链路集成测试(full_link.rs)需要子代理工厂 —— Cargo 允许
+# dev-dependency 与被测 crate 的正常依赖成环(subagent 依赖 core)。
+zhuye-subagent = { workspace = true }
+zhuye-memory = { workspace = true }
+zhuye-compact = { workspace = true }
+zhuye-prompt = { workspace = true }
+zhuye-agent-def = { workspace = true }
+zhuye-notes = { workspace = true }
+zhuye-recovery = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

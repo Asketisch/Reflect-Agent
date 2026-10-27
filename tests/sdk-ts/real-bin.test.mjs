@@ -17,7 +17,7 @@
 // (mock 是自己写的假服务端,不会随真协议演进)。
 //
 // 运行:tests/run_all.sh sdk-ts,或
-//   REFLECT_BIN=... node --test tests/sdk-ts/real-bin.test.mjs
+//   ZHUYE_BIN=... node --test tests/sdk-ts/real-bin.test.mjs
 
 import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -27,42 +27,42 @@ import assert from 'node:assert/strict';
 
 // 直接 import 构建产物 dist(与 scripts/sdk_smoke.sh 同路径约定),
 // 避免 vitest 配置;run.sh 会先确保 dist 已构建。
-const { ReflectAgent } = await import(
+const { ZhuyeAgent } = await import(
   new URL('../../sdks/typescript/dist/index.js', import.meta.url).href
 );
 
 const ROOT = new URL('../../', import.meta.url).pathname;
-const REFLECT_BIN = process.env.REFLECT_BIN ?? join(ROOT, 'target/release/reflect');
+const ZHUYE_BIN = process.env.ZHUYE_BIN ?? join(ROOT, 'target/release/zhuye');
 
 /** 隔离 HOME:预写关闭全部内置 hook 的最小 config.toml(理由同 Python 侧)。 */
-const home = mkdtempSync(join(tmpdir(), 'reflect-ts-home.'));
-mkdirSync(join(home, '.reflect'), { recursive: true });
+const home = mkdtempSync(join(tmpdir(), 'zhuye-ts-home.'));
+mkdirSync(join(home, '.zhuye'), { recursive: true });
 writeFileSync(
-  join(home, '.reflect', 'config.toml'),
+  join(home, '.zhuye', 'config.toml'),
   '# 测试用最小配置:关闭全部内置 hook\n[hooks]\nenabled = []\n'
 );
 process.env.HOME = home;
 
 /** 构造指向真二进制 + mock provider 的 spawn 选项;写临时 mock 脚本。 */
 function makeOptions(scriptLines) {
-  const dir = mkdtempSync(join(tmpdir(), 'reflect-ts-script.'));
-  const env = { REFLECT_MODEL: 'mock' };
+  const dir = mkdtempSync(join(tmpdir(), 'zhuye-ts-script.'));
+  const env = { ZHUYE_MODEL: 'mock' };
   if (scriptLines) {
     const script = join(dir, 'script.jsonl');
     writeFileSync(script, scriptLines.join('\n') + '\n');
-    env.REFLECT_MOCK_SCRIPT = script;
+    env.ZHUYE_MOCK_SCRIPT = script;
   }
-  return { bin: REFLECT_BIN, env };
+  return { bin: ZHUYE_BIN, env };
 }
 
 describe('TS SDK 绑定层 × 真二进制', () => {
   it('K1: spawn 完成 session_configured 握手', async () => {
-    const agent = await ReflectAgent.spawn(makeOptions());
+    const agent = await ZhuyeAgent.spawn(makeOptions());
     await agent.close();
   });
 
   it('K2: 单轮 prompt 文本回流', async () => {
-    const agent = await ReflectAgent.spawn(
+    const agent = await ZhuyeAgent.spawn(
       makeOptions(['{"type":"text","text":"ts-e2e-reply"}'])
     );
     try {
@@ -74,7 +74,7 @@ describe('TS SDK 绑定层 × 真二进制', () => {
 
   it('K3: registerTool → LLM 调用 → 客户端执行 → 回执 → turn_complete', async () => {
     const calls = [];
-    const agent = await ReflectAgent.spawn(
+    const agent = await ZhuyeAgent.spawn(
       makeOptions([
         '{"type":"tool_call","name":"sdk_echo","args":{"q":"ping"}}',
         '{"type":"text","text":"tool-done"}',
@@ -107,7 +107,7 @@ describe('TS SDK 绑定层 × 真二进制', () => {
   it('K4: 非 turn op 的迭代器以 submission_closed 收尾', async () => {
     // 没有 submission_closed,SDK 迭代器会永久挂起(v1.3 起 serve 在
     // per-turn 通道排空后发这条收尾标记)。
-    const agent = await ReflectAgent.spawn(
+    const agent = await ZhuyeAgent.spawn(
       makeOptions(['{"type":"text","text":"t1"}'])
     );
     try {
@@ -122,7 +122,7 @@ describe('TS SDK 绑定层 × 真二进制', () => {
   });
 
   it('K6: close 幂等 + 子进程优雅退出', async () => {
-    const agent = await ReflectAgent.spawn(makeOptions());
+    const agent = await ZhuyeAgent.spawn(makeOptions());
     await agent.close();
     await agent.close();
   });

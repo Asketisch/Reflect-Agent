@@ -15,7 +15,7 @@
 - K8 handler 抛异常:SDK 转成 `is_error=true` 的错误回执(不让 turn 挂死)。
 
 运行:tests/run_all.sh sdk-python,或
-  REFLECT_BIN=... PYTHONPATH=sdks/python python3 -m pytest tests/sdk-python -v
+  ZHUYE_BIN=... PYTHONPATH=sdks/python python3 -m pytest tests/sdk-python -v
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ import pytest
 
 from sdkharness import drain, make_options, msg_types
 
-from reflect import ContentBlock, ReflectAgent, ToolOutput
+from zhuye import ContentBlock, ZhuyeAgent, ToolOutput
 
 
 # ── K1 握手 ─────────────────────────────────────────────────────────────
@@ -36,7 +36,7 @@ from reflect import ContentBlock, ReflectAgent, ToolOutput
 
 def test_K1_spawn_握手成功即返回(env_home: Path) -> None:
     """spawn 内部等待 `session_configured` 才返回;超时/失败会直接抛。"""
-    agent = ReflectAgent.spawn(make_options())
+    agent = ZhuyeAgent.spawn(make_options())
     agent.close()
 
 
@@ -45,7 +45,7 @@ def test_K1_spawn_握手成功即返回(env_home: Path) -> None:
 
 def test_K2a_单轮_prompt_文本回流(env_home: Path) -> None:
     """prompt() 聚合 delta 返回最终文本。"""
-    agent = ReflectAgent.spawn(make_options(['{"type":"text","text":"py-e2e-reply"}']))
+    agent = ZhuyeAgent.spawn(make_options(['{"type":"text","text":"py-e2e-reply"}']))
     try:
         assert agent.prompt("第一轮") == "py-e2e-reply"
     finally:
@@ -54,7 +54,7 @@ def test_K2a_单轮_prompt_文本回流(env_home: Path) -> None:
 
 def test_K2b_多轮_prompt_上下文保持(env_home: Path) -> None:
     """两轮拿到 mock 脚本的第 1、2 行(脚本按模型调用顺序消耗)。"""
-    agent = ReflectAgent.spawn(
+    agent = ZhuyeAgent.spawn(
         make_options(
             [
                 '{"type":"text","text":"first-reply"}',
@@ -85,7 +85,7 @@ def test_K3_注册工具_本地执行_回执(env_home: Path) -> None:
             elapsed_ms=0,
         )
 
-    agent = ReflectAgent.spawn(
+    agent = ZhuyeAgent.spawn(
         make_options(
             [
                 '{"type":"tool_call","name":"sdk_echo","args":{"q":"ping"}}',
@@ -111,7 +111,7 @@ def test_K4_非turn_op_迭代器以submission_closed收尾(env_home: Path) -> No
     没有它,SDK 的迭代器会永久挂起(v1.3 起 serve 在 per-turn 通道排空后
     发这条收尾标记)。
     """
-    agent = ReflectAgent.spawn(make_options(['{"type":"text","text":"t1"}']))
+    agent = ZhuyeAgent.spawn(make_options(['{"type":"text","text":"t1"}']))
     try:
         evs = drain(agent.submit_op({"type": "set_effort", "effort": "high"}))
         assert msg_types(evs) == ["submission_closed"], f"收尾异常:{msg_types(evs)}"
@@ -144,7 +144,7 @@ def test_K5_interrupt_打断在飞turn(env_home: Path) -> None:
             elapsed_ms=0,
         )
 
-    agent = ReflectAgent.spawn(
+    agent = ZhuyeAgent.spawn(
         make_options(
             [
                 '{"type":"tool_call","name":"slow_tool","args":{}}',
@@ -177,7 +177,7 @@ def test_K5_interrupt_打断在飞turn(env_home: Path) -> None:
 
 def test_K6_close_幂等(env_home: Path) -> None:
     """二次 close 不抛错。"""
-    agent = ReflectAgent.spawn(make_options())
+    agent = ZhuyeAgent.spawn(make_options())
     agent.close()
     agent.close()
 
@@ -188,7 +188,7 @@ def test_K6_close_幂等(env_home: Path) -> None:
 def test_K7_坏二进制_握手失败抛错(env_home: Path) -> None:
     """from_popen 路径:进程吐非 JSONL → 握手失败抛 `RuntimeError` 而非挂死。"""
     with pytest.raises(RuntimeError):
-        ReflectAgent.from_popen(
+        ZhuyeAgent.from_popen(
             subprocess.Popen(
                 ["/bin/sh", "-c", "echo not-jsonl && sleep 5"],
                 stdout=subprocess.PIPE,
@@ -210,7 +210,7 @@ def test_K8_handler抛异常_转错误回执(env_home: Path) -> None:
     def handler(args: dict[str, Any]) -> ToolOutput:
         raise RuntimeError("handler-boom")
 
-    agent = ReflectAgent.spawn(
+    agent = ZhuyeAgent.spawn(
         make_options(
             [
                 '{"type":"tool_call","name":"boom_tool","args":{}}',

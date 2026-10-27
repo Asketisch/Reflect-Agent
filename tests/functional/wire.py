@@ -4,7 +4,7 @@
 如果通过 Python / TS SDK 去驱动,SDK 自身的 bug 会把 Rust 的 bug 遮住
 (实例:Python SDK 的 `close()` 从不发出 shutdown op —— 见 COVERAGE.md
 「已知缺陷」D1)。因此本层只用 `subprocess` + `json` 打原始 JSONL wire,
-**不 import `reflect`**。
+**不 import `zhuye`**。
 
 共享设施放在本模块(唯一命名)而不是 `conftest.py`:两个测试层各有一个
 conftest.py,`from conftest import ...` 在一次性收集整个 tests/ 时会按
@@ -31,10 +31,10 @@ from typing import Any, Callable, Iterator
 # 仓库根:tests/functional/wire.py → 上溯两级。
 ROOT = Path(__file__).resolve().parents[2]
 # 被测二进制:默认 release 产物(与 tests/lib.sh 的约定一致)。
-REFLECT_BIN = Path(
-    os.environ.get("REFLECT_BIN", str(ROOT / "target/release/reflect"))
+ZHUYE_BIN = Path(
+    os.environ.get("ZHUYE_BIN", str(ROOT / "target/release/zhuye"))
 )
-# MCP 审批用例需要的 mock stdio server(由 `cargo build -p reflect-mcp` 产出)。
+# MCP 审批用例需要的 mock stdio server(由 `cargo build -p zhuye-mcp` 产出)。
 MOCK_MCP = ROOT / "target/debug/mock_mcp_server"
 
 # 终结一条 submission 事件流的事件类型(见 sdks/PROTOCOL.md §3)。
@@ -65,14 +65,14 @@ class Sandbox:
 
     def write_config(self, extra: str = "") -> None:
         """在隔离 HOME 的 config.toml 后追加配置(默认已关闭全部内置 hook)。"""
-        cfg = self.home / ".reflect/config.toml"
+        cfg = self.home / ".zhuye/config.toml"
         cfg.write_text(cfg.read_text() + extra)
 
     def mock_env(self, script: Path | None = None, **extra: str) -> dict[str, str]:
-        """派生 mock provider 环境:`REFLECT_MODEL=mock` + 可选脚本。"""
-        env: dict[str, str] = {"REFLECT_MODEL": "mock"}
+        """派生 mock provider 环境:`ZHUYE_MODEL=mock` + 可选脚本。"""
+        env: dict[str, str] = {"ZHUYE_MODEL": "mock"}
         if script is not None:
-            env["REFLECT_MOCK_SCRIPT"] = str(script)
+            env["ZHUYE_MOCK_SCRIPT"] = str(script)
         env.update(extra)
         return env
 
@@ -81,7 +81,7 @@ class Sandbox:
 
 
 class ServeSession:
-    """`reflect serve` 子进程会话:逐行读写 JSONL。
+    """`zhuye serve` 子进程会话:逐行读写 JSONL。
 
     线程模型:主线程写 stdin / 收集事件;**reader 线程**独占读 stdout,
     逐行解析后按 submission id 分桶并唤醒等待者。
@@ -104,7 +104,7 @@ class ServeSession:
         self._cond = threading.Condition()
         self._write_lock = threading.Lock()
         self._closed = False
-        cmd = [str(REFLECT_BIN), "serve", *self.args]
+        cmd = [str(ZHUYE_BIN), "serve", *self.args]
         self._proc = subprocess.Popen(
             cmd,
             cwd=str(sandbox.cwd),
@@ -324,9 +324,9 @@ def run_cli(
     timeout: float = 60.0,
     input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """跑 `reflect <args>`,返回 CompletedProcess(stdout/stderr 为文本)。"""
+    """跑 `zhuye <args>`,返回 CompletedProcess(stdout/stderr 为文本)。"""
     return subprocess.run(
-        [str(REFLECT_BIN), *args],
+        [str(ZHUYE_BIN), *args],
         cwd=str(sandbox.cwd),
         env=sandbox.env(env),
         capture_output=True,
@@ -340,8 +340,8 @@ def run_cli(
 
 
 def rollout_files(home: Path) -> list[Path]:
-    """会话 JSONL 文件列表(`~/.reflect/sessions/YYYY/MM/DD/<thread>.jsonl`)。"""
-    base = home / ".reflect" / "sessions"
+    """会话 JSONL 文件列表(`~/.zhuye/sessions/YYYY/MM/DD/<thread>.jsonl`)。"""
+    base = home / ".zhuye" / "sessions"
     return sorted(base.glob("*/*/*/*.jsonl"))
 
 
@@ -365,7 +365,7 @@ def rollout_thread_id(home: Path) -> str:
     """
     files = rollout_files(home)
     if not files:
-        raise AssertionError(f"未找到会话文件:{home}/.reflect/sessions")
+        raise AssertionError(f"未找到会话文件:{home}/.zhuye/sessions")
     return files[-1].stem
 
 
@@ -405,8 +405,8 @@ def require_binary() -> None:
     """被测二进制不存在时跳过整个模块(而不是失败)。"""
     import pytest
 
-    if not REFLECT_BIN.is_file():
-        pytest.skip(f"{REFLECT_BIN} 不存在;先执行 cargo build --release -p reflect-cli")
+    if not ZHUYE_BIN.is_file():
+        pytest.skip(f"{ZHUYE_BIN} 不存在;先执行 cargo build --release -p zhuye-cli")
 
 
 def mock_mcp_available() -> bool:

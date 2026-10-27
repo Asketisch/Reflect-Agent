@@ -5,7 +5,7 @@
 #   ./tests/run_all.sh            # 全部
 #   ./tests/run_all.sh functional # 功能覆盖(能力覆盖层 + Rust 参数面 + 双 SDK 绑定层)
 #   ./tests/run_all.sh functional-layer  # 只跑能力覆盖层(Python 打真二进制)
-#   ./tests/run_all.sh live       # 实模型演练层(真实模型;默认 SKIP,需 REFLECT_LIVE=1)
+#   ./tests/run_all.sh live       # 实模型演练层(真实模型;默认 SKIP,需 ZHUYE_LIVE=1)
 #   ./tests/run_all.sh rust       # 只跑 Rust 侧
 #   ./tests/run_all.sh sdk-python # 只跑 Python SDK 绑定层
 #   ./tests/run_all.sh sdk-ts     # 只跑 TS SDK 绑定层
@@ -29,16 +29,16 @@ fi
 cd "$ROOT"
 
 # release 二进制与 examples 不存在则构建(幂等)
-if [ ! -x "$REFLECT_BIN" ]; then
+if [ ! -x "$ZHUYE_BIN" ]; then
     echo "── 构建 release 二进制 ──"
-    cargo build --release -p reflect-cli --quiet || exit 2
+    cargo build --release -p zhuye-cli --quiet || exit 2
 fi
 
 OVERALL=0
 for s in "${SUITES[@]}"; do
     case "$s" in
         functional)  RUNNERS=("$HERE/functional/run.sh" "$HERE/rust/run.sh" "$HERE/sdk-python/run.sh" "$HERE/sdk-ts/run.sh")
-                     export REFLECT_SKIP_WORKSPACE=1 ;;
+                     export ZHUYE_SKIP_WORKSPACE=1 ;;
         functional-layer) RUNNERS=("$HERE/functional/run.sh") ;;
         live)        RUNNERS=("$HERE/live/run.sh") ;;
         rust)        RUNNERS=("$HERE/rust/run.sh") ;;

@@ -1,6 +1,6 @@
-# Reflect Serve Wire Protocol(v0 + SDK 扩展)
+# ZhuYe Serve Wire Protocol(v0 + SDK 扩展)
 
-`reflect serve` 是常驻 stdio JSONL 会话服务:一个进程 = 一个常驻 AgentThread,
+`zhuye serve` 是常驻 stdio JSONL 会话服务:一个进程 = 一个常驻 AgentThread,
 多轮对话共享内存状态。Python / TypeScript SDK 都构建在该协议之上 —— 本文档
 是两套 SDK 的共同实现依据,也可供任何语言手写集成。
 
@@ -16,7 +16,7 @@ non-breaking,客户端必须容忍未知 `"type"`)。
 ## 1. 启动与握手
 
 ```
-reflect serve [--resume <uuid> | -c | -r <N>] [--agent <name>] [--plan-mode] ...
+zhuye serve [--resume <uuid> | -c | -r <N>] [--agent <name>] [--plan-mode] ...
 ```
 
 进程就绪后**主动**向 stdout 写一条全局事件(此时 stdin 还没有任何输入):
@@ -28,7 +28,7 @@ reflect serve [--resume <uuid> | -c | -r <N>] [--agent <name>] [--plan-mode] ...
 客户端以收到 `session_configured` 视为握手完成(建议超时 30s)。
 `id == ""` 表示全局事件(不隶属于任何 submission)。
 
-离线测试:`REFLECT_MODEL=mock`(可选 `REFLECT_MOCK_SCRIPT=<JSONL 路径>`)
+离线测试:`ZHUYE_MODEL=mock`(可选 `ZHUYE_MOCK_SCRIPT=<JSONL 路径>`)
 启动内置 mock provider,免 API key、无网络。
 
 ## 2. Submission 输入(stdin)
@@ -44,7 +44,7 @@ reflect serve [--resume <uuid> | -c | -r <N>] [--agent <name>] [--plan-mode] ...
 - **坏行不终止会话**:JSON 解析失败时 serve emit `id=""` 的
   `error` 事件(`code: "invalid_submission"`),继续读下一行。
 
-常用 Op(完整定义见 `crates/protocol/reflect-protocol/src/op.rs`):
+常用 Op(完整定义见 `crates/protocol/zhuye-protocol/src/op.rs`):
 
 | op.type | 字段 | 说明 |
 |---|---|---|
@@ -113,7 +113,7 @@ SDK 关心的核心变体(完整列表见 `event_msg/mod.rs`):
 
 serve 是 SDK 嵌入入口,内置 hook(`verification` / `search_budget` /
 `test_runner` / `plan_completion` / `langfuse_tracker`)**默认不启用**,
-仅在 `~/.reflect/config.toml [hooks].enabled` 显式列出时生效。exec / TUI
+仅在 `~/.zhuye/config.toml [hooks].enabled` 显式列出时生效。exec / TUI
 不受影响(未配置 = 全部启用)。这一差异的理由:`verification` 之类 Stop
 hook 会在宿主 cwd 执行 `cargo test` 并否决 turn 完成,对嵌入方既慢又不
 可预期。
@@ -128,7 +128,7 @@ hook 会在宿主 cwd 执行 `cargo test` 并否决 turn 完成,对嵌入方既�
 ## 5. 远程工具执行流(自定义工具)
 
 ```
-客户端                                reflect serve
+客户端                                zhuye serve
    │ ── submission: register_tools ──▶ │ (静默注册 RemoteTool)
    │ ◀──── tool_execution_request ──── │ LLM 调用该工具(call_id=c1)
    │ 本地执行 handler(args)            │ (oneshot 等待,默认 120s 超时)
@@ -143,7 +143,7 @@ hook 会在宿主 cwd 执行 `cargo test` 并否决 turn 完成,对嵌入方既�
 - `output` 为 `ToolOutput` wire 对象:`{content: [{type:"text", text}],
   is_error: bool, metadata: {}, elapsed_ms: int}`。SDK 内 handler 抛异常时
   应转成 `is_error=true` 的文本回执(让 LLM 看到错误而不是挂死)。
-- 超时(env `REFLECT_REMOTE_TOOL_TIMEOUT_SECS`,默认 120s)未收到回执时,
+- 超时(env `ZHUYE_REMOTE_TOOL_TIMEOUT_SECS`,默认 120s)未收到回执时,
   core 以错误 output 结束该工具调用,turn 继续但工具结果为错误文本。
 
 ## 6. 退出语义

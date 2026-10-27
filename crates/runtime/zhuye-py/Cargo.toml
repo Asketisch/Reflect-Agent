@@ -1,0 +1,24 @@
+[package]
+name = "zhuye-py"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ZhuYe: PyO3 Python bindings for ZhuyeBuilder + sync run API"
+
+[lib]
+name = "zhuye_py"
+crate-type = ["rlib"]
+
+[dependencies]
+zhuye          = { workspace = true }
+zhuye-core     = { workspace = true }
+zhuye-protocol = { workspace = true }
+pyo3             = { workspace = true }
+anyhow           = { workspace = true }
+tokio            = { workspace = true }
+
+[features]
+extension-module = ["pyo3/extension-module"]
+
+[dev-dependencies]
+pyo3 = { workspace = true, features = ["auto-initialize"] }

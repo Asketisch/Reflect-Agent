@@ -1,0 +1,33 @@
+[package]
+name = "zhuye-subagent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ZhuYe: Tool-per-Agent subagent factory"
+
+[dependencies]
+zhuye-protocol  = { workspace = true }
+zhuye-llm       = { workspace = true }
+zhuye-tools     = { workspace = true }
+zhuye-core      = { workspace = true }
+zhuye-config    = { workspace = true }
+zhuye-rollout   = { workspace = true }
+zhuye-skills    = { workspace = true }
+zhuye-recovery  = { workspace = true }
+zhuye-telemetry = { workspace = true }
+async-trait         = { workspace = true }
+chrono              = { workspace = true }
+parking_lot         = { workspace = true }
+tokio               = { workspace = true }
+tokio-util          = { workspace = true }
+thiserror           = { workspace = true }
+anyhow              = { workspace = true }
+serde               = { workspace = true }
+serde_json          = { workspace = true }
+serde_yaml          = { workspace = true }
+tracing             = { workspace = true }
+uuid                = { workspace = true }
+futures             = { workspace = true }
+
+[dev-dependencies]
+tempfile            = "3"

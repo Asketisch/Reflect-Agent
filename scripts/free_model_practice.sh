@@ -6,7 +6,7 @@
 #
 # **不是门禁**:退出码只反映脚本自身错误;模型表现差异只体现在报告里。
 #
-# 模型来源:`reflect models list --free-only --json`(接口实时拉取),
+# 模型来源:`zhuye models list --free-only --json`(接口实时拉取),
 # 不写死模型 id —— 免费模型集合由上游决定,随时可能增删。
 #
 # ⚠️ 上游可能记录 prompt:脚本只用合成数据,不要把真实仓库内容 / 凭据
@@ -24,10 +24,10 @@ set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 
-BIN="${REFLECT_BIN:-$ROOT/target/release/reflect}"
-BASE_URL="${REFLECT_LIVE_BASE_URL:-https://api.kilo.ai/api/gateway}"
-API_KEY="${REFLECT_LIVE_API_KEY:-}"
-COUNT="${REFLECT_LIVE_MODEL_COUNT:-3}"
+BIN="${ZHUYE_BIN:-$ROOT/target/release/zhuye}"
+BASE_URL="${ZHUYE_LIVE_BASE_URL:-https://api.kilo.ai/api/gateway}"
+API_KEY="${ZHUYE_LIVE_API_KEY:-}"
+COUNT="${ZHUYE_LIVE_MODEL_COUNT:-3}"
 MODELS=""
 OUT=""
 DRY_RUN=0
@@ -46,19 +46,19 @@ while [ $# -gt 0 ]; do
 done
 
 if [ ! -x "$BIN" ]; then
-    echo "FAIL: $BIN 不存在;先执行 cargo build --release -p reflect-cli" >&2
+    echo "FAIL: $BIN 不存在;先执行 cargo build --release -p zhuye-cli" >&2
     exit 2
 fi
 
-# 隔离环境:不污染真实 ~/.reflect。
-ISO_HOME="$(mktemp -d "${TMPDIR:-/tmp}/reflect-practice-home.XXXXXX")"
-ISO_CWD="$(mktemp -d "${TMPDIR:-/tmp}/reflect-practice-cwd.XXXXXX")"
+# 隔离环境:不污染真实 ~/.zhuye。
+ISO_HOME="$(mktemp -d "${TMPDIR:-/tmp}/zhuye-practice-home.XXXXXX")"
+ISO_CWD="$(mktemp -d "${TMPDIR:-/tmp}/zhuye-practice-cwd.XXXXXX")"
 REPORT_FILE="$ISO_CWD/report.md"
 cleanup() { rm -rf "$ISO_HOME" "$ISO_CWD"; }
 trap cleanup EXIT
 
-mkdir -p "$ISO_HOME/.reflect"
-cat > "$ISO_HOME/.reflect/config.toml" <<EOF
+mkdir -p "$ISO_HOME/.zhuye"
+cat > "$ISO_HOME/.zhuye/config.toml" <<EOF
 # 免费模型演练配置(合成数据专用)
 [hooks]
 enabled = []
@@ -101,7 +101,7 @@ print(','.join(ids[:$COUNT]))
 fi
 
 if [ -z "$MODEL_LIST" ]; then
-    echo "FAIL: 拿不到模型清单(检查 REFLECT_LIVE_BASE_URL / 出口地区 / 配额)" >&2
+    echo "FAIL: 拿不到模型清单(检查 ZHUYE_LIVE_BASE_URL / 出口地区 / 配额)" >&2
     exit 3
 fi
 
@@ -128,7 +128,7 @@ for model in ${MODEL_LIST//,/ }; do
     while IFS='|' read -r scene instruction _rest; do
         [ -z "$scene" ] && continue
         # 每个场景清一次会话,避免上下文串场。
-        rm -rf "$ISO_HOME/.reflect/sessions"
+        rm -rf "$ISO_HOME/.zhuye/sessions"
         EVENTS="$ISO_CWD/events.jsonl"
         : > "$EVENTS"
 

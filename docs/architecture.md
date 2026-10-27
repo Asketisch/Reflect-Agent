@@ -11,75 +11,75 @@
 
 | 层 | Crate | 职责 |
 |----|-------|------|
-| `protocol/` | reflect-protocol | Submission / Op / EventMsg / Item + RolloutRecorder trait。所有层的公共契约 |
+| `protocol/` | zhuye-protocol | Submission / Op / EventMsg / Item + RolloutRecorder trait。所有层的公共契约 |
 | `abilities/` | llm, tools, hooks, skills, memory, agent-def, prompt, compact, recovery, notes, sanitize | 能力原语:ModelClient trait + providers、Tool trait + 内置工具、HookEngine、压缩 escalation 等 |
 | `resources/` | config, permissions, plugin, rollout, telemetry, sandbox, ast | 配置热重载、权限规则、插件 lifecycle、JSONL 持久化、tree-sitter 代码搜索 |
 | `orchestration/` | subagent, discussion, task, pipeline, goal | 多 agent 编排:子代理工厂(并发在途≤16)、讨论编排、任务/团队、DAG 流水线、目标模式 |
 | `integrations/` | mcp, lsp, integration, stream | MCP 客户端(stdio/streamable-http)、LSP、流式会话后端 |
-| `runtime/` | core, exec, cli, reflect, py | AgentThread + StateGraph、headless、CLI 入口、lib facade(60+ re-exports + Builder)、PyO3 绑定 |
+| `runtime/` | core, exec, cli, zhuye, py | AgentThread + StateGraph、headless、CLI 入口、lib facade(60+ re-exports + Builder)、PyO3 绑定 |
 
 ## 完整目录结构
 
 ```
 crates/
 ├── protocol/               公共契约
-│   └── reflect-protocol        Submission / Op / EventMsg + RolloutRecorder
+│   └── zhuye-protocol        Submission / Op / EventMsg + RolloutRecorder
 ├── abilities/              能力原语
-│   ├── reflect-llm             ModelClient trait + OpenAI/Anthropic/Ollama + pricing
-│   ├── reflect-tools           Tool trait + 23 内置工具 + ToolExecutionQueue
-│   ├── reflect-hooks           HookEngine + 8 事件 + 7 决策
-│   ├── reflect-skills          SKILL.md 扫描 + 加载
-│   ├── reflect-memory          3 scope 记忆(Project/User/Session)
-│   ├── reflect-agent-def       Markdown frontmatter Agent 定义
-│   ├── reflect-prompt          分层 prompt + cache_control 注入
-│   ├── reflect-compact         4 层压缩策略 escalation
-│   ├── reflect-recovery        故障恢复
-│   ├── reflect-notes           笔记
-│   └── reflect-sanitize        输出净化
+│   ├── zhuye-llm             ModelClient trait + OpenAI/Anthropic/Ollama + pricing
+│   ├── zhuye-tools           Tool trait + 23 内置工具 + ToolExecutionQueue
+│   ├── zhuye-hooks           HookEngine + 8 事件 + 7 决策
+│   ├── zhuye-skills          SKILL.md 扫描 + 加载
+│   ├── zhuye-memory          3 scope 记忆(Project/User/Session)
+│   ├── zhuye-agent-def       Markdown frontmatter Agent 定义
+│   ├── zhuye-prompt          分层 prompt + cache_control 注入
+│   ├── zhuye-compact         4 层压缩策略 escalation
+│   ├── zhuye-recovery        故障恢复
+│   ├── zhuye-notes           笔记
+│   └── zhuye-sanitize        输出净化
 ├── resources/              配置 / 权限 / 持久化
-│   ├── reflect-config          统一 TOML 配置 + 热重载
-│   ├── reflect-permissions     权限规则引擎
-│   ├── reflect-plugin          插件 lifecycle
-│   ├── reflect-rollout         JSONL 持久化 + session index
-│   ├── reflect-telemetry       可观测性
-│   ├── reflect-sandbox         多级沙箱
-│   └── reflect-ast             tree-sitter 代码搜索
+│   ├── zhuye-config          统一 TOML 配置 + 热重载
+│   ├── zhuye-permissions     权限规则引擎
+│   ├── zhuye-plugin          插件 lifecycle
+│   ├── zhuye-rollout         JSONL 持久化 + session index
+│   ├── zhuye-telemetry       可观测性
+│   ├── zhuye-sandbox         多级沙箱
+│   └── zhuye-ast             tree-sitter 代码搜索
 ├── orchestration/          多 agent 编排
-│   ├── reflect-subagent        Tool-per-Agent 子代理工厂(并发在途 ≤ 16)
-│   ├── reflect-discussion      多 Agent 讨论编排
-│   ├── reflect-task            结构化任务 / 团队
-│   ├── reflect-pipeline        DAG 流水线
-│   └── reflect-goal            目标模式
+│   ├── zhuye-subagent        Tool-per-Agent 子代理工厂(并发在途 ≤ 16)
+│   ├── zhuye-discussion      多 Agent 讨论编排
+│   ├── zhuye-task            结构化任务 / 团队
+│   ├── zhuye-pipeline        DAG 流水线
+│   └── zhuye-goal            目标模式
 ├── integrations/           外部协议集成
-│   ├── reflect-mcp             MCP 客户端(stdio / streamable-http)
-│   ├── reflect-lsp             LSP 集成
-│   ├── reflect-integration     集成胶水层
-│   └── reflect-stream          流式会话后端
+│   ├── zhuye-mcp             MCP 客户端(stdio / streamable-http)
+│   ├── zhuye-lsp             LSP 集成
+│   ├── zhuye-integration     集成胶水层
+│   └── zhuye-stream          流式会话后端
 └── runtime/                运行时与入口
-    ├── reflect-core            AgentThread + 4 节点 StateGraph
-    ├── reflect-exec            headless + JSONL stdout + resume + serve
-    ├── reflect-cli             CLI 顶层路由(单一 reflect 二进制)
-    ├── reflect                 lib facade(60+ re-exports + Builder)
-    └── reflect-py              PyO3 Python 绑定(同步 run API)
+    ├── zhuye-core            AgentThread + 4 节点 StateGraph
+    ├── zhuye-exec            headless + JSONL stdout + resume + serve
+    ├── zhuye-cli             CLI 顶层路由(单一 zhuye 二进制)
+    ├── zhuye                 lib facade(60+ re-exports + Builder)
+    └── zhuye-py              PyO3 Python 绑定(同步 run API)
 sdks/                          多语言 SDK
 ├── PROTOCOL.md                    serve wire 协议规范
-├── python/                        纯 stdlib Python SDK(reflect-agent)
-└── typescript/                    纯 TS npm SDK(reflect-agent)
+├── python/                        纯 stdlib Python SDK(zhuye-agent)
+└── typescript/                    纯 TS npm SDK(zhuye-agent)
 ```
 
-`reflect` 二进制由 `reflect-cli` crate 产出,是本仓库的**薄 headless 入口**;
-框架消费方的主接口是 `reflect` 库门面(Builder / re-exports)。
+`zhuye` 二进制由 `zhuye-cli` crate 产出,是本仓库的**薄 headless 入口**;
+框架消费方的主接口是 `zhuye` 库门面(Builder / re-exports)。
 
 ## 核心数据流
 
-- `AgentThread`(reflect-core)消费 `Submission`(mpsc 通道),`submission_loop` 驱动
+- `AgentThread`(zhuye-core)消费 `Submission`(mpsc 通道),`submission_loop` 驱动
   4 节点 `StateGraph`:**PreLoop → ModelCall → (ToolExec → PreLoop)\* → CheckStop**。
   模型不再发工具调用时经 CheckStop 结束 turn(Stop hook 可否决强制续跑)。
 - `NodeContext` 携带回合级依赖:model registry、RoutingPolicy、HookEngine、
   ToolExecutionQueue、event 通道、CancellationToken、approval gates。
 - 客户端(TUI / exec / serve / lib)统一通过 Submission/Event 协议通信;headless
-  模式 Event 以 JSONL 流写 stdout、tracing 日志走 stderr(`reflect exec | jq`
-  不被破坏);`reflect serve` 复用同一协议常驻服务,SDK 在其上封装
+  模式 Event 以 JSONL 流写 stdout、tracing 日志走 stderr(`zhuye exec | jq`
+  不被破坏);`zhuye serve` 复用同一协议常驻服务,SDK 在其上封装
   (远程工具请求 / 回执、审批等交互均为协议内 Op / EventMsg)。
 
 各节点的职责划分:
@@ -100,9 +100,9 @@ sdks/                          多语言 SDK
 ### 1. Agent 定义层(Markdown frontmatter,主入口)
 
 Agent 定义是带 frontmatter 的 Markdown 文件,放在
-`.reflect/agents/`(workspace)或 `~/.reflect/agents/`(home;同名时
+`.zhuye/agents/`(workspace)或 `~/.zhuye/agents/`(home;同名时
 home 定义覆盖 workspace —— 注意与 subagents 的优先级方向相反),
-`reflect exec --agent <name>` 激活:
+`zhuye exec --agent <name>` 激活:
 
 ```markdown
 ---
@@ -133,8 +133,8 @@ system_prompt = "Inspect the codebase and return a concise summary."
 allowed_tools = ["bash", "read", "grep", "glob"]
 ```
 
-来源合并优先级(后者覆盖同名):`~/.reflect/subagents/*.md` →
-workspace `.reflect/subagents/*.md` → config.toml `[[subagents]]`。
+来源合并优先级(后者覆盖同名):`~/.zhuye/subagents/*.md` →
+workspace `.zhuye/subagents/*.md` → config.toml `[[subagents]]`。
 spawn 时为子代理构造**仅含白名单工具**的过滤后 registry(coordinator
 模式下另有 worker 专用裁剪:用 `register_except` 排除 `TeamCreate` 等
 内部工具)。
@@ -150,16 +150,16 @@ spawn 时为子代理构造**仅含白名单工具**的过滤后 registry(coordi
 | `unregister_source(source)` | 按来源整组移除(如一键摘掉全部 MCP 工具) |
 | `register_except(tools, excluded)` | 批量装配 + 排除名单 |
 
-`custom_tool` 示例(`cargo run -p reflect --example custom_tool`)演示
+`custom_tool` 示例(`cargo run -p zhuye --example custom_tool`)演示
 了注册自定义工具的标准写法。
 
 
 
 - **Protocol v0 已冻结**:新增 Op/EventMsg 变体 = non-breaking,不可改动既有变体。
   wire 协议的稳定性是所有客户端(TUI / exec / serve / SDK)共同的前提。
-- **JSONL stdout,日志 stderr**:`reflect exec | jq` 不破坏 —— 事件流与诊断日志
+- **JSONL stdout,日志 stderr**:`zhuye exec | jq` 不破坏 —— 事件流与诊断日志
   严格分流,管道消费方永远拿到纯 JSONL。
-- **ToolError 定义在 reflect-protocol**:打破 tools ↔ hooks 循环依赖,错误类型
+- **ToolError 定义在 zhuye-protocol**:打破 tools ↔ hooks 循环依赖,错误类型
   下沉到公共契约层。
 - **StateGraph 用 enum + match**:4 节点固定结构,手写转移,不引入 petgraph ——
   控制流显式、可审计,这正是框架相对黑盒 agent 循环的核心差异之一。

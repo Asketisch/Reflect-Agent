@@ -23,8 +23,8 @@ import pytest
 # 仓库根:tests/sdk-python/conftest.py → 上溯两级。
 ROOT = Path(__file__).resolve().parents[2]
 # 被测二进制:默认 release 产物(与 tests/lib.sh 的约定一致)。
-REFLECT_BIN = Path(
-    os.environ.get("REFLECT_BIN", str(ROOT / "target/release/reflect"))
+ZHUYE_BIN = Path(
+    os.environ.get("ZHUYE_BIN", str(ROOT / "target/release/zhuye"))
 )
 # 迭代器墙钟预算:终态事件缺失(回归)时断言失败,绝不挂死整个套件。
 DRAIN_TIMEOUT = 30.0
@@ -38,23 +38,23 @@ def env_home() -> Iterator[Path]:
     单轮会拖到分钟级;SDK 场景只需协议语义,统一关掉。config.toml 必须存在,
     否则 ConfigWatcher 启动即报错退出。
     """
-    home = Path(tempfile.mkdtemp(prefix="reflect-pytest-home."))
-    reflect_dir = home / ".reflect"
-    reflect_dir.mkdir(parents=True)
-    (reflect_dir / "config.toml").write_text(
+    home = Path(tempfile.mkdtemp(prefix="zhuye-pytest-home."))
+    zhuye_dir = home / ".zhuye"
+    zhuye_dir.mkdir(parents=True)
+    (zhuye_dir / "config.toml").write_text(
         "# 测试用最小配置:关闭全部内置 hook\n[hooks]\nenabled = []\n"
     )
     old_home = os.environ.get("HOME")
     os.environ["HOME"] = str(home)
     yield home
     for var in (
-        "REFLECT_MODEL",
-        "REFLECT_MOCK_SCRIPT",
-        "REFLECT_APPROVALS",
-        "REFLECT_REMOTE_TOOL_TIMEOUT_SECS",
+        "ZHUYE_MODEL",
+        "ZHUYE_MOCK_SCRIPT",
+        "ZHUYE_APPROVALS",
+        "ZHUYE_REMOTE_TOOL_TIMEOUT_SECS",
     ):
         os.environ.pop(var, None)
     if old_home is not None:
         os.environ["HOME"] = old_home
-    if not os.environ.get("REFLECT_KEEP"):
+    if not os.environ.get("ZHUYE_KEEP"):
         shutil.rmtree(home, ignore_errors=True)

@@ -32,7 +32,7 @@ GitHub Release)与 `release-sdks.yml`(SDK 真发布;平台未配置时会失败)
 
 ### 第 0 步:确定包名
 
-当前包名 `reflect-agent`(PyPI / npm 同名)。若项目改名,先走
+当前包名 `zhuye-agent`(PyPI / npm 同名)。若项目改名,先走
 [改名 checklist](#改名-checklist),平台登记用最终名字做,避免返工。
 
 ### 第 1 步:PyPI 侧配置(Pending Publisher)
@@ -40,8 +40,8 @@ GitHub Release)与 `release-sdks.yml`(SDK 真发布;平台未配置时会失败)
 1. 注册 [pypi.org](https://pypi.org) 账号;
 2. 账号设置 → Publishing → 添加 **Pending Publisher**(项目尚未存在也可预登记,
    首次发布即自动建项目),五元组必须与 workflow 精确一致:
-   - PyPI project name:`reflect-agent`(或改名后的最终名)
-   - Owner:`Asketisch` / Repository:`Reflect-Agent`
+   - PyPI project name:`zhuye-agent`(或改名后的最终名)
+   - Owner:`Asketisch` / Repository:`ZhuYe`
    - Workflow filename:`release-sdks.yml`
    - Environment:`pypi`
 
@@ -57,7 +57,7 @@ npm publish                        # 首版手动发布
 
 然后在 npmjs.com 包设置页 → Trusted Publisher 登记(保存后 **2 天内必须完成
 一次成功发布**,否则配置过期需重建):Owner `Asketisch` / Repository
-`Reflect-Agent` / Workflow `release-sdks.yml` / Environment `npm`。
+`ZhuYe` / Workflow `release-sdks.yml` / Environment `npm`。
 
 ### 第 3 步:发布
 
@@ -80,7 +80,7 @@ npm publish                        # 首版手动发布
 | PyPI 包名 | `sdks/python/pyproject.toml` 的 `[project] name` |
 | npm 包名 | `sdks/typescript/package.json` 的 `name` |
 | 仓库地址(三处) | 根 `Cargo.toml` `[workspace.package] repository`、`pyproject.toml` `[project.urls]`、`package.json` `repository`/`homepage`/`bugs` |
-| Python 包导入名(如涉及) | `sdks/python/reflect/` 目录名 + `pyproject.toml` `[tool.setuptools]` include |
+| Python 包导入名(如涉及) | `sdks/python/zhuye/` 目录名 + `pyproject.toml` `[tool.setuptools]` include |
 | 本文档 | 上述第 1/2 步登记用的名字 |
 | 平台侧 | PyPI Pending Publisher / npm Trusted Publisher 按新名重新登记 |
 

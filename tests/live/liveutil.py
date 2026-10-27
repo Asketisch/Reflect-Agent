@@ -14,9 +14,9 @@ from typing import Any
 import pytest
 
 # 单个模型的默认重试次数(免费池 429 / 断流是常态)。
-RETRIES = int(os.environ.get("REFLECT_LIVE_RETRIES", "2"))
+RETRIES = int(os.environ.get("ZHUYE_LIVE_RETRIES", "2"))
 # 重试间隔(秒)—— 退避一点,别把上游再逼限流。
-RETRY_DELAY = float(os.environ.get("REFLECT_LIVE_RETRY_DELAY", "5"))
+RETRY_DELAY = float(os.environ.get("ZHUYE_LIVE_RETRY_DELAY", "5"))
 
 
 class LiveFailure(AssertionError):

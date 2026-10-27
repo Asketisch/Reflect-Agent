@@ -1,0 +1,34 @@
+[package]
+name = "zhuye-plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ZhuYe: plugin manifest, lifecycle, and capability loader"
+
+[dependencies]
+zhuye-protocol = { workspace = true }
+zhuye-tools    = { workspace = true }
+zhuye-hooks    = { workspace = true }
+zhuye-mcp      = { workspace = true }
+zhuye-skills   = { workspace = true }
+zhuye-subagent = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+serde_yaml         = { workspace = true }
+toml               = { workspace = true }
+thiserror          = { workspace = true }
+tracing            = { workspace = true }
+async-trait        = { workspace = true }
+chrono             = { workspace = true }
+regex              = { workspace = true }
+parking_lot        = { workspace = true }
+tokio              = { workspace = true }
+reqwest            = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+tokio         = { workspace = true }
+tokio-util    = { workspace = true }
+wiremock      = { workspace = true }
+zhuye-llm   = { workspace = true }
+zhuye-protocol = { workspace = true }

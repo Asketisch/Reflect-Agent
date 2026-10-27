@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tests/rust/serve_ops.sh —— serve 协议 19 个 Op 全量 + 事件流断言(非冒烟)。
 #
-# 通过 FIFO 驱动 `reflect serve`,逐 op 断言其触发的 EventMsg 与副作用:
+# 通过 FIFO 驱动 `zhuye serve`,逐 op 断言其触发的 EventMsg 与副作用:
 #   user_input            单轮 turn_started→turn_complete + thread_settings 透传
 #   set_effort            静默写槽(无 turn 事件,仅收尾标记),后续 turn 正常
 #   set_permission_mode   permission_mode_changed(from/to)
@@ -27,7 +27,7 @@
 #   收尾非 turn 操作;本脚本对静默 op(set_effort)断言「除收尾标记
 #   外无新增事件」,对事件 op 断言「收尾标记在事件之后到达」。
 #
-# 前置:release 二进制。全程 REFLECT_MODEL=mock + 隔离 HOME。
+# 前置:release 二进制。全程 ZHUYE_MODEL=mock + 隔离 HOME。
 # 说明:approval_request / ask_user* 在 headless 无 ApprovalGate(仅 TUI),
 #       故其工具路径不可触发;这里只验孤儿回执 op 的 wire 级健壮性。
 
@@ -57,8 +57,8 @@ start_serve() {
     local f="$ISO_CWD/ops.fifo"
     rm -f "$f"
     mkfifo "$f"
-    ( REFLECT_MODEL=mock REFLECT_MOCK_SCRIPT="$script" \
-        "$REFLECT_BIN" serve <"$f" >"$out" 2>"$err" & )
+    ( ZHUYE_MODEL=mock ZHUYE_MOCK_SCRIPT="$script" \
+        "$ZHUYE_BIN" serve <"$f" >"$out" 2>"$err" & )
     SERVE_PID=$!
     exec 3>"$f"
     waitfor "$out" '"session_configured"' 20 || { echo "serve 握手超时" >&2; return 1; }
@@ -223,8 +223,8 @@ serve_ops_plan() {
         jq -e 'select(.msg.type=="plan_draft_updated")' "$out"
     tcase "plan_draft_updated 含 markdown" \
         jq -e 'select(.msg.type=="plan_draft_updated" and (.msg.markdown|contains("plan")))' "$out"
-    tcase "plan_draft_updated 落盘 .reflect/plan/" \
-        jq -e 'select(.msg.type=="plan_draft_updated" and (.msg.path|test(".reflect/plan/")))' "$out"
+    tcase "plan_draft_updated 落盘 .zhuye/plan/" \
+        jq -e 'select(.msg.type=="plan_draft_updated" and (.msg.path|test(".zhuye/plan/")))' "$out"
 
     waitfor "$out" '"plan_ready"' 30 || echo NO_READY
     tcase "ExitPlanMode 触发 plan_ready" \
@@ -234,7 +234,7 @@ serve_ops_plan() {
     tcase "plan_ready 含 plan_id" test -n "$plid"
     # plan markdown 落盘成可 cat 的持久产物
     tcase "plan markdown 落盘到 workspace" \
-        bash -c "ls '$ISO_CWD/.reflect/plan/' | grep -q . "
+        bash -c "ls '$ISO_CWD/.zhuye/plan/' | grep -q . "
 
     # ── plan_approval auto_mode → 切权限模式 + plan_approved ──
     wop "{\"id\":\"p2\",\"op\":{\"type\":\"plan_approval\",\"id\":\"$plid\",\"choice\":\"auto_mode\"}}"

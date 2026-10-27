@@ -63,7 +63,7 @@ jobs:
       # 看到全部失败面,失败诊断不再打地鼠)。
       - run: cargo test --workspace --all-targets --no-fail-fast
 
-  # SDK 测试用本地 Node "mock serve" 驱动协议,不依赖 reflect 二进制
+  # SDK 测试用本地 Node "mock serve" 驱动协议,不依赖 zhuye 二进制
   # 与网络(离线;真二进制的端到端覆盖在 Rust 集成测试 serve_stdio.rs)。
   sdk-ts:
     name: sdk typescript
@@ -97,7 +97,7 @@ jobs:
 
   # 功能覆盖门禁:能力覆盖层(Python 打真二进制,原始 wire)+ Rust CLI 参数面
   # + 双 SDK 绑定层。cargo test / clippy / fmt / doc 由上面的 job 覆盖,
-  # 这里用 `functional` 模式跳过(REFLECT_SKIP_WORKSPACE=1)。
+  # 这里用 `functional` 模式跳过(ZHUYE_SKIP_WORKSPACE=1)。
   functional-suite:
     name: functional test suite
     runs-on: ubuntu-latest
@@ -117,10 +117,10 @@ jobs:
       - name: install jq (tests/rust/*.sh 依赖)
         run: sudo apt-get update && sudo apt-get install -y jq
       - run: pip install pytest
-      - name: build reflect binary (release)
-        run: cargo build --release -p reflect-cli
+      - name: build zhuye binary (release)
+        run: cargo build --release -p zhuye-cli
       - name: build mock MCP server (审批用例需要)
-        run: cargo build -p reflect-mcp
+        run: cargo build -p zhuye-mcp
       - run: npm ci
         working-directory: sdks/typescript
       - run: ./tests/run_all.sh functional

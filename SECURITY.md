@@ -1,13 +1,13 @@
 # 安全策略
 
-> Reflect 项目的安全漏洞报告与处理流程。本文档面向所有希望负责任地披露
+> 烛夜（ZhuYe）项目的安全漏洞报告与处理流程。本文档面向所有希望负责任地披露
 > 漏洞的研究员、用户与贡献者。
 
 ---
 
 ## 支持的版本
 
-下表列出当前获得安全更新的 Reflect 版本。
+下表列出当前获得安全更新的烛夜版本。
 
 | 版本    | 是否支持         |
 |---------|------------------|
@@ -21,14 +21,14 @@
 
 ## 报告漏洞
 
-如果你在 Reflect 中发现安全漏洞,**请不要**通过 GitHub Issues、Discussions
+如果你在烛夜中发现安全漏洞,**请不要**通过 GitHub Issues、Discussions
 或公开 PR 提交,以免在补丁发布前被恶意利用。
 
 ### 私下报告通道
 
 请通过以下任一方式私下联系维护者:
 
-- **邮箱**:`security@reflect-agent.dev`
+- **邮箱**:`security@zhuye-agent.dev`
 - **主题前缀**:`[SECURITY]`(便于邮件过滤)
 - **加密**(可选):维护者 GPG 公钥见 [`SECURITY_GPG.asc`](SECURITY_GPG.asc)(如有)
   或在邮件中请求
@@ -49,7 +49,7 @@
 
 - 在收到报告后 **72 小时内** 确认收到
 - 在合理时间内(通常 7–30 天,视复杂度)修复并发布补丁
-- 修复后通过 [GitHub Security Advisory](https://github.com/CNB/Reflect-Agent/security/advisories)
+- 修复后通过 [GitHub Security Advisory](https://github.com/Asketisch/ZhuYe/security/advisories)
   公开披露(除非你明确要求匿名)
 - 致谢报告者(如果你愿意在公告中署名)
 - 修复前不公开披露任何细节
@@ -89,8 +89,8 @@
 
 ## 安全相关更新
 
-- 关注本仓库的 [GitHub Releases](https://github.com/CNB/Reflect-Agent/releases)
-  与 [Security Advisories](https://github.com/CNB/Reflect-Agent/security/advisories)
+- 关注本仓库的 [GitHub Releases](https://github.com/Asketisch/ZhuYe/releases)
+  与 [Security Advisories](https://github.com/Asketisch/ZhuYe/security/advisories)
   获取安全公告
 - 升级到最新版本是规避已知漏洞的最简单方式
 
@@ -98,7 +98,7 @@
 
 ## 致谢
 
-感谢所有负责任地披露漏洞、为 Reflect 安全性做出贡献的研究员与用户。
+感谢所有负责任地披露漏洞、为烛夜安全性做出贡献的研究员与用户。
 
 > 本策略参考 [GitHub Security Advisories](https://docs.github.com/en/code-security/security-advisories)、
 > [Apache 2.0 安全披露最佳实践](https://www.apache.org/security/) 与

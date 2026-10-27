@@ -25,7 +25,7 @@ RC=0
 
 echo "── Python SDK 绑定层:真二进制端到端(pytest)──"
 if require_cmd python3 && python3 -m pytest --version >/dev/null 2>&1; then
-    if HOME="$(mktemp -d)" REFLECT_BIN="$REFLECT_BIN" \
+    if HOME="$(mktemp -d)" ZHUYE_BIN="$ZHUYE_BIN" \
         PYTHONPATH="$ROOT/sdks/python" \
         python3 -m pytest "$HERE/test_sdk_real_bin.py" -v --tb=short; then
         echo "  [ok]   SDK 绑定层全绿"
@@ -40,7 +40,7 @@ fi
 echo
 echo "── Python SDK:协议单测(Node mock serve)──"
 if require_cmd python3 node && python3 -m pytest --version >/dev/null 2>&1; then
-    if HOME="$(mktemp -d)" REFLECT_BIN="$REFLECT_BIN" \
+    if HOME="$(mktemp -d)" ZHUYE_BIN="$ZHUYE_BIN" \
         PYTHONPATH="$ROOT/sdks/python" \
         python3 -m pytest "$ROOT/sdks/python/tests" -v --tb=short; then
         echo "  [ok]   协议单测全绿"

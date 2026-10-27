@@ -2264,749 +2264,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "reflect"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "futures",
- "parking_lot",
- "reflect-agent-def",
- "reflect-ast",
- "reflect-compact",
- "reflect-config",
- "reflect-core",
- "reflect-discussion",
- "reflect-hooks",
- "reflect-llm",
- "reflect-mcp",
- "reflect-memory",
- "reflect-notes",
- "reflect-plugin",
- "reflect-prompt",
- "reflect-protocol",
- "reflect-recovery",
- "reflect-rollout",
- "reflect-skills",
- "reflect-subagent",
- "reflect-task",
- "reflect-telemetry",
- "reflect-tools",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "reflect-agent-def"
-version = "0.1.0"
-dependencies = [
- "reflect-memory",
- "reflect-protocol",
- "serde",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "thiserror 1.0.69",
- "toml",
- "tracing",
-]
-
-[[package]]
-name = "reflect-ast"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "ignore",
- "reflect-protocol",
- "reflect-tools",
- "regex",
- "serde",
- "serde_json",
- "similar",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
- "tree-sitter 0.26.9",
- "tree-sitter-bash",
- "tree-sitter-c",
- "tree-sitter-c-sharp",
- "tree-sitter-cpp",
- "tree-sitter-css",
- "tree-sitter-elixir",
- "tree-sitter-go",
- "tree-sitter-haskell",
- "tree-sitter-html",
- "tree-sitter-java",
- "tree-sitter-javascript",
- "tree-sitter-json",
- "tree-sitter-kotlin",
- "tree-sitter-markdown",
- "tree-sitter-php",
- "tree-sitter-python",
- "tree-sitter-ruby",
- "tree-sitter-rust",
- "tree-sitter-scala",
- "tree-sitter-swift",
- "tree-sitter-toml",
- "tree-sitter-typescript",
- "tree-sitter-yaml",
-]
-
-[[package]]
-name = "reflect-bm25"
-version = "0.1.0"
-dependencies = [
- "rankfns",
-]
-
-[[package]]
-name = "reflect-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "reflect-config",
- "reflect-discussion",
- "reflect-exec",
- "reflect-integration",
- "reflect-llm",
- "reflect-mcp",
- "reflect-pipeline",
- "reflect-plugin",
- "reflect-protocol",
- "reflect-rollout",
- "reflect-stream",
- "reflect-subagent",
- "reflect-task",
- "reflect-telemetry",
- "reflect-tools",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-util",
- "toml",
- "tracing",
- "uuid",
- "wiremock",
-]
-
-[[package]]
-name = "reflect-compact"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "futures",
- "parking_lot",
- "reflect-llm",
- "reflect-memory",
- "reflect-prompt",
- "reflect-protocol",
- "reflect-telemetry",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tiktoken-rs",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "reflect-config"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "notify",
- "opentelemetry",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
- "parking_lot",
- "reflect-llm",
- "reflect-permissions",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "toml",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
- "wiremock",
-]
-
-[[package]]
-name = "reflect-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-stream",
- "async-trait",
- "chrono",
- "futures",
- "parking_lot",
- "reflect-agent-def",
- "reflect-compact",
- "reflect-goal",
- "reflect-hooks",
- "reflect-llm",
- "reflect-memory",
- "reflect-notes",
- "reflect-permissions",
- "reflect-prompt",
- "reflect-protocol",
- "reflect-recovery",
- "reflect-sandbox",
- "reflect-skills",
- "reflect-subagent",
- "reflect-telemetry",
- "reflect-tools",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "reflect-discussion"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "futures",
- "parking_lot",
- "reflect-config",
- "reflect-core",
- "reflect-llm",
- "reflect-prompt",
- "reflect-protocol",
- "reflect-subagent",
- "reflect-tools",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "toml",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "reflect-exec"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "clap",
- "futures",
- "opentelemetry",
- "opentelemetry_sdk",
- "parking_lot",
- "reflect-agent-def",
- "reflect-ast",
- "reflect-compact",
- "reflect-config",
- "reflect-core",
- "reflect-hooks",
- "reflect-llm",
- "reflect-lsp",
- "reflect-mcp",
- "reflect-memory",
- "reflect-notes",
- "reflect-permissions",
- "reflect-plugin",
- "reflect-prompt",
- "reflect-protocol",
- "reflect-recovery",
- "reflect-rollout",
- "reflect-sandbox",
- "reflect-skills",
- "reflect-stream",
- "reflect-subagent",
- "reflect-task",
- "reflect-telemetry",
- "reflect-tools",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "reflect-goal"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "futures",
- "parking_lot",
- "reflect-llm",
- "reflect-prompt",
- "reflect-protocol",
- "reflect-telemetry",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "reflect-hooks"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "filetime",
- "once_cell",
- "parking_lot",
- "reflect-config",
- "reflect-protocol",
- "regex",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "toml",
- "tracing",
-]
-
-[[package]]
-name = "reflect-integration"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "reflect-llm"
-version = "0.1.0"
-dependencies = [
- "async-stream",
- "async-trait",
- "chrono",
- "eventsource-stream",
- "futures",
- "insta",
- "parking_lot",
- "reflect-protocol",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
- "wiremock",
-]
-
-[[package]]
-name = "reflect-lsp"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "globset",
- "lsp-types",
- "parking_lot",
- "reflect-config",
- "reflect-protocol",
- "reflect-tools",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "reflect-mcp"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "parking_lot",
- "reflect-config",
- "reflect-protocol",
- "reflect-tools",
- "reqwest 0.13.4",
- "rmcp",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "reflect-memory"
-version = "0.1.0"
-dependencies = [
- "parking_lot",
- "reflect-bm25",
- "reflect-protocol",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "reflect-notes"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "parking_lot",
- "reflect-protocol",
- "reflect-tools",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "reflect-permissions"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "globset",
- "parking_lot",
- "reflect-protocol",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "toml",
- "tracing",
-]
-
-[[package]]
-name = "reflect-pipeline"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "parking_lot",
- "reflect-llm",
- "reflect-protocol",
- "reflect-subagent",
- "reflect-task",
- "reflect-tools",
- "serde",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "toml",
- "tracing",
-]
-
-[[package]]
-name = "reflect-plugin"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "parking_lot",
- "reflect-hooks",
- "reflect-llm",
- "reflect-mcp",
- "reflect-protocol",
- "reflect-skills",
- "reflect-subagent",
- "reflect-tools",
- "regex",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "toml",
- "tracing",
- "wiremock",
-]
-
-[[package]]
-name = "reflect-prompt"
-version = "0.1.0"
-dependencies = [
- "minijinja",
- "reflect-llm",
- "reflect-protocol",
- "serde",
- "serde_json",
- "sha1",
- "tempfile",
- "thiserror 1.0.69",
- "tracing",
-]
-
-[[package]]
-name = "reflect-protocol"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "schemars 0.8.22",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "reflect-py"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "pyo3",
- "reflect",
- "reflect-core",
- "reflect-protocol",
- "tokio",
-]
-
-[[package]]
-name = "reflect-recovery"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "parking_lot",
- "reflect-llm",
- "reflect-protocol",
- "reflect-tools",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "reflect-rollout"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "filetime",
- "parking_lot",
- "reflect-protocol",
- "reflect-sanitize",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "reflect-sandbox"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "reflect-sanitize"
-version = "0.1.0"
-dependencies = [
- "once_cell",
- "regex",
- "serde_json",
-]
-
-[[package]]
-name = "reflect-skills"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "globset",
- "parking_lot",
- "reflect-llm",
- "reflect-protocol",
- "reflect-tools",
- "serde",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "reflect-stream"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "parking_lot",
- "reflect-protocol",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "reflect-subagent"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "futures",
- "parking_lot",
- "reflect-config",
- "reflect-core",
- "reflect-llm",
- "reflect-protocol",
- "reflect-recovery",
- "reflect-rollout",
- "reflect-skills",
- "reflect-telemetry",
- "reflect-tools",
- "serde",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "reflect-task"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "parking_lot",
- "reflect-config",
- "reflect-hooks",
- "reflect-llm",
- "reflect-prompt",
- "reflect-protocol",
- "reflect-subagent",
- "reflect-tools",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "reflect-telemetry"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "parking_lot",
- "reflect-protocol",
- "reflect-sanitize",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "reflect-tools"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "filetime",
- "futures",
- "htmd",
- "ignore",
- "once_cell",
- "parking_lot",
- "reflect-bm25",
- "reflect-hooks",
- "reflect-permissions",
- "reflect-prompt",
- "reflect-protocol",
- "reflect-sandbox",
- "regex",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "similar",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
- "url",
- "uuid",
-]
-
-[[package]]
 name = "regex"
 version = "1.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5250,6 +4507,749 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.118",
+]
+
+[[package]]
+name = "zhuye"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "parking_lot",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+ "zhuye-agent-def",
+ "zhuye-ast",
+ "zhuye-compact",
+ "zhuye-config",
+ "zhuye-core",
+ "zhuye-discussion",
+ "zhuye-hooks",
+ "zhuye-llm",
+ "zhuye-mcp",
+ "zhuye-memory",
+ "zhuye-notes",
+ "zhuye-plugin",
+ "zhuye-prompt",
+ "zhuye-protocol",
+ "zhuye-recovery",
+ "zhuye-rollout",
+ "zhuye-skills",
+ "zhuye-subagent",
+ "zhuye-task",
+ "zhuye-telemetry",
+ "zhuye-tools",
+]
+
+[[package]]
+name = "zhuye-agent-def"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 1.0.69",
+ "toml",
+ "tracing",
+ "zhuye-memory",
+ "zhuye-protocol",
+]
+
+[[package]]
+name = "zhuye-ast"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ignore",
+ "regex",
+ "serde",
+ "serde_json",
+ "similar",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tree-sitter 0.26.9",
+ "tree-sitter-bash",
+ "tree-sitter-c",
+ "tree-sitter-c-sharp",
+ "tree-sitter-cpp",
+ "tree-sitter-css",
+ "tree-sitter-elixir",
+ "tree-sitter-go",
+ "tree-sitter-haskell",
+ "tree-sitter-html",
+ "tree-sitter-java",
+ "tree-sitter-javascript",
+ "tree-sitter-json",
+ "tree-sitter-kotlin",
+ "tree-sitter-markdown",
+ "tree-sitter-php",
+ "tree-sitter-python",
+ "tree-sitter-ruby",
+ "tree-sitter-rust",
+ "tree-sitter-scala",
+ "tree-sitter-swift",
+ "tree-sitter-toml",
+ "tree-sitter-typescript",
+ "tree-sitter-yaml",
+ "zhuye-protocol",
+ "zhuye-tools",
+]
+
+[[package]]
+name = "zhuye-bm25"
+version = "0.1.0"
+dependencies = [
+ "rankfns",
+]
+
+[[package]]
+name = "zhuye-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "uuid",
+ "wiremock",
+ "zhuye-config",
+ "zhuye-discussion",
+ "zhuye-exec",
+ "zhuye-integration",
+ "zhuye-llm",
+ "zhuye-mcp",
+ "zhuye-pipeline",
+ "zhuye-plugin",
+ "zhuye-protocol",
+ "zhuye-rollout",
+ "zhuye-stream",
+ "zhuye-subagent",
+ "zhuye-task",
+ "zhuye-telemetry",
+ "zhuye-tools",
+]
+
+[[package]]
+name = "zhuye-compact"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tiktoken-rs",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "zhuye-llm",
+ "zhuye-memory",
+ "zhuye-prompt",
+ "zhuye-protocol",
+ "zhuye-telemetry",
+]
+
+[[package]]
+name = "zhuye-config"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "notify",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+ "wiremock",
+ "zhuye-llm",
+ "zhuye-permissions",
+]
+
+[[package]]
+name = "zhuye-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "chrono",
+ "futures",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+ "zhuye-agent-def",
+ "zhuye-compact",
+ "zhuye-goal",
+ "zhuye-hooks",
+ "zhuye-llm",
+ "zhuye-memory",
+ "zhuye-notes",
+ "zhuye-permissions",
+ "zhuye-prompt",
+ "zhuye-protocol",
+ "zhuye-recovery",
+ "zhuye-sandbox",
+ "zhuye-skills",
+ "zhuye-subagent",
+ "zhuye-telemetry",
+ "zhuye-tools",
+]
+
+[[package]]
+name = "zhuye-discussion"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "uuid",
+ "zhuye-config",
+ "zhuye-core",
+ "zhuye-llm",
+ "zhuye-prompt",
+ "zhuye-protocol",
+ "zhuye-subagent",
+ "zhuye-tools",
+]
+
+[[package]]
+name = "zhuye-exec"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "clap",
+ "futures",
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "parking_lot",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+ "uuid",
+ "zhuye-agent-def",
+ "zhuye-ast",
+ "zhuye-compact",
+ "zhuye-config",
+ "zhuye-core",
+ "zhuye-hooks",
+ "zhuye-llm",
+ "zhuye-lsp",
+ "zhuye-mcp",
+ "zhuye-memory",
+ "zhuye-notes",
+ "zhuye-permissions",
+ "zhuye-plugin",
+ "zhuye-prompt",
+ "zhuye-protocol",
+ "zhuye-recovery",
+ "zhuye-rollout",
+ "zhuye-sandbox",
+ "zhuye-skills",
+ "zhuye-stream",
+ "zhuye-subagent",
+ "zhuye-task",
+ "zhuye-telemetry",
+ "zhuye-tools",
+]
+
+[[package]]
+name = "zhuye-goal"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "futures",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "zhuye-llm",
+ "zhuye-prompt",
+ "zhuye-protocol",
+ "zhuye-telemetry",
+]
+
+[[package]]
+name = "zhuye-hooks"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "filetime",
+ "once_cell",
+ "parking_lot",
+ "regex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "zhuye-config",
+ "zhuye-protocol",
+]
+
+[[package]]
+name = "zhuye-integration"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "zhuye-llm"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "chrono",
+ "eventsource-stream",
+ "futures",
+ "insta",
+ "parking_lot",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+ "wiremock",
+ "zhuye-protocol",
+]
+
+[[package]]
+name = "zhuye-lsp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "globset",
+ "lsp-types",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+ "zhuye-config",
+ "zhuye-protocol",
+ "zhuye-tools",
+]
+
+[[package]]
+name = "zhuye-mcp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "parking_lot",
+ "reqwest 0.13.4",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+ "zhuye-config",
+ "zhuye-protocol",
+ "zhuye-tools",
+]
+
+[[package]]
+name = "zhuye-memory"
+version = "0.1.0"
+dependencies = [
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "zhuye-bm25",
+ "zhuye-protocol",
+]
+
+[[package]]
+name = "zhuye-notes"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "zhuye-protocol",
+ "zhuye-tools",
+]
+
+[[package]]
+name = "zhuye-permissions"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "globset",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "toml",
+ "tracing",
+ "zhuye-protocol",
+]
+
+[[package]]
+name = "zhuye-pipeline"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "zhuye-llm",
+ "zhuye-protocol",
+ "zhuye-subagent",
+ "zhuye-task",
+ "zhuye-tools",
+]
+
+[[package]]
+name = "zhuye-plugin"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "parking_lot",
+ "regex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "wiremock",
+ "zhuye-hooks",
+ "zhuye-llm",
+ "zhuye-mcp",
+ "zhuye-protocol",
+ "zhuye-skills",
+ "zhuye-subagent",
+ "zhuye-tools",
+]
+
+[[package]]
+name = "zhuye-prompt"
+version = "0.1.0"
+dependencies = [
+ "minijinja",
+ "serde",
+ "serde_json",
+ "sha1",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
+ "zhuye-llm",
+ "zhuye-protocol",
+]
+
+[[package]]
+name = "zhuye-protocol"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "zhuye-py"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "pyo3",
+ "tokio",
+ "zhuye",
+ "zhuye-core",
+ "zhuye-protocol",
+]
+
+[[package]]
+name = "zhuye-recovery"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "zhuye-llm",
+ "zhuye-protocol",
+ "zhuye-tools",
+]
+
+[[package]]
+name = "zhuye-rollout"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "filetime",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid",
+ "zhuye-protocol",
+ "zhuye-sanitize",
+]
+
+[[package]]
+name = "zhuye-sandbox"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "zhuye-sanitize"
+version = "0.1.0"
+dependencies = [
+ "once_cell",
+ "regex",
+ "serde_json",
+]
+
+[[package]]
+name = "zhuye-skills"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "globset",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "zhuye-llm",
+ "zhuye-protocol",
+ "zhuye-tools",
+]
+
+[[package]]
+name = "zhuye-stream"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid",
+ "zhuye-protocol",
+]
+
+[[package]]
+name = "zhuye-subagent"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "futures",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+ "zhuye-config",
+ "zhuye-core",
+ "zhuye-llm",
+ "zhuye-protocol",
+ "zhuye-recovery",
+ "zhuye-rollout",
+ "zhuye-skills",
+ "zhuye-telemetry",
+ "zhuye-tools",
+]
+
+[[package]]
+name = "zhuye-task"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "zhuye-config",
+ "zhuye-hooks",
+ "zhuye-llm",
+ "zhuye-prompt",
+ "zhuye-protocol",
+ "zhuye-subagent",
+ "zhuye-tools",
+]
+
+[[package]]
+name = "zhuye-telemetry"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "parking_lot",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid",
+ "zhuye-protocol",
+ "zhuye-sanitize",
+]
+
+[[package]]
+name = "zhuye-tools"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "filetime",
+ "futures",
+ "htmd",
+ "ignore",
+ "once_cell",
+ "parking_lot",
+ "regex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "similar",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+ "uuid",
+ "zhuye-bm25",
+ "zhuye-hooks",
+ "zhuye-permissions",
+ "zhuye-prompt",
+ "zhuye-protocol",
+ "zhuye-sandbox",
 ]
 
 [[package]]

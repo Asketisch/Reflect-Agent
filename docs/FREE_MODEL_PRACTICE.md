@@ -1,6 +1,6 @@
 # 免费模型实践测试指南
 
-用**免费模型池**跑 Reflect 的完整 agent 链路 —— 不需要任何 API Key,
+用**免费模型池**跑 烛夜 的完整 agent 链路 —— 不需要任何 API Key,
 也不产生费用。
 
 本文覆盖两条车道、模型发现机制、配置模板、已知限制与排障。
@@ -37,7 +37,7 @@ Kilo 车道**零外部依赖** —— 只改 `config.toml` 就能用。
 OpenCode 车道有 **v2 客户端指纹门**:UA 必须是 `opencode/latest/2.0.26/cli`、
 四个会话头、铸造形状的 session id、**逐字**的 `read` / `shell` 工具定义、
 且绝不能下发 `tool_choice: none`。这些由 dsh-our-free-model 的本地网关
-补齐(它还会把与官方定义不同的同名工具改名并在响应侧还原 —— Reflect 自带
+补齐(它还会把与官方定义不同的同名工具改名并在响应侧还原 —— 烛夜 自带
 一个名为 `read` 的内置工具,走这条车道时会被改名再还原)。
 
 ```bash
@@ -50,15 +50,15 @@ scripts/ofm_gateway.sh status
 ## 模型发现:从接口获取,不写死
 
 免费模型集合由**上游**决定,随时可能增删 —— 写死模型 id 必然腐烂。
-Reflect 因此内置了**模型发现能力**:
+烛夜 因此内置了**模型发现能力**:
 
 ```bash
-reflect models list --free-only          # 人看
-reflect models list --free-only --json   # 脚本消费
-reflect models pick --free-only          # 只打印一个 model id
+zhuye models list --free-only          # 人看
+zhuye models list --free-only --json   # 脚本消费
+zhuye models pick --free-only          # 只打印一个 model id
 ```
 
-「免费」的判定走**规则**(`reflect_llm::FreeModelRules`),三通道:
+「免费」的判定走**规则**(`zhuye_llm::FreeModelRules`),三通道:
 
 1. **provider 显式标记** —— Kilo 的 `isFree: true`(权威);
 2. **白名单** —— 不带 free 标记但确实免费的 id(默认三个,可配置);
@@ -83,7 +83,7 @@ free_id_patterns = ["-free", ":free", "/free"]
 ### Kilo 车道(默认,免 Key)
 
 ```toml
-# ~/.reflect/config.toml
+# ~/.zhuye/config.toml
 [hooks]
 enabled = []                      # 演练时关掉内置 hook(只验引擎行为)
 
@@ -143,19 +143,19 @@ fallbacks = [
 
 ```bash
 # 单轮
-reflect exec "用一句话回答:1+1 等于几?"
+zhuye exec "用一句话回答:1+1 等于几?"
 
 # 看当前可用模型
-reflect models list --free-only
+zhuye models list --free-only
 
 # 自检(含模型清单检查)
-reflect doctor --check-network
+zhuye doctor --check-network
 ```
 
 ## 实模型演练层
 
 ```bash
-REFLECT_LIVE=1 ./tests/run_all.sh live
+ZHUYE_LIVE=1 ./tests/run_all.sh live
 ```
 
 细节见 [`tests/live/README.md`](../tests/live/README.md)。要点:
@@ -184,8 +184,8 @@ scripts/free_model_practice.sh --models cohere/north-mini-code:free --out report
 | **地区门 403** | 免费车道按出口 IP 判地区 | 换出口后重跑 |
 | **模型集合随时变** | 上游随时下架某个 id | 清单每次实时拉取;fallback 链兜底 |
 | **慢首字 / 思考静默** | 实测首字 >30s、思考阶段可静默 60~70s | `timeout_secs` **必须放大到 300** —— reqwest 的 timeout 是「建连→body 读完」的**总**时长,默认 60s 会把流式响应腰斩 |
-| **思考过程字段名不一** | 多数端点用 `delta.reasoning_content`,免费池用 `delta.reasoning` | Reflect 两个都认(`reasoning_content` 优先) |
-| **usage 可能在结束原因之后** | 部分端点把 usage 放在尾部额外 chunk | Reflect 收到结束原因后会在有界窗口内继续读 usage |
+| **思考过程字段名不一** | 多数端点用 `delta.reasoning_content`,免费池用 `delta.reasoning` | 烛夜 两个都认(`reasoning_content` 优先) |
+| **usage 可能在结束原因之后** | 部分端点把 usage 放在尾部额外 chunk | 烛夜 收到结束原因后会在有界窗口内继续读 usage |
 | **部分模型不支持 tools** | provider 直接 400 | 能力探测识别并跳过 |
 | **prompt 可能被上游记录** | Kilo 模型卡明示 | **只用合成数据**,不要喂真实仓库内容 / 凭据 |
 | **`context_window` 可能不披露** | OpenCode 原生车道只给 id | 用 `[context_windows]` 段显式声明 |

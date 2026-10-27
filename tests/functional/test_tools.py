@@ -1,17 +1,17 @@
 """能力覆盖层 · 工具面:内置工具、远程工具、审批链路。
 
-直接驱动 `reflect serve` 原始 JSONL wire(不经过任何 SDK)。
+直接驱动 `zhuye serve` 原始 JSONL wire(不经过任何 SDK)。
 
 覆盖:
 - T1 内置工具调用(mock 调 `echo` → tool_call_begin → tool_call_end);
 - T2 模型调未注册工具 → 错误输出(core 侧 `tool not found`);
 - T3 远程工具往返(register_tools → tool_execution_request → 回执 → tool_call_end);
 - T4 远程工具失败回执(is_error=true);
-- T5 工具审批全链路(REFLECT_APPROVALS=1 + MCP 工具);
+- T5 工具审批全链路(ZHUYE_APPROVALS=1 + MCP 工具);
 - T6 审批 deny 分支(工具不执行 + 错误输出)。
 
 运行:tests/run_all.sh functional,或
-  REFLECT_BIN=... python3 -m pytest tests/functional/test_tools.py -v
+  ZHUYE_BIN=... python3 -m pytest tests/functional/test_tools.py -v
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ def test_T1_内置工具调用(serve_session, mock_script) -> None:
             '{"type":"text","text":"tool-done"}',
         ]
     )
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         evs = s.submit(
             {"type": "user_input", "items": [{"type": "text", "text": "调 echo"}]},
             timeout=DRAIN_TIMEOUT,
@@ -78,7 +78,7 @@ def test_T1_内置工具调用(serve_session, mock_script) -> None:
 def test_T2_模型调未注册工具_错误输出(serve_session, mock_script) -> None:
     """模型调不存在的工具 → tool_call_end(is_error=true,含 `tool not found`)。
 
-    依据:crates/abilities/reflect-tools/src/queue.rs:296-304。
+    依据:crates/abilities/zhuye-tools/src/queue.rs:296-304。
     """
     require_binary()
     script = mock_script(
@@ -87,7 +87,7 @@ def test_T2_模型调未注册工具_错误输出(serve_session, mock_script) ->
             '{"type":"text","text":"recovered"}',
         ]
     )
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         evs = s.submit(
             {"type": "user_input", "items": [{"type": "text", "text": "调不存在的工具"}]},
             timeout=DRAIN_TIMEOUT,
@@ -102,7 +102,7 @@ def test_T2_模型调未注册工具_错误输出(serve_session, mock_script) ->
 def test_T3_远程工具往返(serve_session, mock_script) -> None:
     """register_tools → 模型调用 → `tool_execution_request`(全局)→ 回执 → tool_call_end。
 
-    依据:crates/abilities/reflect-tools/src/remote.rs:66-110;
+    依据:crates/abilities/zhuye-tools/src/remote.rs:66-110;
     sdks/PROTOCOL.md §5(远程工具执行流)。
 
     注意 call_id 的两套语义:`tool_execution_request.call_id` 是桥生成的
@@ -115,7 +115,7 @@ def test_T3_远程工具往返(serve_session, mock_script) -> None:
             '{"type":"text","text":"after-tool"}',
         ]
     )
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         s.send(
             {
                 "type": "register_tools",
@@ -168,7 +168,7 @@ def test_T4_远程工具失败回执(serve_session, mock_script) -> None:
             '{"type":"text","text":"remote-done"}',
         ]
     )
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         s.send(
             {
                 "type": "register_tools",
@@ -210,12 +210,12 @@ def test_T4_远程工具失败回执(serve_session, mock_script) -> None:
 def test_T5_工具审批全链路(serve_session, mock_script, sandbox) -> None:
     """MCP 工具(Prompt 权限)→ approval_request → 回执 → 工具真执行 → turn_complete。
 
-    依据:crates/runtime/reflect-core/src/submission_loop.rs:173-180
-    (REFLECT_APPROVALS=1 开启 gate)。
+    依据:crates/runtime/zhuye-core/src/submission_loop.rs:173-180
+    (ZHUYE_APPROVALS=1 开启 gate)。
     """
     require_binary()
     if not MOCK_MCP.is_file():
-        pytest.skip("mock_mcp_server 未构建(cargo build -p reflect-mcp)")
+        pytest.skip("mock_mcp_server 未构建(cargo build -p zhuye-mcp)")
     sandbox.write_config(
         f'\n[mcp_servers.fsx]\ntype = "stdio"\ncommand = "{MOCK_MCP}"\n'
     )
@@ -227,9 +227,9 @@ def test_T5_工具审批全链路(serve_session, mock_script, sandbox) -> None:
     )
     with serve_session(
         env={
-            "REFLECT_MODEL": "mock",
-            "REFLECT_MOCK_SCRIPT": str(script),
-            "REFLECT_APPROVALS": "1",
+            "ZHUYE_MODEL": "mock",
+            "ZHUYE_MOCK_SCRIPT": str(script),
+            "ZHUYE_APPROVALS": "1",
         }
     ) as s:
         time.sleep(2.0)  # MCP 注册是异步的:握手 + list_tools 完成前调用会报 unknown tool
@@ -264,11 +264,11 @@ def test_T5_工具审批全链路(serve_session, mock_script, sandbox) -> None:
 def test_T6_审批deny_工具不执行(serve_session, mock_script, sandbox) -> None:
     """审批回 deny → 工具**未执行**,tool_call_end(is_error=true),turn 仍收尾。
 
-    依据:crates/abilities/reflect-tools/src/approval/mod.rs:96-110。
+    依据:crates/abilities/zhuye-tools/src/approval/mod.rs:96-110。
     """
     require_binary()
     if not MOCK_MCP.is_file():
-        pytest.skip("mock_mcp_server 未构建(cargo build -p reflect-mcp)")
+        pytest.skip("mock_mcp_server 未构建(cargo build -p zhuye-mcp)")
     sandbox.write_config(
         f'\n[mcp_servers.fsx]\ntype = "stdio"\ncommand = "{MOCK_MCP}"\n'
     )
@@ -280,9 +280,9 @@ def test_T6_审批deny_工具不执行(serve_session, mock_script, sandbox) -> N
     )
     with serve_session(
         env={
-            "REFLECT_MODEL": "mock",
-            "REFLECT_MOCK_SCRIPT": str(script),
-            "REFLECT_APPROVALS": "1",
+            "ZHUYE_MODEL": "mock",
+            "ZHUYE_MOCK_SCRIPT": str(script),
+            "ZHUYE_APPROVALS": "1",
         }
     ) as s:
         time.sleep(2.0)

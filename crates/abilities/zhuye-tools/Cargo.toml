@@ -1,0 +1,42 @@
+[package]
+name = "zhuye-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ZhuYe: Tool trait, builtin tools, ToolExecutionQueue"
+
+[dependencies]
+zhuye-protocol = { workspace = true }
+zhuye-prompt   = { workspace = true }
+zhuye-hooks    = { workspace = true }
+# S5a:`ApprovalGate` 注入 `PermissionResolver` 短路 Allow/Deny(详见
+# `approval.rs::ask_tool` 入口)。`zhuye-permissions` 不反向依赖
+# `zhuye-tools`,单向注入即可。
+zhuye-permissions = { workspace = true }
+# v1.2 P0-1:`OsSandbox`(macOS Seatbelt / Linux Landlock)给 `BashTool`
+# 提供真实 OS 沙箱。`zhuye-sandbox` 不反向依赖 `zhuye-tools`,无环。
+zhuye-sandbox    = { workspace = true }
+async-trait        = { workspace = true }
+futures            = { workspace = true }
+htmd               = { workspace = true }
+ignore             = { workspace = true }
+once_cell          = { workspace = true }
+parking_lot        = { workspace = true }
+regex              = { workspace = true }
+zhuye-bm25       = { workspace = true }
+reqwest            = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+similar            = { workspace = true }
+thiserror          = { workspace = true }
+tokio              = { workspace = true }
+tokio-util         = { workspace = true }
+tracing            = { workspace = true }
+url                = { workspace = true }
+uuid               = { workspace = true }
+
+[dev-dependencies]
+# Phase 7 `read_before_edit_e2e.rs` 用 `filetime::set_file_mtime` 模拟
+# 外部 mtime 漂移(无需 `std::thread::sleep` 不可靠等待)。
+filetime = { workspace = true }
+tempfile = "3"

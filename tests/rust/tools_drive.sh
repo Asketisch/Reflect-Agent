@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tests/rust/tools_drive.sh —— 内置工具全量驱动(非冒烟)。
 #
-# 通过 `reflect exec` + mock 脚本驱动每个内置工具,断言其真实输出与
+# 通过 `zhuye exec` + mock 脚本驱动每个内置工具,断言其真实输出与
 # 文件系统副作用;并覆盖 read_before_edit hook 四态、bash OS 沙箱、
 # git worktree、ast 结构化搜索、离线 web 工具的优雅报错等。
 #
@@ -19,7 +19,7 @@
 #     会阻塞等 plan_approval(需 TUI/serve),已在 serve_ops.sh 用 serve 覆盖,
 #     此处不走 exec 路径以避免 hang。
 #
-# 前置:release 二进制 + jq + git。全程 REFLECT_MODEL=mock + 隔离 HOME。
+# 前置:release 二进制 + jq + git。全程 ZHUYE_MODEL=mock + 隔离 HOME。
 
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
@@ -74,8 +74,8 @@ tools_fs() {
         '{"type":"tool_call","name":"glob","args":{"pattern":"*.txt"}}' \
         '{"type":"tool_call","name":"echo","args":{"text":"echo-marker"}}' \
         '{"type":"text","text":"done"}'
-    REFLECT_MODEL=mock REFLECT_MOCK_SCRIPT="$ISO_CWD/fs.jsonl" \
-        "$REFLECT_BIN" exec "fs tools" > fs.out 2>fs.err
+    ZHUYE_MODEL=mock ZHUYE_MOCK_SCRIPT="$ISO_CWD/fs.jsonl" \
+        "$ZHUYE_BIN" exec "fs tools" > fs.out 2>fs.err
     tcase "fs:exec 退出 0" test $? -eq 0
 
     tcase "write 成功(wrote hello.txt)" \
@@ -98,8 +98,8 @@ tools_fs() {
     make_mock_script del.jsonl \
         '{"type":"tool_call","name":"delete_file","args":{"path":"hello.txt"}}' \
         '{"type":"text","text":"done"}'
-    REFLECT_MODEL=mock REFLECT_MOCK_SCRIPT="$ISO_CWD/del.jsonl" \
-        "$REFLECT_BIN" exec "del" > del.out 2>del.err
+    ZHUYE_MODEL=mock ZHUYE_MOCK_SCRIPT="$ISO_CWD/del.jsonl" \
+        "$ZHUYE_BIN" exec "del" > del.out 2>del.err
     tcase "delete_file 成功" te_ok del.out delete_file
     tcase "delete_file 文件已删除" \
         bash -c "! test -f '$ISO_CWD/hello.txt'"
@@ -116,8 +116,8 @@ tools_hook() {
     make_mock_script a.jsonl \
         '{"type":"tool_call","name":"write","args":{"path":"fresh.txt","content":"FRESH"}}' \
         '{"type":"text","text":"done"}'
-    REFLECT_MODEL=mock REFLECT_MOCK_SCRIPT="$ISO_CWD/a.jsonl" \
-        "$REFLECT_BIN" exec a > a.out 2>a.err
+    ZHUYE_MODEL=mock ZHUYE_MOCK_SCRIPT="$ISO_CWD/a.jsonl" \
+        "$ZHUYE_BIN" exec a > a.out 2>a.err
     tcase "hook 态A 新建 write 放行" te_ok a.out write
     tcase "hook 态A 文件已创建" bash -c "test -f '$ISO_CWD/fresh.txt'"
 
@@ -126,8 +126,8 @@ tools_hook() {
         '{"type":"tool_call","name":"bash","args":{"cmd":"printf EXISTING > pre.txt"}}' \
         '{"type":"tool_call","name":"edit","args":{"path":"pre.txt","old_string":"EXISTING","new_string":"X"}}' \
         '{"type":"text","text":"done"}'
-    REFLECT_MODEL=mock REFLECT_MOCK_SCRIPT="$ISO_CWD/b.jsonl" \
-        "$REFLECT_BIN" exec b > b.out 2>b.err
+    ZHUYE_MODEL=mock ZHUYE_MOCK_SCRIPT="$ISO_CWD/b.jsonl" \
+        "$ZHUYE_BIN" exec b > b.out 2>b.err
     tcase "hook 态B 未读 edit 被 Deny" te_err b.out edit
     tcase "hook 态B 拒绝原因 never read" te_out b.out edit "never read"
 
@@ -137,8 +137,8 @@ tools_hook() {
         '{"type":"tool_call","name":"read","args":{"path":"c.txt"}}' \
         '{"type":"tool_call","name":"edit","args":{"path":"c.txt","old_string":"C1","new_string":"C2"}}' \
         '{"type":"text","text":"done"}'
-    REFLECT_MODEL=mock REFLECT_MOCK_SCRIPT="$ISO_CWD/c.jsonl" \
-        "$REFLECT_BIN" exec c > c.out 2>c.err
+    ZHUYE_MODEL=mock ZHUYE_MOCK_SCRIPT="$ISO_CWD/c.jsonl" \
+        "$ZHUYE_BIN" exec c > c.out 2>c.err
     tcase "hook 态C 读后 edit 放行" te_ok c.out edit
     tcase "hook 态C 编辑已落盘" bash -c "grep -q C2 '$ISO_CWD/c.txt'"
 
@@ -149,8 +149,8 @@ tools_hook() {
         '{"type":"tool_call","name":"bash","args":{"cmd":"sleep 1; printf D9 > d.txt"}}' \
         '{"type":"tool_call","name":"edit","args":{"path":"d.txt","old_string":"D1","new_string":"Z"}}' \
         '{"type":"text","text":"done"}'
-    REFLECT_MODEL=mock REFLECT_MOCK_SCRIPT="$ISO_CWD/d.jsonl" \
-        "$REFLECT_BIN" exec d > d.out 2>d.err
+    ZHUYE_MODEL=mock ZHUYE_MOCK_SCRIPT="$ISO_CWD/d.jsonl" \
+        "$ZHUYE_BIN" exec d > d.out 2>d.err
     tcase "hook 态D 漂移 edit 被 Deny" te_err d.out edit
 }
 
@@ -165,8 +165,8 @@ tools_sandbox() {
     make_mock_script in.jsonl \
         '{"type":"tool_call","name":"bash","args":{"cmd":"echo INWS > inws.txt"}}' \
         '{"type":"text","text":"done"}'
-    REFLECT_MODEL=mock REFLECT_MOCK_SCRIPT="$ISO_CWD/in.jsonl" \
-        "$REFLECT_BIN" exec in > in.out 2>in.err
+    ZHUYE_MODEL=mock ZHUYE_MOCK_SCRIPT="$ISO_CWD/in.jsonl" \
+        "$ZHUYE_BIN" exec in > in.out 2>in.err
     tcase "sandbox workspace 内 bash 写成功" \
         bash -c "grep -q INWS '$ISO_CWD/inws.txt'"
 
@@ -177,8 +177,8 @@ tools_sandbox() {
     make_mock_script out.jsonl \
         "{\"type\":\"tool_call\",\"name\":\"bash\",\"args\":{\"cmd\":\"echo ESC > $esc\"}}" \
         '{"type":"text","text":"done"}'
-    REFLECT_MODEL=mock REFLECT_MOCK_SCRIPT="$ISO_CWD/out.jsonl" \
-        "$REFLECT_BIN" exec out > out.out 2>out.err
+    ZHUYE_MODEL=mock ZHUYE_MOCK_SCRIPT="$ISO_CWD/out.jsonl" \
+        "$ZHUYE_BIN" exec out > out.out 2>out.err
     # 越界写:沙箱必须**拦下**(文件不落地)。断言安全不变量本身 ——
     # 工具是否把被拒的命令标成 is_error 属产品行为差异(macOS Seatbelt 下
     # 失败信息落在 stderr、退出码仍报 0,见 tests/COVERAGE.md 已知缺陷 D7),
@@ -204,8 +204,8 @@ tools_ast_info() {
         '{"type":"tool_call","name":"tool_search","args":{"query":"grep"}}' \
         '{"type":"tool_call","name":"brief","args":{"title":"B","content":"brief-body"}}' \
         '{"type":"text","text":"done"}'
-    REFLECT_MODEL=mock REFLECT_MOCK_SCRIPT="$ISO_CWD/info.jsonl" \
-        "$REFLECT_BIN" exec info > info.out 2>info.err
+    ZHUYE_MODEL=mock ZHUYE_MOCK_SCRIPT="$ISO_CWD/info.jsonl" \
+        "$ZHUYE_BIN" exec info > info.out 2>info.err
     tcase "ast list_languages 含 rust" te_out info.out ast "rust"
     tcase "ast search 命中 alpha" te_out info.out ast "alpha"
     tcase "get_context_remaining 报 token 用量" te_out info.out get_context_remaining "tokens"
@@ -227,8 +227,8 @@ tools_media_web() {
         '{"type":"tool_call","name":"web_fetch","args":{"url":"http://127.0.0.1:1/x"}}' \
         '{"type":"tool_call","name":"web_search","args":{"query":"offline q"}}' \
         '{"type":"text","text":"done"}'
-    REFLECT_MODEL=mock REFLECT_MOCK_SCRIPT="$ISO_CWD/m.jsonl" \
-        "$REFLECT_BIN" exec m > m.out 2>m.err
+    ZHUYE_MODEL=mock ZHUYE_MOCK_SCRIPT="$ISO_CWD/m.jsonl" \
+        "$ZHUYE_BIN" exec m > m.out 2>m.err
     tcase "image_view 返回 image 内容块" \
         bash -c "jq -s 'def b: map(select(.msg.type==\"tool_call_begin\")|{(.msg.call_id):.msg.tool_name})|add//{}; b as \$x| map(select(.msg.type==\"tool_call_end\" and \$x[.msg.call_id]==\"image_view\")) | map(select(.msg.output|tostring|contains(\"image/png\")))|length>=1' '$ISO_CWD/m.out'"
     # web_fetch:回环地址在受阻断范围 → 优雅 InvalidArgs(非 panic)
@@ -252,8 +252,8 @@ NBEOF
         '{"type":"tool_call","name":"notebook_edit","args":{"action":"list","path":"nb.ipynb"}}' \
         '{"type":"tool_call","name":"notebook_edit","args":{"action":"insert","path":"nb.ipynb","index":1,"source":"print(2)\n","cell_type":"code"}}' \
         '{"type":"text","text":"done"}'
-    REFLECT_MODEL=mock REFLECT_MOCK_SCRIPT="$ISO_CWD/nb.jsonl" \
-        "$REFLECT_BIN" exec nb > nb.out 2>nb.err
+    ZHUYE_MODEL=mock ZHUYE_MOCK_SCRIPT="$ISO_CWD/nb.jsonl" \
+        "$ZHUYE_BIN" exec nb > nb.out 2>nb.err
     tcase "notebook list 返回单元格" te_out nb.out notebook_edit "code"
     tcase "notebook insert 未读被 hook Deny" te_err nb.out notebook_edit
 }
@@ -278,12 +278,12 @@ tools_worktree() {
         '{"type":"tool_call","name":"EnterWorktree","args":{}}' \
         '{"type":"tool_call","name":"ExitWorktree","args":{}}' \
         '{"type":"text","text":"done"}'
-    REFLECT_MODEL=mock REFLECT_MOCK_SCRIPT="$ISO_CWD/wt.jsonl" \
-        "$REFLECT_BIN" exec wt > wt.out 2>wt.err
+    ZHUYE_MODEL=mock ZHUYE_MOCK_SCRIPT="$ISO_CWD/wt.jsonl" \
+        "$ZHUYE_BIN" exec wt > wt.out 2>wt.err
     tcase "EnterWorktree 成功进入" te_out wt.out EnterWorktree "Entered worktree"
     tcase "ExitWorktree 成功退出" te_out wt.out ExitWorktree "Exited worktree"
     tcase "worktree 目录已建立" \
-        bash -c "ls -d '$ISO_CWD'/.git/worktrees/reflect-wt-* >/dev/null 2>&1"
+        bash -c "ls -d '$ISO_CWD'/.git/worktrees/zhuye-wt-* >/dev/null 2>&1"
 }
 
 # ════════════════════════════════════════════════════════════════════════
@@ -297,8 +297,8 @@ tools_checkpoint() {
         '{"type":"tool_call","name":"checkpoint","args":{"action":"list"}}' \
         '{"type":"tool_call","name":"rewind","args":{}}' \
         '{"type":"text","text":"done"}'
-    REFLECT_MODEL=mock REFLECT_MOCK_SCRIPT="$ISO_CWD/ck.jsonl" \
-        "$REFLECT_BIN" exec ck > ck.out 2>ck.err
+    ZHUYE_MODEL=mock ZHUYE_MOCK_SCRIPT="$ISO_CWD/ck.jsonl" \
+        "$ZHUYE_BIN" exec ck > ck.out 2>ck.err
     tcase "checkpoint list 正常返回" te_ok ck.out checkpoint
     tcase "checkpoint list 提示无检查点" te_out ck.out checkpoint "checkpoint"
     # rewind 无 sha 且无当前 turn 检查点 → 优雅 InvalidArgs(非 panic)
@@ -319,8 +319,8 @@ tools_ask() {
         '{"type":"tool_call","name":"ask_user","args":{"question":"q?"}}' \
         '{"type":"tool_call","name":"request_human_input","args":{"prompt":"p?"}}' \
         '{"type":"text","text":"done"}'
-    REFLECT_MODEL=mock REFLECT_MOCK_SCRIPT="$ISO_CWD/au.jsonl" \
-        "$REFLECT_BIN" exec au > au.out 2>au.err
+    ZHUYE_MODEL=mock ZHUYE_MOCK_SCRIPT="$ISO_CWD/au.jsonl" \
+        "$ZHUYE_BIN" exec au > au.out 2>au.err
     tcase "ask_user 非法参数优雅报错" te_err au.out ask_user
     tcase "request_human_input headless 优雅报错" te_err au.out request_human_input
     tcase "headless 下 turn 仍正常收尾" \

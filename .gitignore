@@ -16,6 +16,7 @@ Cargo.lock.bak
 Thumbs.db
 
 # ── Local config / runtime ──
+.zhuye/
 .reflect/
 *.local.toml
 

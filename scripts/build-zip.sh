@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # ── scripts/build-zip.sh ─────────────────────────────────────────────
-# 把 `reflect` CLI 二进制打包成 zip 压缩包,用于 Windows 分发。
+# 把 `zhuye` CLI 二进制打包成 zip 压缩包,用于 Windows 分发。
 #
 # 产物结构(解压后顶层目录名 = 产物名去掉后缀):
-#   reflect-<version>-<triple>/
-#   ├── reflect.exe        ← 可执行二进制
+#   zhuye-<version>-<triple>/
+#   ├── zhuye.exe        ← 可执行二进制
 #   ├── LICENSE
 #   └── README.txt
 #
@@ -12,7 +12,7 @@
 # 的 Compress-Archive(Git Bash 自带 powershell.exe)。
 #
 # 用法:
-#   scripts/build-zip.sh                          # 用 target/release/reflect.exe
+#   scripts/build-zip.sh                          # 用 target/release/zhuye.exe
 #   scripts/build-zip.sh --binary <path>          # 指定预构建二进制
 #   scripts/build-zip.sh --profile release-fast   # 指定 profile(默认 release)
 #   scripts/build-zip.sh --target <triple>        # 交叉编译产物路径推算
@@ -24,7 +24,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # 元数据 ──────────────────────────────────────────────────────────────
-APP_NAME="reflect"
+APP_NAME="zhuye"
 PROFILE="release"
 CUSTOM_BINARY=""
 TARGET_TRIPLE=""
@@ -92,7 +92,7 @@ fi
 # 路径 ────────────────────────────────────────────────────────────────
 DIST_DIR="${REPO_ROOT}/dist"
 PKG_NAME="${APP_NAME}-${VERSION}-${TARGET_TRIPLE}"
-STAGING_DIR="$(mktemp -d -t reflect-zip-staging)"
+STAGING_DIR="$(mktemp -d -t zhuye-zip-staging)"
 ARCHIVE_PATH="${DIST_DIR}/${PKG_NAME}.zip"
 
 echo "→ 打包 zip: ${PKG_NAME}"
@@ -103,7 +103,7 @@ mkdir -p "${DIST_DIR}"
 PKG_DIR="${STAGING_DIR}/${PKG_NAME}"
 mkdir -p "${PKG_DIR}"
 
-# (a) 二进制本体(保留原文件名,可能是 reflect.exe 或 reflect)
+# (a) 二进制本体(保留原文件名,可能是 zhuye.exe 或 zhuye)
 BIN_BASENAME="$(basename "${SOURCE_BIN}")"
 cp "${SOURCE_BIN}" "${PKG_DIR}/${BIN_BASENAME}"
 
@@ -114,28 +114,28 @@ fi
 
 # (c) 说明文件(README.txt)
 cat > "${PKG_DIR}/README.txt" <<README_EOF
-Reflect ${VERSION}  (${TARGET_TRIPLE})
+ZhuYe ${VERSION}  (${TARGET_TRIPLE})
 =========================================================
 
-Reflect 是一个 Rust 编写的 agent 运行时(默认进入 TUI)。
+烛夜是一个 Rust 编写的 agent 运行时(默认进入 TUI)。
 
-【安装】解压后把 reflect.exe 放到 PATH 目录(如 C:\Users\<你>\bin\):
+【安装】解压后把 zhuye.exe 放到 PATH 目录(如 C:\Users\<你>\bin\):
     1. 右键 zip → 解压到当前位置
-    2. 把 reflect.exe 移到某个 PATH 目录,或把解压目录加入 PATH
+    2. 把 zhuye.exe 移到某个 PATH 目录,或把解压目录加入 PATH
 
 【验证】打开「命令提示符」或「PowerShell」:
-    reflect --version
-    reflect --help
-    reflect              # 进入交互式 TUI
+    zhuye --version
+    zhuye --help
+    zhuye              # 进入交互式 TUI
 
 【首次配置】登录 LLM provider:
-    reflect login --provider anthropic
-    reflect login --provider openai
-    或直接编辑 %USERPROFILE%\.reflect\config.toml
+    zhuye login --provider anthropic
+    zhuye login --provider openai
+    或直接编辑 %USERPROFILE%\.zhuye\config.toml
 
 【平台】本包仅适用于 ${TARGET_TRIPLE}。
 
-详见 https://github.com/CNB/Reflect
+详见 https://github.com/Asketisch/ZhuYe
 README_EOF
 
 # ── 打包 ─────────────────────────────────────────────────────────────

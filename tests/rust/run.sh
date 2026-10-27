@@ -5,16 +5,16 @@
 #   1. workspace_tests.sh   cargo test / clippy / fmt / doc
 #   2. cli_core.sh          核心 CLI 端到端(exec/serve/session/traces/login/config)
 #   3. cli_modules.sh       模块 CLI 端到端(mcp/lsp/plugin/task/pipeline/discussion/...)
-#   4. examples_e2e.sh      reflect 库 examples 冒烟
+#   4. examples_e2e.sh      zhuye 库 examples 冒烟
 #   5. cli_deep.sh          全 17 子命令深度使用测试(参数矩阵/退出码/输出契约)
 #   6. serve_ops.sh         serve 协议 19 Op 全量 + 事件断言
 #   7. tools_drive.sh       内置工具全量驱动(mock LLM 逐工具调一遍)
 #   8. integrations.sh      MCP/skill/notes/bubble/热重载/plugin 集成链路
 #
-# `REFLECT_SKIP_WORKSPACE=1` 时跳过第 1 步(cargo test / clippy / fmt / doc)
+# `ZHUYE_SKIP_WORKSPACE=1` 时跳过第 1 步(cargo test / clippy / fmt / doc)
 # —— CI 的 `functional` 门禁入口用此模式:那部分由既有 CI job 覆盖。
 #
-# 全程离线(REFLECT_MODEL=mock)+ 隔离 HOME,不污染真实 ~/.reflect。
+# 全程离线(ZHUYE_MODEL=mock)+ 隔离 HOME,不污染真实 ~/.zhuye。
 # 退出码 0 = 全部通过。
 
 set -u
@@ -25,17 +25,17 @@ source "$HERE/../lib.sh"
 cd "$ROOT"
 
 # release 二进制不存在则构建(幂等)
-if [ ! -x "$REFLECT_BIN" ]; then
+if [ ! -x "$ZHUYE_BIN" ]; then
     echo "── 构建 release 二进制 ──"
-    cargo build --release -p reflect-cli --quiet || exit 2
+    cargo build --release -p zhuye-cli --quiet || exit 2
 fi
 
 TOTAL_RC=0
 
-if [ "${REFLECT_SKIP_WORKSPACE:-0}" = "1" ]; then
+if [ "${ZHUYE_SKIP_WORKSPACE:-0}" = "1" ]; then
     echo
     echo "════════════════════════════════════════════════"
-    echo "  1/8 workspace 测试 —— 跳过(REFLECT_SKIP_WORKSPACE=1)"
+    echo "  1/8 workspace 测试 —— 跳过(ZHUYE_SKIP_WORKSPACE=1)"
     echo "════════════════════════════════════════════════"
 else
     echo

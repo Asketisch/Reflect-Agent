@@ -1,18 +1,18 @@
 [project]
-name = "reflect-agent"
+name = "zhuye-agent"
 version = "0.1.0"
-description = "Reflect Agent SDK for Python: spawn `reflect serve` and drive it over JSONL stdio."
+description = "ZhuYe Agent SDK for Python: spawn `zhuye serve` and drive it over JSONL stdio."
 requires-python = ">=3.10"
 license = { text = "MIT" }
 readme = "README.md"
-authors = [{ name = "Reflect Agent Contributors" }]
+authors = [{ name = "ZhuYe Contributors" }]
 # 无运行时依赖:仅 stdlib(os / subprocess / threading / json / dataclasses)。
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/Asketisch/Reflect-Agent"
-Repository = "https://github.com/Asketisch/Reflect-Agent"
-Issues = "https://github.com/Asketisch/Reflect-Agent/issues"
+Homepage = "https://github.com/Asketisch/ZhuYe"
+Repository = "https://github.com/Asketisch/ZhuYe"
+Issues = "https://github.com/Asketisch/ZhuYe/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
@@ -22,10 +22,10 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["reflect*"]
+include = ["zhuye*"]
 
 [tool.setuptools.package-data]
-reflect = ["py.typed"]
+zhuye = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

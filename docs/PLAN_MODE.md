@@ -1,11 +1,11 @@
 # Plan Mode 设计
 
-> 本文描述 Reflect 的 Plan mode(计划模式)协议与实现契约。
-> 相关源码:`reflect-tools/src/builtins/enter_plan_mode.rs` /
+> 本文描述烛夜的 Plan mode(计划模式)协议与实现契约。
+> 相关源码:`zhuye-tools/src/builtins/enter_plan_mode.rs` /
 > `exit_plan_mode.rs` / `plan_write.rs`,
-> `reflect-hooks/src/builtins/plan_mode_gate.rs`,
-> `reflect-protocol/src/event_msg/plan.rs`,
-> `reflect-core/src/submission_loop.rs`(Op::PlanApproval 分发)。
+> `zhuye-hooks/src/builtins/plan_mode_gate.rs`,
+> `zhuye-protocol/src/event_msg/plan.rs`,
+> `zhuye-core/src/submission_loop.rs`(Op::PlanApproval 分发)。
 
 ## 1. 目的
 
@@ -18,7 +18,7 @@
 | 路径 | 触发方 | 行为 |
 |---|---|---|
 | 工具 `EnterPlanMode` | agent 自主判断 | 仅**发起请求**:发出 `EventMsg::PlanRequest`,不直接切模式;用户在 modal 按 1(批准)后 `submission_loop` 把权限模式切到 `Plan` |
-| `reflect exec --plan-mode` | CLI flag | 启动即进入 Plan mode(headless 单 turn 场景) |
+| `zhuye exec --plan-mode` | CLI flag | 启动即进入 Plan mode(headless 单 turn 场景) |
 | TUI `/plan` slash | 用户 | 等价 exec flag,交互场景 |
 
 防御性约束:已在 Plan 模式时,`PlanModeGate` deny `EnterPlanMode`
@@ -44,7 +44,7 @@
   2 = 拒绝(`PlanRejected`,agent 修订计划);3 = 中止;
 - `ExitPlanMode` 工具是 agent 侧的收口:声明计划就绪,等待审批。
 
-## 5. headless 语义(`reflect exec --plan-mode`)
+## 5. headless 语义(`zhuye exec --plan-mode`)
 
 单 turn 场景没有交互 modal:agent 直接以 Plan 模式跑完只读调研,
 产出计划文本后 turn 结束。约定 **exit code 122 = 计划生成失败需重试**

@@ -1,14 +1,14 @@
 # 提示词库(v1.6):外置 + 按模型匹配
 
-Reflect 的所有 LLM 提示词从 v1.6 起外置为 Markdown,并按**当前模型**
+烛夜的所有 LLM 提示词从 v1.6 起外置为 Markdown,并按**当前模型**
 动态匹配 —— 同一个 agent 换用不同 LLM(如 claude / gpt / gemini /
 deepseek)时,可以加载各自调优过的提示词版本,让每个模型发挥最大能力。
 
 ## 目录约定
 
 ```text
-~/.reflect/prompts/          # 用户全局层(所有 workspace 生效)
-<workspace>/.reflect/prompts/  # workspace 层(同名文件覆盖全局层)
+~/.zhuye/prompts/          # 用户全局层(所有 workspace 生效)
+<workspace>/.zhuye/prompts/  # workspace 层(同名文件覆盖全局层)
 ├── default.md               # 兜底层:未命中任何模型文件时的文案
 ├── claude.md                # 厂商层:spec 前缀为 claude/ 时叠加
 ├── gpt.md
@@ -60,8 +60,8 @@ prompt(来源与许可见各 `prompts/<vendor>.md` 文件头注释):
 三层逐级叠加,同一 key 深者胜。运行中 `/model` 热切换模型后,**下一个
 请求立即使用新模型的提示词**(与模型热重载语义一致)。
 
-旧版单文件 `~/.reflect/prompts.md` 继续兼容(视作 default 层覆盖,
-启动时打 deprecation 日志);建议迁移为 `~/.reflect/prompts/default.md`。
+旧版单文件 `~/.zhuye/prompts.md` 继续兼容(视作 default 层覆盖,
+启动时打 deprecation 日志);建议迁移为 `~/.zhuye/prompts/default.md`。
 
 ## `/prompt` slash:运行中查看与刷新提示词
 
@@ -71,16 +71,16 @@ TUI/GUI(`/prompt` 命令,协议级 `Op::PromptCommand`)可在会话运行中
 ```text
 /prompt            # 列出可用层 + 当前生效层(应答 EventMsg::PromptList)
 /prompt list       # 同上
-/prompt reload     # 重扫提示词库,让 .reflect/prompts/*.md 的修改即时生效
+/prompt reload     # 重扫提示词库,让 .zhuye/prompts/*.md 的修改即时生效
                    # (应答 EventMsg::PromptSwitched;下一请求即用新文案)
 ```
 
 - 可用层 = 内置 9 个厂商层 + 用户目录层(default / 自建层),字典序去重;
 - 「生效层」按当前 model spec 经匹配链解析,内嵌层不记录、只报用户层;
-- headless 同样支持:`reflect exec "/prompt reload"`(JSONL 输出
+- headless 同样支持:`zhuye exec "/prompt reload"`(JSONL 输出
   `prompt_switched` 事件);
 - 编程接口:TUI/GUI 直接提交 `Op::PromptCommand { action }`(Rust:
-  `reflect::Op`;Python 绑定按 Submission JSONL 构造),事件经
+  `zhuye::Op`;Python 绑定按 Submission JSONL 构造),事件经
   per-submission 通道送达,`SubmissionClosed` 收尾。
 
 ## 提示词 key 一览
@@ -107,13 +107,13 @@ TUI/GUI(`/prompt` 命令,协议级 `Op::PromptCommand`)可在会话运行中
 | 编排 | `discussion.participant` | 讨论参与者 user prompt 格式(`{{ topic }}` 等变量) |
 | 子代理 | `subagent.explorer` | explorer 兜底 spec prompt |
 
-带 `{{ var }}` 的 key 经 minijinja 渲染(见 `reflect_prompt::template`)。
+带 `{{ var }}` 的 key 经 minijinja 渲染(见 `zhuye_prompt::template`)。
 `FINAL ANSWER: <answer>` 收口模板是**格式契约**(测试与展示层剥标记依赖),
-保留在常量 `reflect_prompt::FINAL_ANSWER_TEMPLATE`,nudge 文案经变量注入。
+保留在常量 `zhuye_prompt::FINAL_ANSWER_TEMPLATE`,nudge 文案经变量注入。
 
 ## 按模型覆盖示例
 
-只想给 Claude 换主 prompt 的最小文件(`.reflect/prompts/claude.md`):
+只想给 Claude 换主 prompt 的最小文件(`.zhuye/prompts/claude.md`):
 
 ```markdown
 ## system.main
@@ -135,10 +135,10 @@ You are Claude, an expert pair programmer. ...(按 Anthropic 官方 agent
 ## 编程接口(facade / TUI / GUI)
 
 ```rust
-use reflect::{ReflectBuilder, PromptLibrary, PromptSet, init_library, library, split_spec};
+use zhuye::{ZhuyeBuilder, PromptLibrary, PromptSet, init_library, library, split_spec};
 
 // Builder 一行挂载自带提示词包(目录优先级最高,覆盖同名层):
-let agent = ReflectBuilder::new("claude/claude-sonnet-4-5")
+let agent = ZhuyeBuilder::new("claude/claude-sonnet-4-5")
     .workspace("/path/to/ws")
     .with_prompts_dir("/path/to/bundled-prompts")
     .build()?;
@@ -150,14 +150,14 @@ let main_prompt = set.get_or("system.main", "fallback");
 let (provider, model) = split_spec("anthropic/claude-sonnet-4-5");
 ```
 
-Python 绑定(`reflect-py`)同步暴露 `ReflectBuilder.prompts_dir(dir)`。
+Python 绑定(`zhuye-py`)同步暴露 `ZhuyeBuilder.prompts_dir(dir)`。
 
 TUI/GUI 运行中选择提示词:提交 `Op::PromptCommand`(经
 `thread.submit(...)`,与 `/plan` / `/goal` 同一 Op 通道),消费
 `EventMsg::PromptList` / `EventMsg::PromptSwitched` 渲染选择 UI:
 
 ```rust
-use reflect::{Op, PromptAction, Submission};
+use zhuye::{Op, PromptAction, Submission};
 
 // 列出可选层(弹层选择器用):
 let sub = Submission::with_id("ui-1", Op::PromptCommand { action: PromptAction::List });
@@ -169,11 +169,11 @@ let sub = Submission::with_id("ui-2", Op::PromptCommand {
 
 ## 运行时序
 
-1. 入口(`reflect-exec::bootstrap_m4` / `build_default_m4_with_prompts`)
-   扫描 `<ws>/.reflect/prompts` + `~/.reflect/prompts` + Builder 附加目录,
+1. 入口(`zhuye-exec::bootstrap_m4` / `build_default_m4_with_prompts`)
+   扫描 `<ws>/.zhuye/prompts` + `~/.zhuye/prompts` + Builder 附加目录,
    调 `init_library` 装配进程级 `PromptLibrary`(可重复调用整体重扫);
 2. `pre_loop` 组装 system prompt:agent 定义来源为 `BuiltinDefault` 时按
-   当前 spec 解析 `system.main`;用户自定义(`.reflect/agents/*.md`)
+   当前 spec 解析 `system.main`;用户自定义(`.zhuye/agents/*.md`)
    原文不动(`SystemPromptSource::Custom`);
 3. 工具 description 覆盖发生在 **spec 组装处**(`apply_model_overrides`),
    不侵入 `Tool` trait —— MCP / LSP / plugin 外部工具实现者无感知;

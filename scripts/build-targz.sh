@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # ── scripts/build-targz.sh ───────────────────────────────────────────
-# 把 `reflect` CLI 二进制打包成 tar.gz 压缩包,用于 Linux / macOS 分发。
+# 把 `zhuye` CLI 二进制打包成 tar.gz 压缩包,用于 Linux / macOS 分发。
 #
 # 产物结构(解压后顶层目录名 = 产物名去掉后缀):
-#   reflect-<version>-<triple>/
-#   ├── reflect            ← 可执行二进制
+#   zhuye-<version>-<triple>/
+#   ├── zhuye            ← 可执行二进制
 #   ├── LICENSE
 #   └── README.txt         ← 安装与使用说明
 #
@@ -12,7 +12,7 @@
 # tar.gz 提供跨平台、CI 友好、脚本可解析的通用打包格式。
 #
 # 用法:
-#   scripts/build-targz.sh                         # 用 target/release/reflect
+#   scripts/build-targz.sh                         # 用 target/release/zhuye
 #   scripts/build-targz.sh --binary <path>         # 指定预构建二进制
 #   scripts/build-targz.sh --profile release-fast  # 指定 profile(默认 release)
 #   scripts/build-targz.sh --target <triple>       # 交叉编译产物路径推算
@@ -24,7 +24,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # 元数据 ──────────────────────────────────────────────────────────────
-APP_NAME="reflect"
+APP_NAME="zhuye"
 PROFILE="release"
 CUSTOM_BINARY=""
 TARGET_TRIPLE=""
@@ -90,7 +90,7 @@ fi
 # 路径 ────────────────────────────────────────────────────────────────
 DIST_DIR="${REPO_ROOT}/dist"
 PKG_NAME="${APP_NAME}-${VERSION}-${TARGET_TRIPLE}"
-STAGING_DIR="$(mktemp -d -t reflect-targz-staging)"
+STAGING_DIR="$(mktemp -d -t zhuye-targz-staging)"
 ARCHIVE_PATH="${DIST_DIR}/${PKG_NAME}.tar.gz"
 
 echo "→ 打包 tar.gz: ${PKG_NAME}"
@@ -112,10 +112,10 @@ fi
 
 # (c) README.txt —— 安装与使用说明
 cat > "${PKG_DIR}/README.txt" <<README_EOF
-Reflect ${VERSION}  (${TARGET_TRIPLE})
+ZhuYe ${VERSION}  (${TARGET_TRIPLE})
 =========================================================
 
-Reflect 是一个 Rust 编写的 agent 运行时(默认进入 TUI)。
+烛夜是一个 Rust 编写的 agent 运行时(默认进入 TUI)。
 
 【安装】解压后把二进制放到 PATH:
     tar xzf ${PKG_NAME}.tar.gz
@@ -131,11 +131,11 @@ Reflect 是一个 Rust 编写的 agent 运行时(默认进入 TUI)。
 【首次配置】登录 LLM provider:
     ${APP_NAME} login --provider anthropic
     ${APP_NAME} login --provider openai
-    或直接编辑 ~/.reflect/config.toml
+    或直接编辑 ~/.zhuye/config.toml
 
 【平台】本包仅适用于 ${TARGET_TRIPLE}。
 
-详见 https://github.com/CNB/Reflect
+详见 https://github.com/Asketisch/ZhuYe
 README_EOF
 
 # ── 打包 ─────────────────────────────────────────────────────────────

@@ -1,8 +1,8 @@
 # 输出脱敏(Sanitize)
 
-> 实现见 `reflect-tools/src/sanitize/mod.rs` 与
-> `reflect-sanitize`(独立 pattern 库);配置 schema 见
-> `reflect-config/src/schema.rs::SanitizeSection`。
+> 实现见 `zhuye-tools/src/sanitize/mod.rs` 与
+> `zhuye-sanitize`(独立 pattern 库);配置 schema 见
+> `zhuye-config/src/schema.rs::SanitizeSection`。
 > `/hooks ls` 与本文档展示注册的 pattern 清单。
 
 ## 1. 目的
@@ -49,7 +49,7 @@ regex 编译失败启动即报错(fail-fast,不静默跳过)。
 
 - 工具输出进上下文前(`ToolOutput` 序列化路径);
 - rollout JSONL 写盘前(单条超 16 KiB 先截断再脱敏);
-- 遥测 / LLM trace(`~/.reflect/traces/model-io/`)写盘前。
+- 遥测 / LLM trace(`~/.zhuye/traces/model-io/`)写盘前。
 
 密钥**来源**侧的防护是另一层:MCP 子进程 `env_clear()` 只传白名单
 env;credential 支持 env 引用而非明文落 config。两层叠加 —— 来源

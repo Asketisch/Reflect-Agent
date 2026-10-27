@@ -10,7 +10,7 @@
 - O5 goal 模式与其他 op 共存(进出 goal 模式不破坏会话)。
 
 运行:tests/run_all.sh functional,或
-  REFLECT_BIN=... python3 -m pytest tests/functional/test_orchestration.py -v
+  ZHUYE_BIN=... python3 -m pytest tests/functional/test_orchestration.py -v
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ pytestmark = pytest.mark.usefixtures("sandbox")
 def test_O1_子代理调用(serve_session, mock_script) -> None:
     """模型调 `call_explorer` → 子代理执行 → 回执进历史,turn 正常收尾。
 
-    依据:crates/orchestration/reflect-subagent/src/spec.rs:31-32
+    依据:crates/orchestration/zhuye-subagent/src/spec.rs:31-32
     (工具名 = `call_<role>`);bootstrap.rs:286(无自定义 spec 时回退硬编码
     explorer)。
     """
@@ -48,7 +48,7 @@ def test_O1_子代理调用(serve_session, mock_script) -> None:
             '{"type":"text","text":"parent-done"}',
         ]
     )
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         evs = s.submit(
             {"type": "user_input", "items": [{"type": "text", "text": "派个子代理"}]},
             timeout=DRAIN_TIMEOUT,
@@ -65,7 +65,7 @@ def test_O1_子代理调用(serve_session, mock_script) -> None:
 
 
 def test_O2_讨论编排(serve_session, mock_script, sandbox) -> None:
-    """`reflect discussion run`(mock 驱动真多 agent)→ transcript + Result。
+    """`zhuye discussion run`(mock 驱动真多 agent)→ transcript + Result。
 
     依据:tests/rust/cli_deep.sh 组 9。
     """
@@ -99,7 +99,7 @@ def test_O2_讨论编排(serve_session, mock_script, sandbox) -> None:
         "run",
         "-c",
         str(cfg),
-        env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)},
+        env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)},
         timeout=90,
     )
     assert proc.returncode == 0, f"discussion run 退出码={proc.returncode}:{proc.stderr}"
@@ -111,7 +111,7 @@ def test_O2_讨论编排(serve_session, mock_script, sandbox) -> None:
 
 
 def test_O3_任务与团队(sandbox) -> None:
-    """`reflect task create/ls/update` → 任务落盘且可列出。"""
+    """`zhuye task create/ls/update` → 任务落盘且可列出。"""
     require_binary()
     created = run_cli(
         sandbox,
@@ -125,13 +125,13 @@ def test_O3_任务与团队(sandbox) -> None:
         "d1",
         "--active-form",
         "Doing",
-        env={"REFLECT_MODEL": "mock"},
+        env={"ZHUYE_MODEL": "mock"},
         timeout=30,
     )
     assert created.returncode == 0, f"task create 退出码={created.returncode}:{created.stderr}"
     assert "Task #1 created" in created.stdout, f"回显异常:{created.stdout!r}"
     listed = run_cli(
-        sandbox, "task", "ls", env={"REFLECT_MODEL": "mock"}, timeout=30
+        sandbox, "task", "ls", env={"ZHUYE_MODEL": "mock"}, timeout=30
     )
     assert listed.returncode == 0, f"task ls 退出码={listed.returncode}:{listed.stderr}"
     assert "S1" in listed.stdout, f"task ls 未列出:{listed.stdout!r}"
@@ -150,7 +150,7 @@ def test_O4_流水线_错误路径(sandbox) -> None:
         "ghost",
         "--topic",
         "t",
-        env={"REFLECT_MODEL": "mock"},
+        env={"ZHUYE_MODEL": "mock"},
         timeout=30,
     )
     assert ghost.returncode != 0, "pipeline team 不存在应报错"
@@ -159,7 +159,7 @@ def test_O4_流水线_错误路径(sandbox) -> None:
     )
 
     team = run_cli(
-        sandbox, "task", "team", "create", "only", env={"REFLECT_MODEL": "mock"}, timeout=30
+        sandbox, "task", "team", "create", "only", env={"ZHUYE_MODEL": "mock"}, timeout=30
     )
     assert team.returncode == 0, f"task team create 退出码={team.returncode}:{team.stderr}"
     cfg = sandbox.cwd / "pipe.toml"
@@ -175,7 +175,7 @@ def test_O4_流水线_错误路径(sandbox) -> None:
         str(cfg),
         "--topic",
         "t1",
-        env={"REFLECT_MODEL": "mock"},
+        env={"ZHUYE_MODEL": "mock"},
         timeout=60,
     )
     assert run.returncode != 0, "自定义 label 无 runner 应报错"
@@ -194,7 +194,7 @@ def test_O5_goal模式与其他op共存(serve_session, mock_script) -> None:
             '{"type":"text","text":"g3"}',
         ]
     )
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         s.submit(
             {
                 "type": "enter_goal_mode",

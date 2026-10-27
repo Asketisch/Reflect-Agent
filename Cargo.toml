@@ -2,52 +2,52 @@
 resolver = "2"
 members = [
     # ── protocol ── 底层契约(被所有层依赖)
-    "crates/protocol/reflect-protocol",
+    "crates/protocol/zhuye-protocol",
 
     # ── abilities ── 能力原语层
-    "crates/abilities/reflect-llm",
-    "crates/abilities/reflect-tools",
-    "crates/abilities/reflect-bm25",
-    "crates/abilities/reflect-hooks",
-    "crates/abilities/reflect-skills",
-    "crates/abilities/reflect-memory",
-    "crates/abilities/reflect-agent-def",
-    "crates/abilities/reflect-prompt",
-    "crates/abilities/reflect-compact",
-    "crates/abilities/reflect-recovery",
-    "crates/abilities/reflect-notes",
-    "crates/abilities/reflect-sanitize",
+    "crates/abilities/zhuye-llm",
+    "crates/abilities/zhuye-tools",
+    "crates/abilities/zhuye-bm25",
+    "crates/abilities/zhuye-hooks",
+    "crates/abilities/zhuye-skills",
+    "crates/abilities/zhuye-memory",
+    "crates/abilities/zhuye-agent-def",
+    "crates/abilities/zhuye-prompt",
+    "crates/abilities/zhuye-compact",
+    "crates/abilities/zhuye-recovery",
+    "crates/abilities/zhuye-notes",
+    "crates/abilities/zhuye-sanitize",
 
     # ── resources ── 配置/权限/插件/可观测性
-    "crates/resources/reflect-config",
-    "crates/resources/reflect-permissions",
-    "crates/resources/reflect-plugin",
-    "crates/resources/reflect-rollout",
-    "crates/resources/reflect-telemetry",
-    "crates/resources/reflect-sandbox",
-    "crates/resources/reflect-ast",
+    "crates/resources/zhuye-config",
+    "crates/resources/zhuye-permissions",
+    "crates/resources/zhuye-plugin",
+    "crates/resources/zhuye-rollout",
+    "crates/resources/zhuye-telemetry",
+    "crates/resources/zhuye-sandbox",
+    "crates/resources/zhuye-ast",
 
     # ── orchestration ── 多 agent 编排层
-    "crates/orchestration/reflect-subagent",
-    "crates/orchestration/reflect-discussion",
-    "crates/orchestration/reflect-task",
-    "crates/orchestration/reflect-pipeline",
-    "crates/orchestration/reflect-goal",
+    "crates/orchestration/zhuye-subagent",
+    "crates/orchestration/zhuye-discussion",
+    "crates/orchestration/zhuye-task",
+    "crates/orchestration/zhuye-pipeline",
+    "crates/orchestration/zhuye-goal",
 
     # ── integrations ── 外部协议/平台集成
-    "crates/integrations/reflect-mcp",
-    "crates/integrations/reflect-lsp",
-    "crates/integrations/reflect-integration",
-    "crates/integrations/reflect-stream",
+    "crates/integrations/zhuye-mcp",
+    "crates/integrations/zhuye-lsp",
+    "crates/integrations/zhuye-integration",
+    "crates/integrations/zhuye-stream",
 
     # ── runtime ── 运行时与入口
-    # 注:reflect-tui 已拆分至独立仓库 Reflect-TUI(https://cnb.cool/Demon1019/Reflect-CLI),
-    # 核心仓库的 `reflect` 二进制不再含 TUI 子命令。TUI 二进制由 Reflect-TUI 仓库提供。
-    "crates/runtime/reflect-core",
-    "crates/runtime/reflect-exec",
-    "crates/runtime/reflect-cli",
-    "crates/runtime/reflect",
-    "crates/runtime/reflect-py",
+    # 注:zhuye-tui 已拆分至独立仓库 Reflect-TUI(https://cnb.cool/Demon1019/Reflect-CLI),
+    # 核心仓库的 `zhuye` 二进制不再含 TUI 子命令。TUI 二进制由 Reflect-TUI 仓库提供。
+    "crates/runtime/zhuye-core",
+    "crates/runtime/zhuye-exec",
+    "crates/runtime/zhuye-cli",
+    "crates/runtime/zhuye",
+    "crates/runtime/zhuye-py",
 ]
 
 [workspace.package]
@@ -55,53 +55,53 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
-repository = "https://github.com/Asketisch/Reflect-Agent"
+repository = "https://github.com/Asketisch/ZhuYe"
 
 [workspace.dependencies]
 # ── protocol ── 底层契约
-reflect-protocol = { path = "crates/protocol/reflect-protocol" }
+zhuye-protocol = { path = "crates/protocol/zhuye-protocol" }
 
 # ── abilities ── 能力原语层
-reflect-llm        = { path = "crates/abilities/reflect-llm" }
-reflect-tools      = { path = "crates/abilities/reflect-tools" }
-reflect-hooks      = { path = "crates/abilities/reflect-hooks" }
-reflect-skills     = { path = "crates/abilities/reflect-skills" }
-reflect-memory     = { path = "crates/abilities/reflect-memory" }
-reflect-agent-def  = { path = "crates/abilities/reflect-agent-def" }
-reflect-prompt     = { path = "crates/abilities/reflect-prompt" }
-reflect-compact    = { path = "crates/abilities/reflect-compact" }
-reflect-recovery   = { path = "crates/abilities/reflect-recovery" }
-reflect-notes      = { path = "crates/abilities/reflect-notes" }
-reflect-sanitize   = { path = "crates/abilities/reflect-sanitize" }
+zhuye-llm        = { path = "crates/abilities/zhuye-llm" }
+zhuye-tools      = { path = "crates/abilities/zhuye-tools" }
+zhuye-hooks      = { path = "crates/abilities/zhuye-hooks" }
+zhuye-skills     = { path = "crates/abilities/zhuye-skills" }
+zhuye-memory     = { path = "crates/abilities/zhuye-memory" }
+zhuye-agent-def  = { path = "crates/abilities/zhuye-agent-def" }
+zhuye-prompt     = { path = "crates/abilities/zhuye-prompt" }
+zhuye-compact    = { path = "crates/abilities/zhuye-compact" }
+zhuye-recovery   = { path = "crates/abilities/zhuye-recovery" }
+zhuye-notes      = { path = "crates/abilities/zhuye-notes" }
+zhuye-sanitize   = { path = "crates/abilities/zhuye-sanitize" }
 
 # ── resources ── 配置/权限/插件/可观测性
-reflect-config      = { path = "crates/resources/reflect-config" }
-reflect-permissions = { path = "crates/resources/reflect-permissions" }
-reflect-plugin      = { path = "crates/resources/reflect-plugin" }
-reflect-rollout     = { path = "crates/resources/reflect-rollout" }
-reflect-telemetry   = { path = "crates/resources/reflect-telemetry" }
-reflect-sandbox     = { path = "crates/resources/reflect-sandbox" }
-reflect-ast         = { path = "crates/resources/reflect-ast" }
+zhuye-config      = { path = "crates/resources/zhuye-config" }
+zhuye-permissions = { path = "crates/resources/zhuye-permissions" }
+zhuye-plugin      = { path = "crates/resources/zhuye-plugin" }
+zhuye-rollout     = { path = "crates/resources/zhuye-rollout" }
+zhuye-telemetry   = { path = "crates/resources/zhuye-telemetry" }
+zhuye-sandbox     = { path = "crates/resources/zhuye-sandbox" }
+zhuye-ast         = { path = "crates/resources/zhuye-ast" }
 
 # ── orchestration ── 多 agent 编排层
-reflect-subagent    = { path = "crates/orchestration/reflect-subagent" }
-reflect-discussion  = { path = "crates/orchestration/reflect-discussion" }
-reflect-task        = { path = "crates/orchestration/reflect-task" }
-reflect-pipeline    = { path = "crates/orchestration/reflect-pipeline" }
-reflect-goal        = { path = "crates/orchestration/reflect-goal" }
+zhuye-subagent    = { path = "crates/orchestration/zhuye-subagent" }
+zhuye-discussion  = { path = "crates/orchestration/zhuye-discussion" }
+zhuye-task        = { path = "crates/orchestration/zhuye-task" }
+zhuye-pipeline    = { path = "crates/orchestration/zhuye-pipeline" }
+zhuye-goal        = { path = "crates/orchestration/zhuye-goal" }
 
 # ── integrations ── 外部协议/平台集成
-reflect-mcp         = { path = "crates/integrations/reflect-mcp" }
-reflect-lsp         = { path = "crates/integrations/reflect-lsp" }
-reflect-integration = { path = "crates/integrations/reflect-integration" }
-reflect-stream      = { path = "crates/integrations/reflect-stream" }
+zhuye-mcp         = { path = "crates/integrations/zhuye-mcp" }
+zhuye-lsp         = { path = "crates/integrations/zhuye-lsp" }
+zhuye-integration = { path = "crates/integrations/zhuye-integration" }
+zhuye-stream      = { path = "crates/integrations/zhuye-stream" }
 
 # ── runtime ── 运行时与入口
-reflect-core = { path = "crates/runtime/reflect-core" }
-reflect-exec = { path = "crates/runtime/reflect-exec" }
-reflect-cli  = { path = "crates/runtime/reflect-cli" }
-reflect      = { path = "crates/runtime/reflect" }
-reflect-py   = { path = "crates/runtime/reflect-py" }
+zhuye-core = { path = "crates/runtime/zhuye-core" }
+zhuye-exec = { path = "crates/runtime/zhuye-exec" }
+zhuye-cli  = { path = "crates/runtime/zhuye-cli" }
+zhuye      = { path = "crates/runtime/zhuye" }
+zhuye-py   = { path = "crates/runtime/zhuye-py" }
 
 # 公共外部依赖
 tokio              = { version = "1", features = ["full"] }
@@ -134,7 +134,7 @@ rmcp               = { version = "=1.7.0", features = [
     "transport-streamable-http-client-reqwest",
 ] }
 
-# LSP (v0.5) — 只取类型,JSON-RPC peer 自己在 `reflect-lsp/transport.rs` 手写
+# LSP (v0.5) — 只取类型,JSON-RPC peer 自己在 `zhuye-lsp/transport.rs` 手写
 # (对齐项目风格:mock_mcp_server 也是自己手写 JSON-RPC)。
 lsp-types         = { version = "=0.97", default-features = false }
 globset           = "0.4"
@@ -153,7 +153,7 @@ ignore  = "0.4"
 similar = "2"
 regex   = "1"
 rankfns = "0.1"
-reflect-bm25 = { path = "crates/abilities/reflect-bm25" }
+zhuye-bm25 = { path = "crates/abilities/zhuye-bm25" }
 # v1.0.0-rc4: `web_fetch` builtin —— HTML 转 Markdown。
 htmd        = "0.5"
 # 通用 lazy container(`WebSearchTool` 等延迟初始化的场景)。

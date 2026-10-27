@@ -1,12 +1,12 @@
-# ── Reflect Makefile ───────────────────────────────────────────────
+# ── 烛夜(ZhuYe) Makefile ───────────────────────────────────────────────
 .PHONY: build run headless test test-fast test-changed check check-fast watch clean gc gc-deep dmg dist dist-dry help install
 
-BINARY_NAME := reflect
+BINARY_NAME := zhuye
 INSTALL_DIR := /usr/local/bin
 
 ## build: 以 release 模式编译(等价于 scripts/build.sh --dry)
 build:
-	cargo build --release -p reflect-cli
+	cargo build --release -p zhuye-cli
 
 ## run: 构建并打印 CLI 帮助(本仓库二进制无 TUI 子命令,TUI 在 Reflect-CLI 仓库)
 run: build
@@ -14,13 +14,13 @@ run: build
 
 ## headless: mock provider 跑一轮 headless 对话(离线自检)
 headless: build
-	REFLECT_MODEL=mock ./target/release/$(BINARY_NAME) exec "noop"
+	ZHUYE_MODEL=mock ./target/release/$(BINARY_NAME) exec "noop"
 
 ## install: 构建 + 安装到 /usr/local/bin
 install:
 	scripts/build.sh
 
-## dmg: 构建 macOS DMG 安装包(dist/reflect-<ver>-<triple>.dmg)
+## dmg: 构建 macOS DMG 安装包(dist/zhuye-<ver>-<triple>.dmg)
 dmg:
 	scripts/build-dmg.sh
 
@@ -48,7 +48,7 @@ test-changed:
 check:
 	cargo check --workspace
 
-## check-fast: 快速类型检查单个 crate(示例:make check-fast C=reflect-core)
+## check-fast: 快速类型检查单个 crate(示例:make check-fast C=zhuye-core)
 check-fast:
 	cargo check -p $(C)
 

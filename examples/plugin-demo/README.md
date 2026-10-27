@@ -1,4 +1,4 @@
-# Reflect 示例插件:`demo`
+# 烛夜示例插件:`demo`
 
 五类 capability 各配一个最小可运行样例的演示插件:
 
@@ -13,20 +13,20 @@
 ## 安装与启用
 
 ```bash
-# 1. 安装(复制到 ~/.reflect/plugins/cache 并登记)
-reflect plugin install examples/plugin-demo
+# 1. 安装(复制到 ~/.zhuye/plugins/cache 并登记)
+zhuye plugin install examples/plugin-demo
 
 # 2. 启用(写回 config.toml [plugins].enabled_plugins;
 #    id 必须是 name@marketplace 全名,本地安装为 demo@inline)
-reflect plugin enable demo@inline
+zhuye plugin enable demo@inline
 
 # 3. 验证
-reflect plugin list
-reflect exec "/demo:hello 张三"
+zhuye plugin list
+zhuye exec "/demo:hello 张三"
 ```
 
-也可以不装直接本地引用:把 `demo@inline` 加入 `~/.reflect/config.toml` 的
-`[plugins].enabled_plugins` 后,用 `reflect plugin install` 指向本目录即可。
+也可以不装直接本地引用:把 `demo@inline` 加入 `~/.zhuye/config.toml` 的
+`[plugins].enabled_plugins` 后,用 `zhuye plugin install` 指向本目录即可。
 
 ## MCP server 说明
 

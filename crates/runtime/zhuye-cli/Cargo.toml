@@ -1,0 +1,39 @@
+[package]
+name = "zhuye-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ZhuYe: top-level CLI router (produces the `zhuye` binary)"
+
+[[bin]]
+name = "zhuye"
+path = "src/main.rs"
+
+[dependencies]
+zhuye-exec       = { workspace = true }
+zhuye-discussion = { workspace = true }
+zhuye-rollout    = { workspace = true }
+zhuye-config     = { workspace = true }
+zhuye-mcp        = { workspace = true }
+zhuye-stream      = { workspace = true }
+zhuye-integration = { workspace = true }
+zhuye-plugin     = { workspace = true }
+zhuye-protocol   = { workspace = true }
+zhuye-task       = { workspace = true }
+zhuye-pipeline   = { workspace = true }
+zhuye-subagent   = { workspace = true }
+zhuye-tools      = { workspace = true }
+zhuye-llm        = { workspace = true }
+zhuye-telemetry  = { workspace = true }
+anyhow         = { workspace = true }
+clap           = { workspace = true }
+tokio          = { workspace = true }
+tokio-util     = { workspace = true }
+toml           = { workspace = true }
+serde_json     = { workspace = true }
+uuid           = { workspace = true }
+tracing        = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+wiremock = { workspace = true }

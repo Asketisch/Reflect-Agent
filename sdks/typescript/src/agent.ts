@@ -1,8 +1,8 @@
-//! ReflectAgent —— TS SDK 主类。
+//! ZhuyeAgent —— TS SDK 主类。
 //!
 //! 用法:
 //! ```ts
-//! const agent = await ReflectAgent.spawn();
+//! const agent = await ZhuyeAgent.spawn();
 //! await agent.registerTool('get_weather', '查询天气', {
 //!   type: 'object', properties: { city: { type: 'string' } }, required: ['city']
 //! }, async ({ city }) => ({ content: [{ type: 'text', text: `晴 26℃` }] }));
@@ -27,8 +27,8 @@ import {
   ToolOutput,
 } from './protocol.js';
 
-const REFLECT_BIN_ENV = 'REFLECT_BIN';
-const DEFAULT_BIN = 'reflect';
+const ZHUYE_BIN_ENV = 'ZHUYE_BIN';
+const DEFAULT_BIN = 'zhuye';
 const READLINE_LIMIT = 16 * 1024 * 1024;
 const STDIN_HANDSHAKE_TIMEOUT_MS = 30_000;
 
@@ -43,13 +43,13 @@ interface RegisteredTool {
   handler: ToolHandler;
 }
 
-/** ReflectAgent 启动选项。 */
-export interface ReflectAgentOptions {
-  /** `reflect` 二进制路径。默认读 env `REFLECT_BIN` → PATH 上的 `reflect`。 */
+/** ZhuyeAgent 启动选项。 */
+export interface ZhuyeAgentOptions {
+  /** `zhuye` 二进制路径。默认读 env `ZHUYE_BIN` → PATH 上的 `zhuye`。 */
   bin?: string;
   /** 工作目录(传给 serve 的 env)。 */
   cwd?: string;
-  /** 透传给 serve 进程的 env(如 `REFLECT_MODEL=mock`)。 */
+  /** 透传给 serve 进程的 env(如 `ZHUYE_MODEL=mock`)。 */
   env?: NodeJS.ProcessEnv;
   /** 反射 spawn options(覆盖/补充默认的 cwd / env)。 */
   spawnOptions?: Omit<SpawnOptions, 'bin' | 'args' | 'env' | 'cwd'>;
@@ -72,10 +72,10 @@ interface ServeProcess {
 }
 
 /**
- * 主类:启动并维护一个常驻 `reflect serve` 子进程,把 JSONL 协议包装
+ * 主类:启动并维护一个常驻 `zhuye serve` 子进程,把 JSONL 协议包装
  * 成 Promise / AsyncIterable 给 TS 用户。
  */
-export class ReflectAgent {
+export class ZhuyeAgent {
   private readonly proc: ServeProcess;
   private readonly tools = new Map<string, RegisteredTool>();
   private readonly pending = new Map<string, (output: ToolOutput) => void>();
@@ -95,13 +95,13 @@ export class ReflectAgent {
     });
   }
 
-  /** 启动一个 `reflect serve` 子进程,等到 `session_configured` 即视为就绪。 */
-  static async spawn(options: ReflectAgentOptions = {}): Promise<ReflectAgent> {
-    // env 合并而非替换:保留 HOME / PATH 等(替换会让 reflect 连
+  /** 启动一个 `zhuye serve` 子进程,等到 `session_configured` 即视为就绪。 */
+  static async spawn(options: ZhuyeAgentOptions = {}): Promise<ZhuyeAgent> {
+    // env 合并而非替换:保留 HOME / PATH 等(替换会让 zhuye 连
     // config 目录都定位不到),options.env 只做增量覆盖。
     const env: NodeJS.ProcessEnv = { ...process.env, ...options.env };
     const spawnOpts: SpawnOptions = {
-      bin: options.bin ?? process.env[REFLECT_BIN_ENV] ?? DEFAULT_BIN,
+      bin: options.bin ?? process.env[ZHUYE_BIN_ENV] ?? DEFAULT_BIN,
       args: ['serve'],
       cwd: options.cwd,
       env,
@@ -127,19 +127,19 @@ export class ReflectAgent {
       readyResolve = res;
       readyReject = rej;
     });
-    const agent = new ReflectAgent(proc, ready);
+    const agent = new ZhuyeAgent(proc, ready);
     // 子进程意外退出 → 通知所有 close 监听者(submit / prompt 等
     // 仍 await 中的 promise 借此抛错 / 收尾)。
     child.on('exit', (code, signal) => {
       agent.handleServeExit(
         new Error(
-          `reflect serve exited unexpectedly (code=${code} signal=${signal ?? 'none'})`,
+          `zhuye serve exited unexpectedly (code=${code} signal=${signal ?? 'none'})`,
         ),
       );
     });
     const handshakeMs = options.handshakeTimeoutMs ?? STDIN_HANDSHAKE_TIMEOUT_MS;
     const timer = setTimeout(() => {
-      readyReject(new Error(`reflect serve handshake timed out after ${handshakeMs}ms`));
+      readyReject(new Error(`zhuye serve handshake timed out after ${handshakeMs}ms`));
     }, handshakeMs);
     timer.unref?.();
     // 在握手阶段消费 stdout,直到见到 session_configured 后再切给
@@ -157,7 +157,7 @@ export class ReflectAgent {
     stdin: Writable,
     stdout: Readable,
     handshakeTimeoutMs = STDIN_HANDSHAKE_TIMEOUT_MS,
-  ): Promise<ReflectAgent> {
+  ): Promise<ZhuyeAgent> {
     const proc: ServeProcess = {
       // child 字段仅类型占位;内部不会触发 spawn 路径。
       child: undefined as unknown as ChildProcessWithoutNullStreams,
@@ -170,7 +170,7 @@ export class ReflectAgent {
       readyResolve = res;
       readyReject = rej;
     });
-    const agent = new ReflectAgent(proc, ready);
+    const agent = new ZhuyeAgent(proc, ready);
     const timer = setTimeout(() => {
       readyReject(new Error(`fromStdio handshake timed out after ${handshakeTimeoutMs}ms`));
     }, handshakeTimeoutMs);
@@ -182,7 +182,7 @@ export class ReflectAgent {
     return agent;
   }
 
-  /** 注册客户端自定义工具(`ReflectAgent` 启动后任何时刻可调用)。 */
+  /** 注册客户端自定义工具(`ZhuyeAgent` 启动后任何时刻可调用)。 */
   async registerTool(
     name: string,
     description: string,
@@ -230,7 +230,7 @@ export class ReflectAgent {
       else if (msg.type === 'turn_complete') break;
       else if (msg.type === 'turn_aborted') break;
       else if (msg.type === 'error') {
-        throw new Error(`reflect error: ${msg.code}: ${msg.message}`);
+        throw new Error(`zhuye error: ${msg.code}: ${msg.message}`);
       }
     }
     return result;
@@ -317,7 +317,7 @@ export class ReflectAgent {
       try {
         ev = JSON.parse(line) as Event;
       } catch {
-        process.stderr.write(`[reflect-sdk] unparseable line: ${line.slice(0, 200)}\n`);
+        process.stderr.write(`[zhuye-sdk] unparseable line: ${line.slice(0, 200)}\n`);
         continue;
       }
       // 握手阶段:见 session_configured 就 resolve ready。
@@ -494,7 +494,7 @@ function isTerminal(msg: EventMsg): boolean {
 
 /**
  * 把 Readable 流切成按行产生的 AsyncIterable。超长行(> 16 MiB)
- * 抛错并跳过 —— 对应 `reflect serve` 不应输出如此长的 JSONL 行。
+ * 抛错并跳过 —— 对应 `zhuye serve` 不应输出如此长的 JSONL 行。
  */
 function lineStream(stream: Readable): AsyncIterable<string> {
   // Node 的 Readable 默认 paused,data 事件不会自动 emit。.resume() 切
@@ -517,7 +517,7 @@ function lineStream(stream: Readable): AsyncIterable<string> {
             if (buffer.length > MAX_LINE) {
               const over = buffer.slice(0, 256);
               buffer = '';
-              process.stderr.write(`[reflect-sdk] line > ${MAX_LINE} bytes, dropping: ${over}\n`);
+              process.stderr.write(`[zhuye-sdk] line > ${MAX_LINE} bytes, dropping: ${over}\n`);
               continue;
             }
             const { value, done } = await iter.next();

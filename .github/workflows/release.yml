@@ -1,4 +1,4 @@
-# Reflect-Agent 跨平台发布构建。
+# 烛夜跨平台发布构建。
 #
 # 仅由 `git push --tags v*` 或 Actions 手动触发。在三个 OS 上并行构建
 # 各平台原生分发包(macOS DMG / Linux tar.gz / Windows zip),上传到
@@ -78,7 +78,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: reflect-${{ matrix.os }}
+          name: zhuye-${{ matrix.os }}
           path: artifacts/*
           if-no-files-found: error
           retention-days: 30

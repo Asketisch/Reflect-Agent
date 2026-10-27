@@ -1,0 +1,19 @@
+[package]
+name = "zhuye-agent-def"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ZhuYe: Markdown + frontmatter agent definitions"
+
+[dependencies]
+zhuye-protocol = { workspace = true }
+zhuye-memory    = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+serde_yaml         = { workspace = true }
+thiserror          = { workspace = true }
+toml               = { workspace = true }
+tracing            = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

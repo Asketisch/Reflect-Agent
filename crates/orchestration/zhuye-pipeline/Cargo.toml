@@ -1,0 +1,28 @@
+[package]
+name = "zhuye-pipeline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ZhuYe: DAG-based pipeline runner (team-plan → team-prd → team-exec → team-verify, v1.1.0 Phase 5)"
+
+[dependencies]
+zhuye-protocol  = { workspace = true }
+zhuye-subagent  = { workspace = true }
+zhuye-task      = { workspace = true }
+async-trait         = { workspace = true }
+parking_lot         = { workspace = true }
+serde               = { workspace = true }
+serde_json          = { workspace = true }
+serde_yaml          = { workspace = true }
+toml                = { workspace = true }
+thiserror           = { workspace = true }
+tokio               = { workspace = true }
+tokio-util          = { workspace = true }
+tracing             = { workspace = true }
+futures             = { workspace = true }
+
+zhuye-tools  = { workspace = true }
+
+[dev-dependencies]
+zhuye-llm    = { workspace = true }
+tempfile = "3"

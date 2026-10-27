@@ -1,12 +1,12 @@
-# Reflect 示例插件 —— 五类 capability 各配一个最小可运行样例。
+# 烛夜示例插件 —— 五类 capability 各配一个最小可运行样例。
 #
-# 安装:reflect plugin install examples/plugin-demo
-# 启用:reflect plugin enable demo
-#      (等价于把 "demo" 写进 ~/.reflect/config.toml 的
+# 安装:zhuye plugin install examples/plugin-demo
+# 启用:zhuye plugin enable demo
+#      (等价于把 "demo" 写进 ~/.zhuye/config.toml 的
 #       [plugins].enabled_plugins,运行中改动支持热重载)
 name = "demo"
 version = "0.1.0"
-description = "Reflect 插件机制演示:slash 命令 / 子代理 / 技能 / hook / MCP server"
+description = "烛夜插件机制演示:slash 命令 / 子代理 / 技能 / hook / MCP server"
 keywords = ["example", "demo"]
 
 # ── 五类 capability 声明 ──────────────────────────────────────────────

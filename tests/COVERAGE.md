@@ -2,7 +2,7 @@
 
 本矩阵回答一个问题:**当前测试是否完整覆盖了全部对外功能**(而非冒烟)。
 覆盖口径:每条功能面至少有一个**字段级/行为级断言**(非"退出码 0")的
-用例;断言失败即失败。全程离线(`REFLECT_MODEL=mock`)+ 隔离 HOME。
+用例;断言失败即失败。全程离线(`ZHUYE_MODEL=mock`)+ 隔离 HOME。
 
 ## 0. 覆盖分层:谁测什么
 
@@ -75,7 +75,7 @@
 - **T3** 远程工具往返:`register_tools` → 模型调用 → `tool_execution_request`
   (全局,带 `tool`/`args`)→ 回执 → `tool_call_end`(输出透传)。
 - **T4** 远程工具失败回执 → `tool_call_end(is_error=true)`。
-- **T5** 工具审批全链路(`REFLECT_APPROVALS=1` + MCP 工具):`approval_request`
+- **T5** 工具审批全链路(`ZHUYE_APPROVALS=1` + MCP 工具):`approval_request`
   (request_id / kind.tool_name / risk)→ 回 `tool_approval` → 工具真执行 →
   `turn_complete`。
 - **T6** 审批 deny → 工具**未执行**、`tool_call_end(is_error=true, 含 deny 理由)`、
@@ -105,7 +105,7 @@
 
 ### P 组 持久化(`test_persistence.py`)
 `session_meta` 首行 + `message` 记录集 / 权限模式 `from→to+at` 轨迹 /
-rewind 物理截断(记录减少 + `.rewind-<ts>.bak` 备份)/ `reflect session ls`
+rewind 物理截断(记录减少 + `.rewind-<ts>.bak` 备份)/ `zhuye session ls`
 能列出该会话。
 
 ### O 组 编排(`test_orchestration.py`)
@@ -149,7 +149,7 @@ Result + rounds_completed)/ 任务与团队(create → ls)/ 流水线错误路�
   `tool_call_end` 回传 echo 输出);能力层 T5/T6 另覆盖审批链路。
 - **skill**:工作区 `SKILL.md` 扫描 + `load_skill` 激活(正文 + 激活工具
   列表);不存在的 skill 优雅报错。
-- **notes**:`add_session_note` → `~/.reflect/session-notes/<thread>.jsonl`
+- **notes**:`add_session_note` → `~/.zhuye/session-notes/<thread>.jsonl`
   落盘(内容 + JSON 合法性)。
 - **bubble 审批**:Bubble 模式下 Prompt 权限工具 → `permission_bubble`
   非阻塞通知 + 自动放行执行。
@@ -166,7 +166,7 @@ Result + rounds_completed)/ 任务与团队(create → ls)/ 流水线错误路�
 - `discussion run`:concurrent 模式受 SubAgentFactory 深度上限约束;
   无 provider 时降级 `run_noop`(退出 0,Result JSON 仍含 outcome)。
 - `approval_request` / `ask_user*` 的**交互式工具路径**需要 TUI/modal;
-  headless 下只验孤儿回执的 wire 级健壮性。serve + `REFLECT_APPROVALS=1`
+  headless 下只验孤儿回执的 wire 级健壮性。serve + `ZHUYE_APPROVALS=1`
   可触发真实 gate(能力层 T5/T6 已覆盖)。
 - `web_search` / `web_fetch` 离线时优雅报错(无 provider key / 无网络)。
 - **并发 turn 是真并发**:core 对每个 `UserInput` 提交 `tokio::spawn` 一个
@@ -175,23 +175,23 @@ Result + rounds_completed)/ 任务与团队(create → ls)/ 流水线错误路�
 - **三个 id 互不相同**:`session_configured.session_id`、rollout 内
   `session_meta.session_id`、会话**文件名**里的 thread id 是三个不同的
   uuid(exec/serve 路径未注入 `with_session_id`)。`--resume` 的参数必须用
-  **文件名**里的 id;`reflect session ls` 显示的是 SessionMeta 里的 id。
+  **文件名**里的 id;`zhuye session ls` 显示的是 SessionMeta 里的 id。
 
 ## 6. 已知缺陷(本次只记录不修,供后续独立任务)
 
 | # | 缺陷 | 证据 | 影响 |
 |---|---|---|---|
-| D1 | **Python SDK `close()` 从不发出 shutdown op**:先置 `_closed=True` 再调 `_write_submission`,后者因 `_closed` 抛 `RuntimeError("agent is closed")` 被 `except Exception: pass` 吞掉 | `sdks/python/reflect/agent.py:259-266` + `:373-382` | 文档承诺的"发 Shutdown → 等 ShutdownComplete"未兑现;实际靠关 stdin(EOF)兜底。TS 侧用 `writeSubmissionUnchecked` 正常发出 —— **两客户端行为相反** |
-| D2 | 协议类型与 wire 不符:`TurnComplete.status` 类型写 `ok/cancelled/aborted/error`,wire 实为 `success/max_iterations/stopped/token_budget_exceeded`;`TurnAborted.reason` 类型写 `str`,wire 实为 `{"type":"user_interrupt"}`;`PlanApprovalChoice` 类型写 `auto_mode/prompt_mode/reject`,wire 实为 `auto_mode/manual_approve/revise` | `sdks/python/reflect/protocol.py:228-245` vs `event_msg/turn.rs:75-92`、`item.rs:249-260`;TS 侧前两处同样错 | 按类型注解写代码即错 |
-| D3 | Python `ReviewDecision` TypedDict 建模为 `{"type":"approve"}`,wire 实为裸字符串 `"approve"` / `"approve_for_session"` / `{"deny":{"reason":...}}` | `sdks/python/reflect/protocol.py:62-71` vs `item.rs:236-241` | 按类型注解传 `{"type":"approve"}` → 服务端反序列化失败 → `invalid_submission` → **审批永久挂起**(TS 侧 v1.3 已修) |
-| D4 | 全局事件(`id=""`)无公开读取口:`permission_mode_changed` / `config_reloaded` / `mcp_server_started` / `error` 只能读私有 `_global_queue` | `sdks/python/reflect/agent.py:322-345` | SDK 用户拿不到全局事件;本次能力层用原始 wire 覆盖,SDK 侧仍缺 |
+| D1 | **Python SDK `close()` 从不发出 shutdown op**:先置 `_closed=True` 再调 `_write_submission`,后者因 `_closed` 抛 `RuntimeError("agent is closed")` 被 `except Exception: pass` 吞掉 | `sdks/python/zhuye/agent.py:259-266` + `:373-382` | 文档承诺的"发 Shutdown → 等 ShutdownComplete"未兑现;实际靠关 stdin(EOF)兜底。TS 侧用 `writeSubmissionUnchecked` 正常发出 —— **两客户端行为相反** |
+| D2 | 协议类型与 wire 不符:`TurnComplete.status` 类型写 `ok/cancelled/aborted/error`,wire 实为 `success/max_iterations/stopped/token_budget_exceeded`;`TurnAborted.reason` 类型写 `str`,wire 实为 `{"type":"user_interrupt"}`;`PlanApprovalChoice` 类型写 `auto_mode/prompt_mode/reject`,wire 实为 `auto_mode/manual_approve/revise` | `sdks/python/zhuye/protocol.py:228-245` vs `event_msg/turn.rs:75-92`、`item.rs:249-260`;TS 侧前两处同样错 | 按类型注解写代码即错 |
+| D3 | Python `ReviewDecision` TypedDict 建模为 `{"type":"approve"}`,wire 实为裸字符串 `"approve"` / `"approve_for_session"` / `{"deny":{"reason":...}}` | `sdks/python/zhuye/protocol.py:62-71` vs `item.rs:236-241` | 按类型注解传 `{"type":"approve"}` → 服务端反序列化失败 → `invalid_submission` → **审批永久挂起**(TS 侧 v1.3 已修) |
+| D4 | 全局事件(`id=""`)无公开读取口:`permission_mode_changed` / `config_reloaded` / `mcp_server_started` / `error` 只能读私有 `_global_queue` | `sdks/python/zhuye/agent.py:322-345` | SDK 用户拿不到全局事件;本次能力层用原始 wire 覆盖,SDK 侧仍缺 |
 | D5 | 协议文档与实现不符:`sdks/PROTOCOL.md` §4 称「core 侧串行排队」,实测每个 `UserInput` 提交一个独立 task(真并发) | `submission_loop.rs:621`;能力层 S1/S2 实测 | 依赖"第二个 turn 一定在第一个之后开始"的客户端会踩坑;文档应改为"并发执行、事件按 id 路由" |
 | D6 | `tests/` 套件此前从未进 CI,导致**已存在的失败用例**长期未被发现(原 `test_sdk_real_bin.py` 的 interrupt 断言与当前 core 行为不符;`cli_core.sh` 的 `exec --plan-mode` 期望 0 而实际按约定 122;`serve_ops.sh` 期望「不 emit plan_approved」而引擎现在会发;`tools_drive.sh` 的 grep 期望 `./` 前缀而实际无前缀) | 本批次修正前实测失败 | 本批次已修正断言(不改服务端行为),并由 CI job `functional-suite` 收口 |
-| D7 | **bash 工具对被沙箱拒绝的命令仍报成功**:macOS Seatbelt 下越界写被拦下(stderr 含 `Operation not permitted`、文件不落地),但工具输出 `is_error=false`(退出码经 sentinel 回报为 0) | 本地实测 `reflect exec` + bash 越界写;`tests/rust/tools_drive.sh` 的沙箱用例 | 模型看不到失败信号,可能误以为写成功;安全不变量(文件不落地)成立,但错误信号缺失 |
-| D8 | **`InvalidRequest`(400)被归到 `CooldownReason::Auth`**(默认 1 小时冷却) | `crates/runtime/reflect-core/src/graph/nodes/model_call/stream.rs` 的 `build_cooldown_reason` 兜底分支 | 一次 400(如模型不支持 tools)会让该凭据停摆一小时,远超合理范围;本次未改(超出最小改动边界),记此备查 |
-| D10 | **两个 SDK 都未类型化上游的 `tool_call_output_delta`**(v1.4 additive 变体):SDK 走 `UnknownEventMsg` 降级不崩,但 SDK 用户拿不到该事件的类型化形态 | `sdks/python/reflect/protocol.py` 与 `sdks/typescript/src/protocol.ts` 的 `EventMsg` 联合(均无此项);Rust 侧见 `event_msg/tool.rs` | 客户端想消费"长工具输出实时增量"只能自己收窄 `dict`/`Record`;本次只同步了本批新增的 `tool_call_args_delta`(v1.5),`tool_call_output_delta` 仍缺,记此备查 |
+| D7 | **bash 工具对被沙箱拒绝的命令仍报成功**:macOS Seatbelt 下越界写被拦下(stderr 含 `Operation not permitted`、文件不落地),但工具输出 `is_error=false`(退出码经 sentinel 回报为 0) | 本地实测 `zhuye exec` + bash 越界写;`tests/rust/tools_drive.sh` 的沙箱用例 | 模型看不到失败信号,可能误以为写成功;安全不变量(文件不落地)成立,但错误信号缺失 |
+| D8 | **`InvalidRequest`(400)被归到 `CooldownReason::Auth`**(默认 1 小时冷却) | `crates/runtime/zhuye-core/src/graph/nodes/model_call/stream.rs` 的 `build_cooldown_reason` 兜底分支 | 一次 400(如模型不支持 tools)会让该凭据停摆一小时,远超合理范围;本次未改(超出最小改动边界),记此备查 |
+| D10 | **两个 SDK 都未类型化上游的 `tool_call_output_delta`**(v1.4 additive 变体):SDK 走 `UnknownEventMsg` 降级不崩,但 SDK 用户拿不到该事件的类型化形态 | `sdks/python/zhuye/protocol.py` 与 `sdks/typescript/src/protocol.ts` 的 `EventMsg` 联合(均无此项);Rust 侧见 `event_msg/tool.rs` | 客户端想消费"长工具输出实时增量"只能自己收窄 `dict`/`Record`;本次只同步了本批新增的 `tool_call_args_delta`(v1.5),`tool_call_output_delta` 仍缺,记此备查 |
 
-### 实模型层观测到的上游限制(非 Reflect 缺陷)
+### 实模型层观测到的上游限制(非烛夜缺陷)
 
 以下来自 `tests/live/` 对真实免费池的观测,**不计入缺陷**,但影响实模型层的
 跑法与断言口径:
@@ -218,7 +218,7 @@ Result + rounds_completed)/ 任务与团队(create → ls)/ 流水线错误路�
 | `live/test_live_basic.py` | 4 条(L1–L4) |
 | `live/test_live_tools.py` | 3 条(T1–T3) |
 | `live/test_live_persistence.py` | 3 条(P1–P2、X1) |
-| **实模型演练层合计** | **10 条**(默认 SKIP,需 `REFLECT_LIVE=1`) |
+| **实模型演练层合计** | **10 条**(默认 SKIP,需 `ZHUYE_LIVE=1`) |
 | `sdk-python/test_sdk_real_bin.py` | 9 条(K1–K8) |
 | `sdk-ts/real-bin.test.mjs` | 5 条 |
 | `rust/cli_core.sh` | 71 断言 |
@@ -235,7 +235,7 @@ Result + rounds_completed)/ 任务与团队(create → ls)/ 流水线错误路�
 - **TUI 交互面**(modal / 按键 / 渲染):本仓库已不含 TUI 子命令,无对象。
 - **真实 LLM provider 的流式/重试/限流路径**:mock provider 覆盖协议
   语义,真实 provider 行为(429 退避、连接中断重试)需要网络,不在离线
-  套件范围;`crates/abilities/reflect-llm` 内有 wiremock 单测覆盖。
+  套件范围;`crates/abilities/zhuye-llm` 内有 wiremock 单测覆盖。
 - **cron / background task 的定时触发路径**:启动期可见(cron scheduler
   started),定时到期的真实触发依赖时间流逝,未做长时等待断言。
 - **OTLP telemetry 真实上报**:本地文件 trace(traces 子命令)已覆盖;

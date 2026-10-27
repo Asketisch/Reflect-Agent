@@ -35,7 +35,7 @@ if require_cmd node; then
             exit 1
         }
     fi
-    if HOME="$(mktemp -d)" REFLECT_BIN="$REFLECT_BIN" \
+    if HOME="$(mktemp -d)" ZHUYE_BIN="$ZHUYE_BIN" \
         node --test "$HERE/real-bin.test.mjs"; then
         echo "  [ok]   SDK 绑定层全绿"
     else

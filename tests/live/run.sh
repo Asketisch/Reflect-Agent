@@ -8,11 +8,11 @@
 # 模型**从 provider 接口实时获取**(见 conftest.py),不写死模型 id ——
 # 免费模型集合由上游决定,随时可能增删。
 #
-# 默认 SKIP:不设 `REFLECT_LIVE=1` 时不发起任何网络请求,退出码 0。
+# 默认 SKIP:不设 `ZHUYE_LIVE=1` 时不发起任何网络请求,退出码 0。
 #
 # 用法:
-#   REFLECT_LIVE=1 ./tests/run_all.sh live
-#   REFLECT_LIVE=1 REFLECT_LIVE_MODELS=a,b ./tests/run_all.sh live
+#   ZHUYE_LIVE=1 ./tests/run_all.sh live
+#   ZHUYE_LIVE=1 ZHUYE_LIVE_MODELS=a,b ./tests/run_all.sh live
 
 set -u
 
@@ -26,8 +26,8 @@ RC=0
 
 echo "── 实模型演练层:真实模型驱动真二进制(原始 wire)──"
 
-if [ "${REFLECT_LIVE:-}" = "" ]; then
-    echo "  [SKIP] 未设 REFLECT_LIVE=1,跳过(不发起任何网络请求)"
+if [ "${ZHUYE_LIVE:-}" = "" ]; then
+    echo "  [SKIP] 未设 ZHUYE_LIVE=1,跳过(不发起任何网络请求)"
     exit 0
 fi
 
@@ -36,10 +36,10 @@ if ! require_cmd python3 || ! python3 -m pytest --version >/dev/null 2>&1; then
     exit 0
 fi
 
-echo "  车道: ${REFLECT_LIVE_BASE_URL:-https://api.kilo.ai/api/gateway}"
+echo "  车道: ${ZHUYE_LIVE_BASE_URL:-https://api.kilo.ai/api/gateway}"
 echo "  模型来源:provider 清单接口(实时拉取)"
 
-if HOME="$(mktemp -d)" REFLECT_BIN="$REFLECT_BIN" \
+if HOME="$(mktemp -d)" ZHUYE_BIN="$ZHUYE_BIN" \
     python3 -m pytest "$HERE" -v --tb=short -p no:cacheprovider; then
     echo "  [ok]   实模型演练层全绿"
 else

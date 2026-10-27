@@ -12,8 +12,8 @@ from typing import Any, Iterator
 # 仓库根:tests/sdk-python/sdkharness.py → 上溯两级。
 ROOT = Path(__file__).resolve().parents[2]
 # 被测二进制:默认 release 产物(与 tests/lib.sh 的约定一致)。
-REFLECT_BIN = Path(
-    os.environ.get("REFLECT_BIN", str(ROOT / "target/release/reflect"))
+ZHUYE_BIN = Path(
+    os.environ.get("ZHUYE_BIN", str(ROOT / "target/release/zhuye"))
 )
 # 迭代器墙钟预算:终态事件缺失(回归)时断言失败,绝不挂死整个套件。
 DRAIN_TIMEOUT = 30.0
@@ -26,21 +26,21 @@ def make_options(
 ):
     """构造指向真二进制 + mock provider 的 spawn 选项。
 
-    `script_lines` 非 None 时写临时 mock 脚本并挂 `REFLECT_MOCK_SCRIPT`。
+    `script_lines` 非 None 时写临时 mock 脚本并挂 `ZHUYE_MOCK_SCRIPT`。
     """
-    from reflect import ReflectAgentOptions
+    from zhuye import ZhuyeAgentOptions
 
-    tmp = Path(tempfile.mkdtemp(prefix="reflect-pytest-script."))
+    tmp = Path(tempfile.mkdtemp(prefix="zhuye-pytest-script."))
     if script_lines is not None:
         script = tmp / "script.jsonl"
         script.write_text("\n".join(script_lines) + "\n")
-        env = {"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}
+        env = {"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}
     else:
-        env = {"REFLECT_MODEL": "mock"}
+        env = {"ZHUYE_MODEL": "mock"}
     if extra_env:
         env.update(extra_env)
-    return ReflectAgentOptions(
-        bin=str(REFLECT_BIN),
+    return ZhuyeAgentOptions(
+        bin=str(ZHUYE_BIN),
         env=env,
         handshake_timeout_secs=handshake_timeout_secs,
     )
@@ -75,7 +75,7 @@ def msg_types(events: list[dict[str, Any]]) -> list[str]:
 def rollout_records(home: Path) -> list[dict[str, Any]]:
     """读隔离 HOME 下的会话记录。"""
     out: list[dict[str, Any]] = []
-    for f in sorted((home / ".reflect/sessions").glob("*/*/*/*.jsonl")):
+    for f in sorted((home / ".zhuye/sessions").glob("*/*/*/*.jsonl")):
         for line in f.read_text().splitlines():
             if line.strip():
                 out.append(json.loads(line))

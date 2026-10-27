@@ -1,4 +1,4 @@
-# Reflect 协议(Protocol v0)
+# 烛夜协议(Protocol v0)
 
 > 本文是协议层的总览与导航。**wire 协议(serve stdio JSONL)的完整
 > 规范见 [`sdks/PROTOCOL.md`](../sdks/PROTOCOL.md)**;本文补齐 crate
@@ -10,9 +10,9 @@
 
 | 面 | 载体 | 定义位置 |
 |---|---|---|
-| Submission(Op) | 客户端 → AgentThread 的 mpsc 通道;`reflect serve` 上为 stdin 每行一个 JSON | `reflect-protocol/src/op.rs` |
-| Event(EventMsg) | AgentThread → 客户端;serve 上为 stdout 每行一个 JSON | `reflect-protocol/src/event_msg/` |
-| RolloutRecord | 持久化 JSONL(`~/.reflect/sessions/YYYY/MM/DD/<thread>.jsonl`) | `reflect-protocol/src/rollout.rs` |
+| Submission(Op) | 客户端 → AgentThread 的 mpsc 通道;`zhuye serve` 上为 stdin 每行一个 JSON | `zhuye-protocol/src/op.rs` |
+| Event(EventMsg) | AgentThread → 客户端;serve 上为 stdout 每行一个 JSON | `zhuye-protocol/src/event_msg/` |
+| RolloutRecord | 持久化 JSONL(`~/.zhuye/sessions/YYYY/MM/DD/<thread>.jsonl`) | `zhuye-protocol/src/rollout.rs` |
 
 三者共享 `ThreadId` / `TurnId` newtype 与 `ContentBlock` / `ToolError`
 等基础类型(`item.rs`)。

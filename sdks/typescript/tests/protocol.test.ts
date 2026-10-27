@@ -1,7 +1,7 @@
-//! ReflectAgent 协议回路测试:用一个轻量 mock serve 进程驱动协议。
+//! ZhuyeAgent 协议回路测试:用一个轻量 mock serve 进程驱动协议。
 //!
-//! mock serve 由 Node 直接跑一个 stdin→stdout 回显脚本(模拟 reflect
-//! serve 的 JSONL 协议),无需 spawn `reflect` 二进制,测试完全离线。
+//! mock serve 由 Node 直接跑一个 stdin→stdout 回显脚本(模拟 zhuye
+//! serve 的 JSONL 协议),无需 spawn `zhuye` 二进制,测试完全离线。
 //!
 //! 行为契约:
 //! - 收到任何 stdin 一行 → emit `session_configured`(`id=""`)回应;
@@ -20,7 +20,7 @@ import {
   EVENT_ID_NONE,
   Event,
   EventMsg,
-  ReflectAgent,
+  ZhuyeAgent,
 } from '../src/index.js';
 
 /**
@@ -97,16 +97,16 @@ function spawnMockServe(): ChildProcessWithoutNullStreams {
   return child;
 }
 
-describe('ReflectAgent 协议回路(mock serve 驱动)', () => {
-  let agent: ReflectAgent;
+describe('ZhuyeAgent 协议回路(mock serve 驱动)', () => {
+  let agent: ZhuyeAgent;
   let child: ChildProcessWithoutNullStreams;
 
   beforeEach(async () => {
     child = spawnMockServe();
-    // 直接喂 stdin / stdout —— 等同于 ReflectAgent.spawn 但跳过 spawn。
+    // 直接喂 stdin / stdout —— 等同于 ZhuyeAgent.spawn 但跳过 spawn。
     const stdin = child.stdin as Writable;
     const stdout = child.stdout as Readable;
-    agent = await ReflectAgent.fromStdio(stdin, stdout, 5000);
+    agent = await ZhuyeAgent.fromStdio(stdin, stdout, 5000);
   }, 10_000);
 
   afterEach(async () => {
@@ -134,7 +134,7 @@ describe('ReflectAgent 协议回路(mock serve 驱动)', () => {
 
   it('shutdown 子命令序列化 + 子进程退出', async () => {
     const closeP = agent.close();
-    // 等到子进程 exit / reflect exit code == 0
+    // 等到子进程 exit / zhuye exit code == 0
     const exitPromise = new Promise<number | null>((resolve) => {
       child.once('exit', (code) => resolve(code));
     });
@@ -146,7 +146,7 @@ describe('ReflectAgent 协议回路(mock serve 驱动)', () => {
   it('UnknownEventMsg 降级不抛错', async () => {
     // mock serve 默认只回已知事件;此处通过 fromStdio 直接灌一个
     // 未知 type 验证 SDK 不抛。
-    const customAgent = await ReflectAgent.fromStdio(
+    const customAgent = await ZhuyeAgent.fromStdio(
       child.stdin as Writable,
       child.stdout as Readable,
       2000,

@@ -2,7 +2,7 @@
 # scripts/discussion_smoke.sh — v0.2.3 真实 LLM 烟雾测试。
 #
 # 与 scripts/e2e.sh 不同:e2e.sh 用 stub LLM 跑通状态机即可;本脚本要求
-# 真实 OPENAI_API_KEY 或 ANTHROPIC_API_KEY,跑一次完整 `reflect discussion
+# 真实 OPENAI_API_KEY 或 ANTHROPIC_API_KEY,跑一次完整 `zhuye discussion
 # run`,验证:
 #   1. CLI 检测到 provider 后走真 LLM 路径(不是 run_noop fallback)
 #   2. 跑出非空 transcript(至少 3 个 agent 各产 ≥1 条 Utterance)
@@ -33,7 +33,7 @@ if [[ -z "${OPENAI_API_KEY:-}" && -z "${ANTHROPIC_API_KEY:-}" ]]; then
     exit 2
 fi
 
-CONFIG="crates/orchestration/reflect-discussion/examples/discussion.toml"
+CONFIG="crates/orchestration/zhuye-discussion/examples/discussion.toml"
 TRANSCRIPT="$(mktemp)"
 LOG="$(mktemp)"
 trap 'rm -f "$TRANSCRIPT" "$LOG"' EXIT
@@ -44,16 +44,16 @@ if [[ ! -f "$CONFIG" ]]; then
 fi
 
 # ── 2. release build(若已 build 则快速通过) ─────────────────────────────
-echo "[smoke] cargo build --release -p reflect-cli ..."
-cargo build --release -p reflect-cli 2>&1 | tail -5
+echo "[smoke] cargo build --release -p zhuye-cli ..."
+cargo build --release -p zhuye-cli 2>&1 | tail -5
 
-BIN="$ROOT/target/release/reflect"
+BIN="$ROOT/target/release/zhuye"
 if [[ ! -x "$BIN" ]]; then
     echo "ERROR: $BIN not built" >&2
     exit 2
 fi
 
-# ── 3. 跑 reflect discussion run(无 key 时自动 fallback,显式 warn) ─────
+# ── 3. 跑 zhuye discussion run(无 key 时自动 fallback,显式 warn) ─────
 echo "[smoke] running: $BIN discussion run -c $CONFIG"
 set +e
 "$BIN" discussion run -c "$CONFIG" -o "$TRANSCRIPT" 2>"$LOG"

@@ -1,4 +1,4 @@
-//! Reflect 协议 v0 —— SDK 与 `reflect serve` 子命令之间的 wire 格式。
+//! ZhuYe 协议 v0 —— SDK 与 `zhuye serve` 子命令之间的 wire 格式。
 //!
 //! 协议冻结,新增变体属 non-breaking addition;SDK 解析未知事件时
 //! 退到 `UnknownEventMsg` 不抛错,让 Rust 核心升级不破坏下游。

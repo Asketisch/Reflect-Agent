@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/sdk_smoke.sh —— Python / TypeScript SDK 对真实 `reflect serve`
+# scripts/sdk_smoke.sh —— Python / TypeScript SDK 对真实 `zhuye serve`
 # 二进制的离线冒烟(mock provider,无网络、无 API key)。
 #
 # 覆盖(两个 SDK 各一遍):
@@ -7,7 +7,7 @@
 #   2. 多轮 prompt 保持上下文(mock 脚本逐行消耗,两轮回复不同文本);
 #   3. 自定义工具注册 → LLM 调用 → SDK 本地执行 → 回执 → turn 完成。
 #
-# 前置:`cargo build --release -p reflect-cli`(target/release/reflect)。
+# 前置:`cargo build --release -p zhuye-cli`(target/release/zhuye)。
 # SDK 测试套件(sdks/*/tests)用 Node mock serve;本脚本补"真二进制"
 # 这一环,两份覆盖互补。TS SDK 零运行时依赖,dist 产物可被 node 直接
 # import,无需 npm install。
@@ -15,8 +15,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="$ROOT/target/release/reflect"
-[ -x "$BIN" ] || { echo "FAIL: $BIN not built (cargo build --release -p reflect-cli)"; exit 1; }
+BIN="$ROOT/target/release/zhuye"
+[ -x "$BIN" ] || { echo "FAIL: $BIN not built (cargo build --release -p zhuye-cli)"; exit 1; }
 
 TS_BIN="$ROOT/sdks/typescript"
 [ -f "$TS_BIN/dist/index.js" ] || ( cd "$TS_BIN" && npm run build --silent )
@@ -37,11 +37,11 @@ cat > "$TMP/tool.jsonl" <<'EOF'
 EOF
 
 # ── Python SDK ─────────────────────────────────────────────────────────
-REFLECT_BIN="$BIN" REFLECT_MODEL=mock REFLECT_MOCK_SCRIPT="$TMP/multi.jsonl" \
+ZHUYE_BIN="$BIN" ZHUYE_MODEL=mock ZHUYE_MOCK_SCRIPT="$TMP/multi.jsonl" \
 PYTHONPATH="$ROOT/sdks/python" python3 - <<'PYEOF'
-from reflect import ReflectAgent
+from zhuye import ZhuyeAgent
 
-agent = ReflectAgent.spawn()
+agent = ZhuyeAgent.spawn()
 # mock 脚本按模型调用顺序逐行消耗,两轮回复不同 → 验证会话状态保持。
 first = agent.prompt("第一轮")
 second = agent.prompt("第二轮")
@@ -51,9 +51,9 @@ agent.close()
 print("[ok] python sdk: 两轮 prompt(上下文保持)")
 PYEOF
 
-REFLECT_BIN="$BIN" REFLECT_MODEL=mock REFLECT_MOCK_SCRIPT="$TMP/tool.jsonl" \
+ZHUYE_BIN="$BIN" ZHUYE_MODEL=mock ZHUYE_MOCK_SCRIPT="$TMP/tool.jsonl" \
 PYTHONPATH="$ROOT/sdks/python" python3 - <<'PYEOF'
-from reflect import ReflectAgent, ToolOutput, ContentBlock
+from zhuye import ZhuyeAgent, ToolOutput, ContentBlock
 
 calls = []
 
@@ -66,7 +66,7 @@ def handler(args):
         elapsed_ms=0,
     )
 
-agent = ReflectAgent.spawn()
+agent = ZhuyeAgent.spawn()
 agent.register_tool("sdk_echo", "echo back", {"type": "object"}, handler)
 saw_complete = False
 for ev in agent.submit("调工具"):
@@ -81,15 +81,15 @@ PYEOF
 
 # ── TypeScript SDK(dist 产物 + node 直跑)──────────────────────────────
 cat > "$TMP/ts_driver.mjs" <<TSEOF
-import { ReflectAgent } from '${TS_BIN}/dist/index.js';
+import { ZhuyeAgent } from '${TS_BIN}/dist/index.js';
 
 const base = {
-  bin: process.env.REFLECT_BIN,
-  env: { REFLECT_MODEL: 'mock', REFLECT_MOCK_SCRIPT: process.env.SCRIPT },
+  bin: process.env.ZHUYE_BIN,
+  env: { ZHUYE_MODEL: 'mock', ZHUYE_MOCK_SCRIPT: process.env.SCRIPT },
 };
 
 if (process.env.SCENARIO === 'multi') {
-  const agent = await ReflectAgent.spawn(base);
+  const agent = await ZhuyeAgent.spawn(base);
   const first = await agent.prompt('第一轮');
   const second = await agent.prompt('第二轮');
   if (first !== 'first-reply') throw new Error(\`first=\${first}\`);
@@ -100,7 +100,7 @@ if (process.env.SCENARIO === 'multi') {
 
 if (process.env.SCENARIO === 'tool') {
   const calls = [];
-  const agent = await ReflectAgent.spawn(base);
+  const agent = await ZhuyeAgent.spawn(base);
   await agent.registerTool('sdk_echo', 'echo back', { type: 'object' }, (args) => {
     calls.push(args);
     return {
@@ -123,8 +123,8 @@ if (process.env.SCENARIO === 'tool') {
 }
 TSEOF
 
-SCENARIO=multi SCRIPT="$TMP/multi.jsonl" REFLECT_BIN="$BIN" node "$TMP/ts_driver.mjs"
-SCENARIO=tool SCRIPT="$TMP/tool.jsonl" REFLECT_BIN="$BIN" node "$TMP/ts_driver.mjs"
+SCENARIO=multi SCRIPT="$TMP/multi.jsonl" ZHUYE_BIN="$BIN" node "$TMP/ts_driver.mjs"
+SCENARIO=tool SCRIPT="$TMP/tool.jsonl" ZHUYE_BIN="$BIN" node "$TMP/ts_driver.mjs"
 
 echo
 echo "sdk smoke 全部通过"

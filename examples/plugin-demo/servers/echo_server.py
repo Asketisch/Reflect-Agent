@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reflect 示例插件的最小 MCP stdio server —— 零依赖,只用标准库。
+"""烛夜示例插件的最小 MCP stdio server —— 零依赖,只用标准库。
 
 实现 MCP 生命周期所需的最小方法集:initialize / tools/list / tools/call。
 传输约定为 MCP stdio:每行一个 JSON-RPC 2.0 消息,通知(method 以

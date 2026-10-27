@@ -1,6 +1,6 @@
 """能力覆盖层 · 协议面:基础通信、并发路由、19 Op 会话状态面。
 
-直接驱动 `reflect serve` 原始 JSONL wire(不经过任何 SDK),断言到**字段级**。
+直接驱动 `zhuye serve` 原始 JSONL wire(不经过任何 SDK),断言到**字段级**。
 
 覆盖:
 - D 组 基础通信与事件流:握手 / 单轮事件序列 / 多轮上下文 / token_count / 终态语义 /
@@ -11,7 +11,7 @@
   query_subagents / prompt_command。
 
 运行:tests/run_all.sh functional,或
-  REFLECT_BIN=... python3 -m pytest tests/functional/test_serve.py -v
+  ZHUYE_BIN=... python3 -m pytest tests/functional/test_serve.py -v
 """
 
 from __future__ import annotations
@@ -40,11 +40,11 @@ pytestmark = pytest.mark.usefixtures("sandbox")
 def test_D1_握手事件字段完整(serve_session, mock_script) -> None:
     """serve 启动即主动 emit 全局 `session_configured`(id=="")。
 
-    依据:crates/runtime/reflect-exec/src/serve.rs:417-433
+    依据:crates/runtime/zhuye-exec/src/serve.rs:417-433
     """
     require_binary()
     script = mock_script(['{"type":"text","text":"hi"}'])
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         ev = s.wait_global(lambda e: e.get("msg", {}).get("type") == "session_configured")
         assert ev["id"] == "", "握手事件应是全局事件(id 为空)"
         m = ev["msg"]
@@ -63,7 +63,7 @@ def test_D2_单轮事件序列与字段(serve_session, mock_script) -> None:
     """
     require_binary()
     script = mock_script(['{"type":"text","text":"hello-from-mock"}'])
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         evs = s.submit(
             {"type": "user_input", "items": [{"type": "text", "text": "第一轮"}]},
             timeout=DRAIN_TIMEOUT,
@@ -98,7 +98,7 @@ def test_D3_多轮上下文保持(serve_session, mock_script) -> None:
             '{"type":"text","text":"second-reply"}',
         ]
     )
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         first = s.submit({"type": "user_input", "items": [{"type": "text", "text": "第一轮"}]})
         second = s.submit({"type": "user_input", "items": [{"type": "text", "text": "第二轮"}]})
     text1 = "".join(
@@ -119,7 +119,7 @@ def test_D4_token_count_带模型维度(serve_session, mock_script) -> None:
     """
     require_binary()
     script = mock_script(['{"type":"text","text":"tok"}'])
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         evs = s.submit({"type": "user_input", "items": [{"type": "text", "text": "计数"}]})
     tcs = [e["msg"] for e in evs if e["msg"]["type"] == "token_count"]
     assert tcs, f"未见 token_count 事件:{msg_types(evs)}"
@@ -147,7 +147,7 @@ def test_D9_工具参数增量事件字段完整(serve_session, mock_script) -> 
             '{"type":"text","text":"done"}',
         ]
     )
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         evs = s.submit({"type": "user_input", "items": [{"type": "text", "text": "调工具"}]})
     types = msg_types(evs)
     deltas = [e["msg"] for e in evs if e["msg"]["type"] == "tool_call_args_delta"]
@@ -180,7 +180,7 @@ def test_D5_终态语义_turn后不再有事件(serve_session, mock_script) -> N
     """
     require_binary()
     script = mock_script(['{"type":"text","text":"t1"}', '{"type":"text","text":"t2"}'])
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         turn = s.submit({"type": "user_input", "items": [{"type": "text", "text": "一轮"}]})
         turn_types = [t for t in msg_types(turn) if t != "submission_closed"]
         assert turn_types[-1] == "turn_complete", f"turn 应以 turn_complete 收:{msg_types(turn)}"
@@ -211,7 +211,7 @@ def test_S1_并发_submission_事件不串台(serve_session, mock_script) -> Non
             '{"type":"text","text":"reply-B"}',
         ]
     )
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         # 不等第一个结束就发第二个。
         id_a = s.send({"type": "user_input", "items": [{"type": "text", "text": "A"}]})
         id_b = s.send({"type": "user_input", "items": [{"type": "text", "text": "B"}]})
@@ -243,7 +243,7 @@ def test_S2_并发_每个turn独立收尾(serve_session, mock_script) -> None:
             '{"type":"text","text":"reply-B"}',
         ]
     )
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         id_a = s.send({"type": "user_input", "items": [{"type": "text", "text": "A"}]})
         id_b = s.send({"type": "user_input", "items": [{"type": "text", "text": "B"}]})
         evs_a = s.collect(id_a)
@@ -260,7 +260,7 @@ def test_S3_每条submission恰好一条收尾标记(serve_session, mock_script)
     """不变量:每条 submission 的 per-turn 通道排空后恰好一条 `submission_closed`。"""
     require_binary()
     script = mock_script(['{"type":"text","text":"t1"}'])
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         s.submit({"type": "user_input", "items": [{"type": "text", "text": "一轮"}]})
         s.submit({"type": "set_effort", "effort": "low"})
         s.submit({"type": "compact"})
@@ -287,7 +287,7 @@ def test_A1_user_input_带thread_settings(serve_session, mock_script) -> None:
     """
     require_binary()
     script = mock_script(['{"type":"text","text":"t1"}'])
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         evs = s.submit(
             {
                 "type": "user_input",
@@ -309,7 +309,7 @@ def test_A2_set_effort_静默(serve_session, mock_script) -> None:
     """set_effort 只写槽,不产任何 turn 事件(仅收尾标记)。"""
     require_binary()
     script = mock_script(['{"type":"text","text":"t1"}'])
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         evs = s.submit({"type": "set_effort", "effort": "high"})
     assert msg_types(evs) == ["submission_closed"], f"set_effort 应静默:{msg_types(evs)}"
 
@@ -321,7 +321,7 @@ def test_A3_权限模式切换_全局事件与持久化轨迹(serve_session, moc
     """
     require_binary()
     script = mock_script(['{"type":"text","text":"t1"}'])
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         s.submit({"type": "user_input", "items": [{"type": "text", "text": "一轮"}]})
         s.submit({"type": "set_permission_mode", "mode": "plan"})
         s.submit({"type": "cycle_permission_mode"})
@@ -357,7 +357,7 @@ def test_A4_rewind_回退(serve_session, mock_script) -> None:
             '{"type":"text","text":"two"}',
         ]
     )
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         s.submit({"type": "user_input", "items": [{"type": "text", "text": "一轮"}]})
         evs = s.submit({"type": "rewind"})
     m = first_event(evs, "turn_rewound")
@@ -370,7 +370,7 @@ def test_A5_interrupt_打断(serve_session, mock_script) -> None:
     """interrupt → `turn_aborted`,reason 是带 type 的对象。"""
     require_binary()
     script = mock_script(['{"type":"text","text":"t1"}'])
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         s.submit({"type": "user_input", "items": [{"type": "text", "text": "一轮"}]})
         evs = s.submit({"type": "interrupt"})
     m = first_event(evs, "turn_aborted")
@@ -384,7 +384,7 @@ def test_A6_compact_压缩(serve_session, mock_script) -> None:
     """compact → `context_compacted`(带 strategy)。"""
     require_binary()
     script = mock_script(['{"type":"text","text":"t1"}'])
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         s.submit({"type": "user_input", "items": [{"type": "text", "text": "一轮"}]})
         evs = s.submit({"type": "compact"}, timeout=40.0)
     m = first_event(evs, "context_compacted")
@@ -401,7 +401,7 @@ def test_A7_goal模式_进出静默且turn正常(serve_session, mock_script) -> 
             '{"type":"text","text":"t2"}',
         ]
     )
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         enter = s.submit(
             {
                 "type": "enter_goal_mode",
@@ -423,7 +423,7 @@ def test_A8_plan模式_全链路(serve_session, mock_script) -> None:
     """
     require_binary()
     script = mock_script(['{"type":"text","text":"t1"}'])
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         evs = s.submit({"type": "enter_plan_mode", "task": "probe task"})
         pr = first_event(evs, "plan_request")
         assert pr is not None, f"未见 plan_request:{msg_types(evs)}"
@@ -451,7 +451,7 @@ def test_A8b_plan审批_工具路径全链路(serve_session, mock_script) -> Non
             '{"type":"text","text":"built it"}',
         ]
     )
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         # 注意:工具路径下 ExitPlanMode 会**阻塞 turn** 直到收到 plan_approval
         # —— 审批必须作为另一条 submission 在 turn 在飞时回执(与 bash 套件同款)。
         sid = s.send(
@@ -504,7 +504,7 @@ def test_A9_四种孤儿回执_不崩且会话存活(serve_session, mock_script)
             '{"type":"text","text":"alive-2"}',
         ]
     )
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         for op in (
             {"type": "tool_approval", "id": "nonexistent", "decision": "approve"},
             {"type": "hook_approval", "id": "nonexistent", "decision": "approve"},
@@ -539,7 +539,7 @@ def test_A10_steer_中途转向(serve_session, mock_script, sandbox) -> None:
             '{"type":"text","text":"t2"}',
         ]
     )
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         evs = s.submit(
             {
                 "type": "steer",
@@ -570,7 +570,7 @@ def test_A11_query_subagents_状态快照(serve_session, mock_script) -> None:
     """
     require_binary()
     script = mock_script(['{"type":"text","text":"t1"}'])
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         evs = s.submit({"type": "query_subagents"})
     m = first_event(evs, "subagent_status")
     assert m is not None, f"未见 subagent_status:{msg_types(evs)}"
@@ -585,7 +585,7 @@ def test_A12_prompt_command_提示词层管理(serve_session, mock_script) -> No
     """
     require_binary()
     script = mock_script(['{"type":"text","text":"t1"}'])
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         evs = s.submit({"type": "prompt_command", "action": {"type": "list"}})
         m = first_event(evs, "prompt_list")
         assert m is not None, f"未见 prompt_list:{msg_types(evs)}"

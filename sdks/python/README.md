@@ -1,21 +1,21 @@
-# reflect-agent (Python SDK)
+# zhuye-agent (Python SDK)
 
-让 Python 项目直接驱动 Reflect Agent 的轻量 SDK。底层通过 spawn `reflect serve` 子进程、走 JSONL stdio 协议,**零运行时依赖**(仅 stdlib)。
+让 Python 项目直接驱动 ZhuYe Agent 的轻量 SDK。底层通过 spawn `zhuye serve` 子进程、走 JSONL stdio 协议,**零运行时依赖**(仅 stdlib)。
 
 ## 安装
 
 ```bash
-pip install reflect-agent
+pip install zhuye-agent
 ```
 
-需要本机有 `reflect` 二进制在 PATH(或通过 `REFLECT_BIN` 指向)。从 [Releases](https://cnb.cool/...) 下载,或从本仓库 `make build` 产出 `target/release/reflect`。
+需要本机有 `zhuye` 二进制在 PATH(或通过 `ZHUYE_BIN` 指向)。从 [Releases](https://cnb.cool/...) 下载,或从本仓库 `make build` 产出 `target/release/zhuye`。
 
 ## 用法
 
 ```python
-from reflect import ReflectAgent, ToolOutput, ContentBlock
+from zhuye import ZhuyeAgent, ToolOutput, ContentBlock
 
-agent = ReflectAgent.spawn()
+agent = ZhuyeAgent.spawn()
 
 # 注册客户端自定义工具(LLM 调用时由本地函数返回结果)
 def get_weather(args):
@@ -55,9 +55,9 @@ agent.close()
 
 | 变量 | 作用 |
 |------|------|
-| `REFLECT_BIN` | `reflect` 二进制路径(默认搜索 PATH)。 |
-| `REFLECT_MODEL` | 模型 spec(`mock/mock-1` 用于离线 SDK 集成测试)。 |
-| `REFLECT_REMOTE_TOOL_TIMEOUT_SECS` | 远程工具等待客户端回执的上限,默认 120s。 |
+| `ZHUYE_BIN` | `zhuye` 二进制路径(默认搜索 PATH)。 |
+| `ZHUYE_MODEL` | 模型 spec(`mock/mock-1` 用于离线 SDK 集成测试)。 |
+| `ZHUYE_REMOTE_TOOL_TIMEOUT_SECS` | 远程工具等待客户端回执的上限,默认 120s。 |
 
 ## 测试
 
@@ -66,10 +66,10 @@ pip install -e .[dev]
 pytest -ra
 ```
 
-mock serve 进程跑在 Node 上(Node ≥ 18),不依赖真 `reflect` 二进制 —— 测试完全离线,也不需要网络/API key。
+mock serve 进程跑在 Node 上(Node ≥ 18),不依赖真 `zhuye` 二进制 —— 测试完全离线,也不需要网络/API key。
 
-端到端测试(对真 `reflect serve` 子进程的集成)在仓库 CI 里跑(配置好 `REFLECT_BIN` 后 `pytest tests/test_protocol.py`)。
+端到端测试(对真 `zhuye serve` 子进程的集成)在仓库 CI 里跑(配置好 `ZHUYE_BIN` 后 `pytest tests/test_protocol.py`)。
 
 ## 协议
 
-SDK 与 `reflect serve` 之间的 wire 协议见 `../PROTOCOL.md`(同仓库 `sdks/PROTOCOL.md`)。Rust 核心新增协议变体时,SDK 自动降为 `UnknownEventMsg`,不会中断下游。
+SDK 与 `zhuye serve` 之间的 wire 协议见 `../PROTOCOL.md`(同仓库 `sdks/PROTOCOL.md`)。Rust 核心新增协议变体时,SDK 自动降为 `UnknownEventMsg`,不会中断下游。

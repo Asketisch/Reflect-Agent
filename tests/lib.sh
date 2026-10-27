@@ -2,8 +2,8 @@
 # tests/lib.sh —— 测试套件公共助手。
 #
 # 所有 tests/ 下的脚本 source 本文件,获得:
-#   - 隔离环境:mktemp HOME + 独立 cwd,不污染真实 ~/.reflect;
-#   - mock provider 环境(REFLECT_MODEL=mock,离线、免 API key);
+#   - 隔离环境:mktemp HOME + 独立 cwd,不污染真实 ~/.zhuye;
+#   - mock provider 环境(ZHUYE_MODEL=mock,离线、免 API key);
 #   - 断言助手(assert_ok / assert_fail / assert_contains / assert_json);
 #   - 便携超时(macOS 无 timeout/gtimeout,用后台 pid + kill 模拟);
 #   - 用例统计与失败汇总(tcase / tfail 汇总退出码)。
@@ -13,7 +13,7 @@
 # ── 仓库根与二进制定位 ────────────────────────────────────────────────────
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$TESTS_DIR/.." && pwd)"
-REFLECT_BIN="${REFLECT_BIN:-$ROOT/target/release/reflect}"
+ZHUYE_BIN="${ZHUYE_BIN:-$ROOT/target/release/zhuye}"
 
 # ── 全局状态 ──────────────────────────────────────────────────────────────
 declare -i PASS_COUNT=0
@@ -91,16 +91,16 @@ run_with_timeout() {
 # ── 隔离环境 ──────────────────────────────────────────────────────────────
 # make_isolated_env:创建并进入隔离环境,设置:
 #   ISO_HOME / ISO_CWD(导出 HOME、cd 进去)
-#   预写 ~/.reflect/config.toml —— [hooks] enabled = [] 关闭全部内置 hook。
+#   预写 ~/.zhuye/config.toml —— [hooks] enabled = [] 关闭全部内置 hook。
 #   说明:exec 默认启用 VerificationHook(Stop 时跑 `cargo test`)与
 #   PlanCompletionHook(3 次否决),单轮耗时会到分钟级;测试只验功能
 #   语义,不验 hook 计时,统一在配置里显式关闭。config.toml 必须存在,
 #   否则 ConfigWatcher 报错直接退出。
 make_isolated_env() {
-    ISO_HOME="$(mktemp -d "${TMPDIR:-/tmp}/reflect-test-home.XXXXXX")"
-    ISO_CWD="$(mktemp -d "${TMPDIR:-/tmp}/reflect-test-cwd.XXXXXX")"
-    mkdir -p "$ISO_HOME/.reflect"
-    cat > "$ISO_HOME/.reflect/config.toml" <<'EOF'
+    ISO_HOME="$(mktemp -d "${TMPDIR:-/tmp}/zhuye-test-home.XXXXXX")"
+    ISO_CWD="$(mktemp -d "${TMPDIR:-/tmp}/zhuye-test-cwd.XXXXXX")"
+    mkdir -p "$ISO_HOME/.zhuye"
+    cat > "$ISO_HOME/.zhuye/config.toml" <<'EOF'
 # 测试用最小配置:关闭全部内置 hook(见 make_isolated_env 注释)
 [hooks]
 enabled = []
@@ -124,9 +124,9 @@ cleanup_isolated_env() {
 mock_env() {
     local script="${1:-}"
     if [ -n "$script" ]; then
-        echo "env" "REFLECT_MODEL=mock" "REFLECT_MOCK_SCRIPT=$script"
+        echo "env" "ZHUYE_MODEL=mock" "ZHUYE_MOCK_SCRIPT=$script"
     else
-        echo "env" "REFLECT_MODEL=mock"
+        echo "env" "ZHUYE_MODEL=mock"
     fi
 }
 
@@ -142,8 +142,8 @@ make_mock_script() {
 
 # require_binary:确认 release 二进制存在,否则提示构建命令后退出。
 require_binary() {
-    if [ ! -x "$REFLECT_BIN" ]; then
-        echo "FAIL: $REFLECT_BIN 不存在;先执行 cargo build --release -p reflect-cli" >&2
+    if [ ! -x "$ZHUYE_BIN" ]; then
+        echo "FAIL: $ZHUYE_BIN 不存在;先执行 cargo build --release -p zhuye-cli" >&2
         exit 2
     fi
 }

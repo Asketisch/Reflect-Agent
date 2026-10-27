@@ -1,6 +1,6 @@
-# Reflect 插件开发指南
+# 烛夜插件开发指南
 
-Reflect 的插件系统是**声明式 / 数据驱动**的:插件是磁盘上一组遵循目录约定
+烛夜的插件系统是**声明式 / 数据驱动**的:插件是磁盘上一组遵循目录约定
 的文件(`plugin.toml` manifest + 五类 capability 资源),由运行时扫描后挂载
 到共享 registry。没有动态库加载,插件不携带原生代码 —— 跨进程逻辑通过
 shell hook 与 MCP server 表达,权限模型与内置工具一致。
@@ -12,15 +12,15 @@ shell hook 与 MCP server 表达,权限模型与内置工具一致。
 ## 快速开始
 
 ```bash
-# 安装(复制到 ~/.reflect/plugins/cache 并登记 installed_plugins.json)
-reflect plugin install examples/plugin-demo
+# 安装(复制到 ~/.zhuye/plugins/cache 并登记 installed_plugins.json)
+zhuye plugin install examples/plugin-demo
 
-# 启用(写回 ~/.reflect/config.toml 的 [plugins].enabled_plugins;
+# 启用(写回 ~/.zhuye/config.toml 的 [plugins].enabled_plugins;
 # id 必须是 name@marketplace 全名,本地安装为 demo@inline)
-reflect plugin enable demo@inline
+zhuye plugin enable demo@inline
 
 # 使用:slash 命令展开
-reflect exec "/demo:hello 张三"
+zhuye exec "/demo:hello 张三"
 ```
 
 可运行的完整示例见 [`examples/plugin-demo/`](../examples/plugin-demo/)。
@@ -130,7 +130,7 @@ tools: [read, grep]
 
 ## `${PLUGIN_ROOT}` 占位符
 
-插件安装后会被复制到 `~/.reflect/plugins/cache/<marketplace>/<插件>/<版本>/`,
+插件安装后会被复制到 `~/.zhuye/plugins/cache/<marketplace>/<插件>/<版本>/`,
 manifest 里的相对路径不再指向原目录。hook 命令与 MCP server 的
 `command` / `args` / `env` 值中的 `${PLUGIN_ROOT}` 会在挂载时展开为插件
 安装目录的绝对路径:
@@ -146,12 +146,12 @@ manifest 里的相对路径不再指向原目录。hook 命令与 MCP server 的
 
 ## 生命周期与热重载
 
-- **安装**:`reflect plugin install <目录|git-url|tar>` → 复制进 cache 并
+- **安装**:`zhuye plugin install <目录|git-url|tar>` → 复制进 cache 并
   登记;支持 marketplace(Git / GitHub / URL / 文件 / 目录五种源)与
-  依赖闭包安装(`reflect plugin marketplace add ...`)。
-- **启用 / 禁用**:权威表是 `~/.reflect/config.toml` 的
+  依赖闭包安装(`zhuye plugin marketplace add ...`)。
+- **启用 / 禁用**:权威表是 `~/.zhuye/config.toml` 的
   `[plugins].enabled_plugins`(条目为 `name@marketplace` 全名);
-  `reflect plugin enable demo@inline` 直接改写该列表。
+  `zhuye plugin enable demo@inline` 直接改写该列表。
 - **挂载**:进程启动时按 enabled 列表挂载;运行中改动 config 的
   `[plugins]` 段会 diff 同步(新启用的挂载、移除的反注册),无需重启。
 - **作用域**:`installed_plugins.json` 支持 Managed / User / Project /
@@ -161,12 +161,12 @@ manifest 里的相对路径不再指向原目录。hook 命令与 MCP server 的
 
 | 宿主 | 插件挂载 | slash 命令展开 |
 |---|---|---|
-| `reflect exec`(普通) | ✅ 启动挂载 + 热重载 | ✅ `/plugin:ns:name args` |
-| `reflect exec --resume` / `-c` | ✅(与普通路径同权) | —(resume prompt 为合成文本) |
-| `reflect serve`(SDK 入口) | ✅(与 exec 共享装配) | ✅(单条 Text 的 UserInput;展开失败原样转发) |
-| Rust 门面 `ReflectBuilder::build_async` | ✅(`with_plugins(None)` 按 config) | 调用方用 `Reflect::plugin_runtime()` + `expand_user_input` 自行展开 |
-| Rust 门面 `ReflectBuilder::build`(同步) | ❌(保持最小语义) | ❌ |
-| Python `reflect_py.ReflectBuilder(...).plugins().build()` | ✅(内部走 build_async) | 调用方自行展开 |
+| `zhuye exec`(普通) | ✅ 启动挂载 + 热重载 | ✅ `/plugin:ns:name args` |
+| `zhuye exec --resume` / `-c` | ✅(与普通路径同权) | —(resume prompt 为合成文本) |
+| `zhuye serve`(SDK 入口) | ✅(与 exec 共享装配) | ✅(单条 Text 的 UserInput;展开失败原样转发) |
+| Rust 门面 `ZhuyeBuilder::build_async` | ✅(`with_plugins(None)` 按 config) | 调用方用 `ZhuYe::plugin_runtime()` + `expand_user_input` 自行展开 |
+| Rust 门面 `ZhuyeBuilder::build`(同步) | ❌(保持最小语义) | ❌ |
+| Python `zhuye_py.ZhuyeBuilder(...).plugins().build()` | ✅(内部走 build_async) | 调用方自行展开 |
 
 ## 安全模型
 
@@ -181,7 +181,7 @@ manifest 里的相对路径不再指向原目录。hook 命令与 MCP server 的
 - 路径安全:capability 路径不允许逃出插件目录;`PluginId` 严格
   kebab-case 校验,`inline` / `builtin` 为保留 marketplace 名。
 
-## API 索引(`reflect-plugin` crate)
+## API 索引(`zhuye-plugin` crate)
 
 - 数据模型:`PluginManifest` / `PluginId` / `PluginStatus` / `InstalledPluginsFile`
 - 管理:`PluginManager`(install / uninstall / list)、`DepResolver`、marketplace fetcher

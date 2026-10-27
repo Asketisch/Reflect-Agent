@@ -10,10 +10,10 @@
 #   6. clippy + fmt 严格检查
 #   7. (M7) 品牌残留 grep = 0
 #   8. (M7) config watcher 在 TOML 变更时触发
-#   9. (M9) discussion 冒烟 —— `reflect discussion run` + discussion_demo example
-#  10. (v0.4) login 冒烟 —— `reflect login --force` 写盘
+#   9. (M9) discussion 冒烟 —— `zhuye discussion run` + discussion_demo example
+#  10. (v0.4) login 冒烟 —— `zhuye login --force` 写盘
 #  11. (v0.4) doctor 冒烟 —— 空 config 下干净退出
-#  12. (v1.3) serve 冒烟 —— `reflect serve` + mock provider:
+#  12. (v1.3) serve 冒烟 —— `zhuye serve` + mock provider:
 #      远程工具注册 / 请求 / 回执 / turn_complete / shutdown 全链路
 #  13. (v1.3) SDK 冒烟 —— Python / TypeScript SDK 对真实二进制的
 #      离线全链路(握手 / 多轮上下文 / 自定义工具客户端执行)
@@ -33,7 +33,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-BIN="$ROOT/target/release/reflect"
+BIN="$ROOT/target/release/zhuye"
 export BIN  # 内层 bash -c 步骤(login/doctor 等)需要继承
 LOG="$ROOT/target/e2e.log"
 mkdir -p "$(dirname "$LOG")"
@@ -55,7 +55,7 @@ step "1/13 release build" \
 step "2/13 cargo doc --no-deps" \
     cargo doc --no-deps
 
-# 3. 5 个 example(REFLECT_MODEL=mock 跳过真实网络;mock 下应当全绿,不吞错误)
+# 3. 5 个 example(ZHUYE_MODEL=mock 跳过真实网络;mock 下应当全绿,不吞错误)
 #    review 修复:此前 `|| true` 让 example 失败也判过 —— 冒烟形同虚设。
 step "3/13 5 examples (mock provider, offline)" \
     bash -c '
@@ -64,13 +64,13 @@ step "3/13 5 examples (mock provider, offline)" \
             echo "--- example: $ex"
             case "$ex" in
                 # headless_run 需要一个 prompt 参数(见
-                # crates/runtime/reflect/examples/headless_run.rs:缺失即报
+                # crates/runtime/zhuye/examples/headless_run.rs:缺失即报
                 # "usage: headless_run <prompt>")。`--` 之后的参数透传给 example。
                 headless_run)
-                    REFLECT_MODEL=mock cargo run --quiet --release --example "$ex" -- "hello from e2e"
+                    ZHUYE_MODEL=mock cargo run --quiet --release --example "$ex" -- "hello from e2e"
                     ;;
                 *)
-                    REFLECT_MODEL=mock cargo run --quiet --release --example "$ex"
+                    ZHUYE_MODEL=mock cargo run --quiet --release --example "$ex"
                     ;;
             esac
         done
@@ -87,7 +87,7 @@ step "4/13 headless exec emits TurnComplete (mock provider)" \
         cat > "$TMP/script.jsonl" <<EOF
 {"type":"text","text":"hi from mock"}
 EOF
-        REFLECT_MODEL=mock REFLECT_MOCK_SCRIPT="$TMP/script.jsonl" \
+        ZHUYE_MODEL=mock ZHUYE_MOCK_SCRIPT="$TMP/script.jsonl" \
             "$BIN" exec "echo hi" > "$TMP/out.jsonl"
         jq -e "select(.msg.type == \"turn_complete\")" "$TMP/out.jsonl" >/dev/null \
             || { echo "FAIL: TurnComplete not seen in headless output"; cat "$TMP/out.jsonl"; exit 1; }
@@ -138,22 +138,22 @@ provider = "anthropic"
 api_key = "sk-initial"
 EOF
         # 跑一个内联小测试,覆盖 ConfigWatcher。
-        cargo test --quiet -p reflect-exec --test config_reload 2>&1 | tail -10
+        cargo test --quiet -p zhuye-exec --test config_reload 2>&1 | tail -10
         rm -rf "$TMPDIR"
     '
 
-# 10. (M9) discussion 冒烟 —— `reflect discussion run` CLI + discussion_demo example。
+# 10. (M9) discussion 冒烟 —— `zhuye discussion run` CLI + discussion_demo example。
 step "9/13 discussion smoke (M9)" \
     bash -c '
         set -euo pipefail
-        # 9a. `reflect discussion --help` 输出 Run / Ls
-        ./target/release/reflect discussion --help | grep -iE "run|ls" >/dev/null || { echo "FAIL: discussion --help missing Run/Ls"; exit 1; }
-        # 9b. `reflect discussion run -c <toml>` 跑通,输出 transcript + JSON result
-        ./target/release/reflect discussion run -c crates/orchestration/reflect-discussion/examples/discussion.toml 2>&1 | grep -E "outcome|rounds_completed" >/dev/null || { echo "FAIL: discussion run missing outcome"; exit 1; }
+        # 9a. `zhuye discussion --help` 输出 Run / Ls
+        ./target/release/zhuye discussion --help | grep -iE "run|ls" >/dev/null || { echo "FAIL: discussion --help missing Run/Ls"; exit 1; }
+        # 9b. `zhuye discussion run -c <toml>` 跑通,输出 transcript + JSON result
+        ./target/release/zhuye discussion run -c crates/orchestration/zhuye-discussion/examples/discussion.toml 2>&1 | grep -E "outcome|rounds_completed" >/dev/null || { echo "FAIL: discussion run missing outcome"; exit 1; }
         # 9c. discussion_demo example 跑通,输出 Started/Finished 事件
-        cargo run --quiet -p reflect --example discussion_demo 2>&1 | grep -E "started|finished" >/dev/null || { echo "FAIL: discussion_demo missing started/finished"; exit 1; }
+        cargo run --quiet -p zhuye --example discussion_demo 2>&1 | grep -E "started|finished" >/dev/null || { echo "FAIL: discussion_demo missing started/finished"; exit 1; }
         # 9d. subagent 嵌套深度 3 集成测试通过(不写死用例数,避免测试增删误报)
-        cargo test --quiet -p reflect-discussion --test subagent_nested_depth 2>&1 | tail -3 | grep -E "test result: ok" >/dev/null || { echo "FAIL: subagent_nested_depth integration test"; exit 1; }
+        cargo test --quiet -p zhuye-discussion --test subagent_nested_depth 2>&1 | tail -3 | grep -E "test result: ok" >/dev/null || { echo "FAIL: subagent_nested_depth integration test"; exit 1; }
         echo "[ok] discussion smoke all green"
     '
 
@@ -165,14 +165,14 @@ step "10/13 login smoke (v0.4)" \
         export HOME="$TMPDIR"
         # 用 --force 跳过长度校验,避免脚本里的短 key 被拒绝。
         "$BIN" login --provider anthropic --api-key "sk-test" --force >/dev/null
-        # 验证 ~/.reflect/config.toml 存在 + 含 api_key
-        [ -f "$TMPDIR/.reflect/config.toml" ] || { echo "FAIL: config.toml not written"; exit 1; }
-        grep -q "sk-test" "$TMPDIR/.reflect/config.toml" || { echo "FAIL: api_key not in config.toml"; exit 1; }
+        # 验证 ~/.zhuye/config.toml 存在 + 含 api_key
+        [ -f "$TMPDIR/.zhuye/config.toml" ] || { echo "FAIL: config.toml not written"; exit 1; }
+        grep -q "sk-test" "$TMPDIR/.zhuye/config.toml" || { echo "FAIL: api_key not in config.toml"; exit 1; }
         rm -rf "$TMPDIR"
-        echo "[ok] login wrote ~/.reflect/config.toml"
+        echo "[ok] login wrote ~/.zhuye/config.toml"
     '
 
-# 12. (v0.4) doctor smoke — 临时 HOME 无 config,`reflect doctor` 仍能跑通退出 0。
+# 12. (v0.4) doctor smoke — 临时 HOME 无 config,`zhuye doctor` 仍能跑通退出 0。
 step "11/13 doctor smoke (v0.4)" \
     bash -c '
         set -euo pipefail
@@ -183,7 +183,7 @@ step "11/13 doctor smoke (v0.4)" \
         echo "[ok] doctor runs clean with empty config"
     '
 
-# 14. (v1.3) serve 冒烟 —— 真二进制 `reflect serve` + mock provider:
+# 14. (v1.3) serve 冒烟 —— 真二进制 `zhuye serve` + mock provider:
 #     fifo 驱动 stdin,断言 session_configured / 远程工具请求与回执 /
 #     tool_call_end / turn_complete / shutdown 全链路(wire 协议见
 #     sdks/PROTOCOL.md)。
@@ -200,7 +200,7 @@ EOF
         FIFO="$TMP/serve_in"
         mkfifo "$FIFO"
         OUT="$TMP/serve_out.jsonl"
-        REFLECT_MODEL=mock REFLECT_MOCK_SCRIPT="$TMP/script.jsonl" \
+        ZHUYE_MODEL=mock ZHUYE_MOCK_SCRIPT="$TMP/script.jsonl" \
             "$BIN" serve < "$FIFO" > "$OUT" 2>"$TMP/serve_err.log" &
         SERVE_PID=$!
         exec 3> "$FIFO"

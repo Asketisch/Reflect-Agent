@@ -7,14 +7,14 @@
 #              (mcp_server_started / mcp_server_failed / mcp_tool_invoked
 #               / tool_call_end 回传 echo 输出)
 #   skill      工作区 SKILL.md 扫描 + load_skill 工具激活(正文 + 工具列表)
-#   notes      add_session_note 工具 → $HOME/.reflect/session-notes/<thread>.jsonl 落盘
+#   notes      add_session_note 工具 → $HOME/.zhuye/session-notes/<thread>.jsonl 落盘
 #   bubble     PermissionMode::Bubble 非阻塞通知 + 自动放行
 #              (permission_mode_changed / permission_bubble / 工具照常执行)
 #   hotreload  配置热重载(config_reloaded 事件 + path + sections_changed)
 #   plugin     marketplace add/install/enable → 启动期 plugin_loaded 事件
 #
 # 前置:release 二进制 + target/debug/mock_mcp_server(不存在时 mcp/bubble
-#       组跳过并计为失败之外的 SKIP 说明)。全程 REFLECT_MODEL=mock + 隔离 HOME。
+#       组跳过并计为失败之外的 SKIP 说明)。全程 ZHUYE_MODEL=mock + 隔离 HOME。
 
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
@@ -23,7 +23,7 @@ require_cmd jq || { echo "FAIL: 需要 jq" >&2; exit 2; }
 MOCK_MCP="$ROOT/target/debug/mock_mcp_server"
 have_mock_mcp() { [ -x "$MOCK_MCP" ]; }
 if ! have_mock_mcp; then
-    echo "NOTE: $MOCK_MCP 不存在,先执行 cargo build -p reflect-mcp" >&2
+    echo "NOTE: $MOCK_MCP 不存在,先执行 cargo build -p zhuye-mcp" >&2
 fi
 
 # ── 轮询助手(与 serve_ops.sh 同模式)────────────────────────────────────
@@ -47,8 +47,8 @@ start_serve() {
     local f="$ISO_CWD/ops.fifo"
     rm -f "$f"
     mkfifo "$f"
-    ( REFLECT_MODEL=mock REFLECT_MOCK_SCRIPT="$script" \
-        "$REFLECT_BIN" serve <"$f" >"$out" 2>"$err" & )
+    ( ZHUYE_MODEL=mock ZHUYE_MOCK_SCRIPT="$script" \
+        "$ZHUYE_BIN" serve <"$f" >"$out" 2>"$err" & )
     SERVE_PID=$!
     exec 3>"$f"
     waitfor "$out" '"session_configured"' 20 || { echo "serve 握手超时" >&2; return 1; }
@@ -84,10 +84,10 @@ integ_mcp() {
     fi
 
     # 两个 server:fsx(真)与 bad(不存在,验 mcp_server_failed)。
-    write_mcp_config "$ISO_HOME/.reflect/config.toml" "[mcp_servers.fsx]
+    write_mcp_config "$ISO_HOME/.zhuye/config.toml" "[mcp_servers.fsx]
 type = \"stdio\"
 command = \"$MOCK_MCP\""
-    write_mcp_config "$ISO_HOME/.reflect/config.toml" "[mcp_servers.bad]
+    write_mcp_config "$ISO_HOME/.zhuye/config.toml" "[mcp_servers.bad]
 type = \"stdio\"
 command = \"/nonexistent/bad_mcp_server\""
 
@@ -143,8 +143,8 @@ integ_skill() {
     trap cleanup_isolated_env RETURN
 
     # workspace skill:frontmatter name/description 必填,tools 声明激活列表。
-    mkdir -p "$ISO_CWD/.reflect/skills/greet"
-    cat > "$ISO_CWD/.reflect/skills/greet/SKILL.md" <<'EOF'
+    mkdir -p "$ISO_CWD/.zhuye/skills/greet"
+    cat > "$ISO_CWD/.zhuye/skills/greet/SKILL.md" <<'EOF'
 ---
 name: greet
 description: Greets people politely
@@ -161,8 +161,8 @@ EOF
         '{"type":"tool_call","name":"load_skill","args":{"name":"greet"}}' \
         '{"type":"text","text":"done"}'
     local out="$ISO_CWD/skill.out" err="$ISO_CWD/skill.err"
-    ( REFLECT_MODEL=mock REFLECT_MOCK_SCRIPT="$s/s.jsonl" \
-        "$REFLECT_BIN" exec "use the greet skill" >"$out" 2>"$err" )
+    ( ZHUYE_MODEL=mock ZHUYE_MOCK_SCRIPT="$s/s.jsonl" \
+        "$ZHUYE_BIN" exec "use the greet skill" >"$out" 2>"$err" )
     local rc=$?
     tcase "load_skill exec 正常退出" test "$rc" -eq 0
     tcase "tool_call_begin load_skill" \
@@ -181,8 +181,8 @@ EOF
         '{"type":"tool_call","name":"load_skill","args":{"name":"nope"}}' \
         '{"type":"text","text":"done"}'
     local out2="$ISO_CWD/skill2.out"
-    ( REFLECT_MODEL=mock REFLECT_MOCK_SCRIPT="$s/s2.jsonl" \
-        "$REFLECT_BIN" exec "use nope" >"$out2" 2>/dev/null )
+    ( ZHUYE_MODEL=mock ZHUYE_MOCK_SCRIPT="$s/s2.jsonl" \
+        "$ZHUYE_BIN" exec "use nope" >"$out2" 2>/dev/null )
     tcase "load_skill 不存在的 skill 优雅报错" \
         jq -e 'select(.msg.type=="tool_call_end" and .msg.is_error==true and (.msg.output|tostring|contains("not found")))' "$out2"
 }
@@ -199,13 +199,13 @@ integ_notes() {
         '{"type":"tool_call","name":"add_session_note","args":{"text":"note-marker-xyz"}}' \
         '{"type":"text","text":"done"}'
     local out="$ISO_CWD/notes.out"
-    ( REFLECT_MODEL=mock REFLECT_MOCK_SCRIPT="$s/n.jsonl" \
-        "$REFLECT_BIN" exec "note it" >"$out" 2>/dev/null )
+    ( ZHUYE_MODEL=mock ZHUYE_MOCK_SCRIPT="$s/n.jsonl" \
+        "$ZHUYE_BIN" exec "note it" >"$out" 2>/dev/null )
     tcase "add_session_note 调用成功" \
         jq -e 'select(.msg.type=="tool_call_end" and .msg.is_error==false)' "$out"
 
-    # 落盘路径:$HOME/.reflect/session-notes/<thread_id>.jsonl(REFLECT_HOME 未设)。
-    local notes_dir="$ISO_HOME/.reflect/session-notes"
+    # 落盘路径:$HOME/.zhuye/session-notes/<thread_id>.jsonl(ZHUYE_HOME 未设)。
+    local notes_dir="$ISO_HOME/.zhuye/session-notes"
     tcase "session-notes 目录建立" test -d "$notes_dir"
     local any
     any=$(ls "$notes_dir"/*.jsonl 2>/dev/null | head -1)
@@ -222,7 +222,7 @@ integ_notes() {
 # 用 MCP 工具(Prompt 权限)触发:Bubble 模式下 gate 发 permission_bubble
 # 后自动放行执行;Auto 权限的内置工具(如 echo)不走 gate,不会发 bubble。
 # 注意:exec/serve 默认 `approvals=false`(gate 关闭,JSONL 免确认语义),
-# 需 REFLECT_APPROVALS=1 显式开启审批链路,gate 才会走到 bubble 分支。
+# 需 ZHUYE_APPROVALS=1 显式开启审批链路,gate 才会走到 bubble 分支。
 integ_bubble() {
     make_isolated_env
     trap cleanup_isolated_env RETURN
@@ -230,10 +230,10 @@ integ_bubble() {
         tcase "bubble 跳过(mock_mcp_server 未构建)" false
         return
     fi
-    export REFLECT_APPROVALS=1
-    trap 'unset REFLECT_APPROVALS; cleanup_isolated_env' RETURN
+    export ZHUYE_APPROVALS=1
+    trap 'unset ZHUYE_APPROVALS; cleanup_isolated_env' RETURN
 
-    write_mcp_config "$ISO_HOME/.reflect/config.toml" "[mcp_servers.fsx]
+    write_mcp_config "$ISO_HOME/.zhuye/config.toml" "[mcp_servers.fsx]
 type = \"stdio\"
 command = \"$MOCK_MCP\""
 
@@ -292,8 +292,8 @@ integ_hotreload() {
     # 追加 [compact] 段(debounce 250ms;watcher 有 60s 轮询兜底,
     # 正常 <3s 内触发 fs 事件)。
     sleep 0.5
-    printf '\n[compact]\ntrigger_tokens = 99999\n' >> "$ISO_HOME/.reflect/config.toml"
-    touch "$ISO_HOME/.reflect/config.toml"
+    printf '\n[compact]\ntrigger_tokens = 99999\n' >> "$ISO_HOME/.zhuye/config.toml"
+    touch "$ISO_HOME/.zhuye/config.toml"
     waitfor "$out" '"config_reloaded"' 25 || echo NO_RELOAD
     tcase "config_reloaded 事件" \
         jq -e 'select(.msg.type=="config_reloaded")' "$out"
@@ -339,19 +339,19 @@ EOF
   ]
 }
 EOF
-    "$REFLECT_BIN" plugin marketplace add integ-mk --from directory --path "$mkt" >"$ISO_CWD/p1.out" 2>&1
+    "$ZHUYE_BIN" plugin marketplace add integ-mk --from directory --path "$mkt" >"$ISO_CWD/p1.out" 2>&1
     tcase "plugin marketplace add 成功" test $? -eq 0
-    "$REFLECT_BIN" plugin install "hello@integ-mk" >"$ISO_CWD/p2.out" 2>&1
+    "$ZHUYE_BIN" plugin install "hello@integ-mk" >"$ISO_CWD/p2.out" 2>&1
     tcase "plugin install 成功" test $? -eq 0
-    "$REFLECT_BIN" plugin enable "hello@integ-mk" >"$ISO_CWD/p3.out" 2>&1
+    "$ZHUYE_BIN" plugin enable "hello@integ-mk" >"$ISO_CWD/p3.out" 2>&1
     tcase "plugin enable 成功" test $? -eq 0
 
     # exec 启动期 bootstrap_plugins 同步 enabled 列表 → plugin_loaded 事件。
     local s="$ISO_CWD/scripts"; mkdir -p "$s"
     make_mock_script "$s/pl.jsonl" '{"type":"text","text":"hi"}'
     local out="$ISO_CWD/plugin.out"
-    ( REFLECT_MODEL=mock REFLECT_MOCK_SCRIPT="$s/pl.jsonl" \
-        "$REFLECT_BIN" exec "hi" >"$out" 2>/dev/null )
+    ( ZHUYE_MODEL=mock ZHUYE_MOCK_SCRIPT="$s/pl.jsonl" \
+        "$ZHUYE_BIN" exec "hi" >"$out" 2>/dev/null )
     tcase "plugin_loaded 事件" \
         jq -e 'select(.msg.type=="plugin_loaded")' "$out"
     tcase "plugin_loaded plugin=hello@integ-mk" \

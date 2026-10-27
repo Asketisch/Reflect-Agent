@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # scripts/bench.sh —— M6 性能基线的 4 组微基准。
 #
-#   1. 冷启动           : `./reflect --version` 墙钟时间
-#   2. 首事件           : `./reflect exec "noop"` → 首行 JSON 输出
+#   1. 冷启动           : `./zhuye --version` 墙钟时间
+#   2. 首事件           : `./zhuye exec "noop"` → 首行 JSON 输出
 #   3. 单轮对话         : mock LLM,200-token 回复,跑 5 次取均值
-#   4. RSS              : `/usr/bin/time -l ./reflect exec "noop"` 峰值 RSS
+#   4. RSS              : `/usr/bin/time -l ./zhuye exec "noop"` 峰值 RSS
 #
 # 输出:
 #   target/bench/<name>.txt   — 原始 `/usr/bin/time -l` 输出行
@@ -19,7 +19,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-BIN="$ROOT/target/release/reflect"
+BIN="$ROOT/target/release/zhuye"
 BENCHDIR="$ROOT/target/bench"
 DOC="$ROOT/docs/benchmark.md"
 SUMMARY="$BENCHDIR/summary.txt"
@@ -87,7 +87,7 @@ run_bench() {
     echo "[ok] $name → $out"
 }
 
-echo "Reflect bench ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+echo "ZhuYe bench ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
 echo "runs=$RUNS bin=$BIN"
 echo
 
@@ -96,17 +96,17 @@ run_bench "cold_start" "$BIN" --version
 # 2. 首事件(mock provider —— review 修复:此前无 provider 配置,测的是
 #    fail-fast 报错路径而非首事件;现与 single_turn 同环境)
 run_bench "first_event" \
-    env OPENAI_API_KEY=sk-test REFLECT_MODEL=mock "$BIN" exec "noop"
+    env OPENAI_API_KEY=sk-test ZHUYE_MODEL=mock "$BIN" exec "noop"
 # 3. 单轮对话(mock provider,避免网络)
 run_bench "single_turn" \
-    env OPENAI_API_KEY=sk-test REFLECT_MODEL=mock "$BIN" exec "noop"
+    env OPENAI_API_KEY=sk-test ZHUYE_MODEL=mock "$BIN" exec "noop"
 # 4. 真实单轮的 RSS(mock provider)
 run_bench "rss" \
-    env OPENAI_API_KEY=sk-test REFLECT_MODEL=mock "$BIN" exec "noop"
+    env OPENAI_API_KEY=sk-test ZHUYE_MODEL=mock "$BIN" exec "noop"
 
 # 汇总写到 target/bench/summary.txt + stdout。
 {
-    echo "Reflect bench summary"
+    echo "ZhuYe bench summary"
     echo "generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "runs: $RUNS"
     echo

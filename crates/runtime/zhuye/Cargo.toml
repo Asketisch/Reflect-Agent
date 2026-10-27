@@ -1,0 +1,45 @@
+[package]
+name = "zhuye"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ZhuYe: top-level library facade (pub use re-exports)"
+
+[dependencies]
+zhuye-core       = { workspace = true }
+zhuye-protocol   = { workspace = true }
+zhuye-llm        = { workspace = true }
+zhuye-tools      = { workspace = true }
+zhuye-hooks      = { workspace = true }
+zhuye-ast        = { workspace = true }
+zhuye-memory     = { workspace = true }
+zhuye-skills     = { workspace = true }
+zhuye-agent-def  = { workspace = true }
+zhuye-compact    = { workspace = true }
+zhuye-rollout    = { workspace = true }
+zhuye-telemetry  = { workspace = true }
+zhuye-subagent   = { workspace = true }
+zhuye-discussion = { workspace = true }
+zhuye-config     = { workspace = true }
+zhuye-prompt     = { workspace = true }
+zhuye-recovery   = { workspace = true }
+zhuye-notes      = { workspace = true }
+zhuye-task       = { workspace = true }
+zhuye-mcp        = { workspace = true }
+zhuye-plugin     = { workspace = true }
+async-trait          = { workspace = true }
+anyhow               = { workspace = true }
+tokio                = { workspace = true }
+tokio-util           = { workspace = true }
+futures              = { workspace = true }
+parking_lot          = { workspace = true }
+tracing              = { workspace = true }
+uuid                 = { workspace = true }
+
+[dev-dependencies]
+anyhow     = { workspace = true }
+tokio      = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
+tokio-util = { workspace = true }
+serde_json = { workspace = true }
+tempfile   = "3"
+zhuye-plugin = { workspace = true }

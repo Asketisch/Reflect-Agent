@@ -1,9 +1,9 @@
 ## 项目概览
 
-Reflect — Rust 编写的 AI agent 运行时**框架**:4 节点 StateGraph 引擎、内置工具 + hooks、
+烛夜（ZhuYe）— Rust 编写的 AI agent 运行时**框架**:4 节点 StateGraph 引擎、内置工具 + hooks、
 多 LLM provider、MCP/LSP 集成、JSONL rollout 持久化。本仓库是**纯框架层**:
-主接口为 `reflect` 库门面(Builder + 60+ re-exports)与 Rust / Python 集成入口;
-`reflect-cli` 只是附带产出的薄 headless CLI 入口(单一 `reflect` 二进制,
+主接口为 `zhuye` 库门面(Builder + 60+ re-exports)与 Rust / Python 集成入口;
+`zhuye-cli` 只是附带产出的薄 headless CLI 入口(单一 `zhuye` 二进制,
 **不含** `tui` 子命令)。
 
 - Rust stable,edition 2024,MSRV 1.85(rust-toolchain.toml 锁定)
@@ -13,19 +13,19 @@ Reflect — Rust 编写的 AI agent 运行时**框架**:4 节点 StateGraph 引�
 
 ```bash
 # 构建(dev / release)
-cargo build -p reflect-cli                # 产出 target/debug/reflect
-make build                                # release 等价:cargo build --release -p reflect-cli
+cargo build -p zhuye-cli                # 产出 target/debug/zhuye
+make build                                # release 等价:cargo build --release -p zhuye-cli
 
 # 类型检查
 cargo check --workspace                   # 或 make check
-make check-fast C=reflect-core            # 单 crate 快查
+make check-fast C=zhuye-core            # 单 crate 快查
 
 # 测试
 cargo test --workspace                    # 全量(CI 用 --all-targets)
 make test-fast                            # cargo nextest(需已安装 cargo-nextest)
 make test-changed                         # nextest 只跑自 HEAD 起受变更影响的测试
-cargo test -p reflect-core <test_name>    # 单个测试
-cargo test -p reflect-tools -p reflect-hooks    # 多 crate
+cargo test -p zhuye-core <test_name>    # 单个测试
+cargo test -p zhuye-tools -p zhuye-hooks    # 多 crate
 ./tests/run_all.sh functional             # 功能覆盖门禁(能力覆盖层 + Rust 参数面 + 双 SDK 绑定层)
 ./tests/run_all.sh functional-layer       # 只跑能力覆盖层(Python 打真二进制,原始 wire)
 
@@ -49,7 +49,7 @@ make gc                                   # 清 target/debug 中 cargo 不 GC �
 ./scripts/release_sdk.sh check            # 版本一致性 + 双包构建检查(dry-run,不发布)
 ```
 
-离线开发:examples 与 e2e 用 `REFLECT_MODEL=mock` 跳过真实 LLM 网络调用。
+离线开发:examples 与 e2e 用 `ZHUYE_MODEL=mock` 跳过真实 LLM 网络调用。
 
 ## 架构
 
@@ -57,25 +57,25 @@ make gc                                   # 清 target/debug 中 cargo 不 GC �
 
 | 层 | Crate | 职责 |
 |----|-------|------|
-| `protocol/` | reflect-protocol | Submission / Op / EventMsg / Item + RolloutRecorder trait。所有层的公共契约 |
+| `protocol/` | zhuye-protocol | Submission / Op / EventMsg / Item + RolloutRecorder trait。所有层的公共契约 |
 | `abilities/` | llm, tools, hooks, skills, memory, agent-def, prompt, compact, recovery, notes, sanitize | 能力原语:ModelClient trait + providers、Tool trait + 内置工具、HookEngine、压缩 escalation 等 |
 | `resources/` | config, permissions, plugin, rollout, telemetry, sandbox, ast | 配置热重载、权限规则、插件 lifecycle、JSONL 持久化、tree-sitter 代码搜索 |
 | `orchestration/` | subagent, discussion, task, pipeline, goal | 多 agent 编排:子代理工厂(并发在途≤16)、讨论编排、任务/团队、DAG 流水线、目标模式 |
 | `integrations/` | mcp, lsp, integration, stream | MCP 客户端(stdio/streamable-http)、LSP、流式会话后端 |
-| `runtime/` | core, exec, cli, reflect, py | AgentThread + StateGraph、headless、CLI 入口、lib facade(60+ re-exports + Builder)、PyO3 绑定 |
+| `runtime/` | core, exec, cli, zhuye, py | AgentThread + StateGraph、headless、CLI 入口、lib facade(60+ re-exports + Builder)、PyO3 绑定 |
 
 ### 核心数据流
 
-- `AgentThread`(reflect-core)消费 `Submission`(mpsc 通道),`submission_loop` 驱动
+- `AgentThread`(zhuye-core)消费 `Submission`(mpsc 通道),`submission_loop` 驱动
   4 节点 `StateGraph`:**PreLoop → ModelCall → (ToolExec → PreLoop)\* → CheckStop**。
   模型不再发工具调用时经 CheckStop 结束 turn(Stop hook 可否决强制续跑)。
 - `NodeContext` 携带回合级依赖:model registry、RoutingPolicy、HookEngine、
   ToolExecutionQueue、event 通道、CancellationToken、approval gates。
 - 客户端(TUI / exec / lib)统一通过 Submission/Event 协议通信;headless 模式
-  Event 以 JSONL 流写 stdout、tracing 日志走 stderr(`reflect exec | jq` 不被破坏)。
+  Event 以 JSONL 流写 stdout、tracing 日志走 stderr(`zhuye exec | jq` 不被破坏)。
 - 关键设计决策:
   - **Protocol v0 已冻结**:新增 Op/EventMsg 变体 = non-breaking,不可改动既有变体
-  - `ToolError` 定义在 reflect-protocol,用于打破 tools ↔ hooks 循环依赖
+  - `ToolError` 定义在 zhuye-protocol,用于打破 tools ↔ hooks 循环依赖
   - StateGraph 用 enum + match 手写转移,不引入 petgraph
   - 错误处理:库 crate 用 `thiserror`,应用层(exec/cli)用 `anyhow`
 

@@ -9,7 +9,7 @@
 - C6 `exec` 的退出码映射(成功 0 / turn 失败 1 / plan mode 未产出计划 122)。
 
 运行:tests/run_all.sh functional,或
-  REFLECT_BIN=... python3 -m pytest tests/functional/test_cli.py -v
+  ZHUYE_BIN=... python3 -m pytest tests/functional/test_cli.py -v
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ def test_C1_serve_恢复入口(sandbox) -> None:
         "serve",
         "--resume",
         "not-a-uuid",
-        env={"REFLECT_MODEL": "mock"},
+        env={"ZHUYE_MODEL": "mock"},
         timeout=30,
     )
     assert bad.returncode != 0, "非法 thread id 应报错"
@@ -54,7 +54,7 @@ def test_C2_exec_输出JSONL(sandbox) -> None:
         sandbox,
         "exec",
         "hello",
-        env={"REFLECT_MODEL": "mock"},
+        env={"ZHUYE_MODEL": "mock"},
         timeout=60,
     )
     assert proc.returncode == 0, f"exec 退出码={proc.returncode}:{proc.stderr[:500]}"
@@ -78,7 +78,7 @@ def test_C3_session_子命令(sandbox, serve_session, mock_script) -> None:
     """
     require_binary()
     script = mock_script(['{"type":"text","text":"t1"}'])
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         s.submit({"type": "user_input", "items": [{"type": "text", "text": "一轮"}]})
     time.sleep(0.8)
     files = rollout_files(sandbox.home)
@@ -93,7 +93,7 @@ def test_C3_session_子命令(sandbox, serve_session, mock_script) -> None:
                 session_id = rec.get("session_id")
     assert session_id, "无 session_meta / session_id"
 
-    listed = run_cli(sandbox, "session", "ls", env={"REFLECT_MODEL": "mock"}, timeout=30)
+    listed = run_cli(sandbox, "session", "ls", env={"ZHUYE_MODEL": "mock"}, timeout=30)
     assert listed.returncode == 0, f"session ls 退出码={listed.returncode}:{listed.stderr}"
     assert session_id in listed.stdout, f"session ls 未列出:{listed.stdout!r}"
 
@@ -108,20 +108,20 @@ def test_C4_doctor与version(sandbox) -> None:
     require_binary()
     ver = run_cli(sandbox, "version", timeout=30)
     assert ver.returncode == 0, f"version 退出码={ver.returncode}:{ver.stderr}"
-    assert "reflect" in ver.stdout.lower(), f"version 输出异常:{ver.stdout!r}"
+    assert "zhuye" in ver.stdout.lower(), f"version 输出异常:{ver.stdout!r}"
 
 
 def test_C5_session_search_跨会话全文搜索(sandbox, serve_session, mock_script) -> None:
     """`session search <词>` 跨会话命中消息内容;`--json` 每行一个 JSON 对象。
 
-    依据:crates/resources/reflect-rollout/src/search.rs(大小写不敏感子串
+    依据:crates/resources/zhuye-rollout/src/search.rs(大小写不敏感子串
     匹配、按 mtime 最近活跃优先、命中片段过 redact_string);
-    crates/runtime/reflect-cli/src/session.rs 的 `search`。
+    crates/runtime/zhuye-cli/src/session.rs 的 `search`。
     """
     require_binary()
     needle = "needle-in-a-haystack"
     script = mock_script([f'{{"type":"text","text":"{needle}"}}'])
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         s.submit({"type": "user_input", "items": [{"type": "text", "text": "第一轮"}]})
     time.sleep(0.8)
 
@@ -153,13 +153,13 @@ def test_C5_session_search_跨会话全文搜索(sandbox, serve_session, mock_sc
 def test_C6_exec_退出码映射(sandbox, mock_script) -> None:
     """`exec` 的退出码:成功 0;turn 失败 1;`--plan-mode` 未产出计划 122。
 
-    依据:crates/runtime/reflect-exec/src/lib.rs 的 `exit_code_for`
+    依据:crates/runtime/zhuye-exec/src/lib.rs 的 `exit_code_for`
     (Error / 非 Success 的 TurnComplete / TurnAborted → 1)与
     `finish_plan_mode`(plan mode 未见 PlanReady → 122)。
     """
     require_binary()
     # 成功 → 0
-    ok = run_cli(sandbox, "exec", "hi", env={"REFLECT_MODEL": "mock"}, timeout=60)
+    ok = run_cli(sandbox, "exec", "hi", env={"ZHUYE_MODEL": "mock"}, timeout=60)
     assert ok.returncode == 0, f"成功应退出 0,实得 {ok.returncode}:{ok.stderr[:400]}"
 
     # turn 失败(撞迭代上限 → TurnComplete.status != success)→ 1。
@@ -171,9 +171,9 @@ def test_C6_exec_退出码映射(sandbox, mock_script) -> None:
         "exec",
         "hi",
         env={
-            "REFLECT_MODEL": "mock",
-            "REFLECT_MOCK_SCRIPT": str(script),
-            "REFLECT_MAX_ITERATIONS": "1",
+            "ZHUYE_MODEL": "mock",
+            "ZHUYE_MOCK_SCRIPT": str(script),
+            "ZHUYE_MAX_ITERATIONS": "1",
         },
         timeout=60,
     )
@@ -183,14 +183,14 @@ def test_C6_exec_退出码映射(sandbox, mock_script) -> None:
 
     # plan mode:mock 不会调 ExitPlanMode → 未见 PlanReady → 122。
     plan = run_cli(
-        sandbox, "exec", "--plan-mode", "hi", env={"REFLECT_MODEL": "mock"}, timeout=60
+        sandbox, "exec", "--plan-mode", "hi", env={"ZHUYE_MODEL": "mock"}, timeout=60
     )
     assert plan.returncode == 122, (
         f"plan mode 未产出计划应退出 122,实得 {plan.returncode}:{plan.stdout[-400:]}"
     )
 
     doc = run_cli(
-        sandbox, "doctor", env={"REFLECT_MODEL": "mock"}, timeout=60
+        sandbox, "doctor", env={"ZHUYE_MODEL": "mock"}, timeout=60
     )
     assert doc.returncode == 0, f"doctor 退出码={doc.returncode}:{doc.stderr[:500]}"
     assert doc.stdout.strip(), "doctor 无输出"

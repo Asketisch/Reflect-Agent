@@ -1,6 +1,6 @@
 # SDK 接入指南(Python / TypeScript)
 
-> 脚本项目不需要写 Rust 也能完整驱动本框架:`reflect serve` 提供常驻
+> 脚本项目不需要写 Rust 也能完整驱动本框架:`zhuye serve` 提供常驻
 > stdio JSONL 会话(一个进程 = 一个常驻 AgentThread,多轮共享内存状态,
 > 支持 resume),官方 SDK 在其上封装出符合各自语言习惯的 API ——
 > **推理与编排在 Rust 引擎,业务逻辑留在宿主语言**。
@@ -13,7 +13,7 @@ SDK 在本地执行 handler 并回执 —— 工具实现无需进 Rust 进程:
 sequenceDiagram
     autonumber
     participant C as 宿主进程(Python / TS SDK)
-    participant S as reflect serve
+    participant S as zhuye serve
     C->>S: register_tools(工具名 / 描述 / JSON Schema)
     Note over S: 静默注册 RemoteTool
     S-->>C: tool_execution_request(call_id, tool, args)
@@ -23,20 +23,20 @@ sequenceDiagram
     Note over S: LLM 拿到结果继续生成
 ```
 
-超时与错误语义:回执等待上限由 `REFLECT_REMOTE_TOOL_TIMEOUT_SECS`
+超时与错误语义:回执等待上限由 `ZHUYE_REMOTE_TOOL_TIMEOUT_SECS`
 控制(默认 120s);handler 抛异常时 SDK 应转成 `is_error=true` 的文本
 回执,让 LLM 看到错误而不是挂死。完整 wire 协议(握手 / 审批 / 退出
 语义)见 [`sdks/PROTOCOL.md`](../sdks/PROTOCOL.md)。
 
 ## Python
 
-`sdks/python`,纯 stdlib 零依赖;二进制定位:`REFLECT_BIN` env →
-PATH 上的 `reflect`:
+`sdks/python`,纯 stdlib 零依赖;二进制定位:`ZHUYE_BIN` env →
+PATH 上的 `zhuye`:
 
 ```python
-from reflect import ReflectAgent, ToolOutput, ContentBlock
+from zhuye import ZhuyeAgent, ToolOutput, ContentBlock
 
-agent = ReflectAgent.spawn()
+agent = ZhuyeAgent.spawn()
 
 def get_weather(args):
     return ToolOutput(
@@ -64,9 +64,9 @@ agent.close()
 `sdks/typescript`,纯 TS 零运行时依赖,API 与 Python 版同构:
 
 ```ts
-import { ReflectAgent } from 'reflect-agent';
+import { ZhuyeAgent } from 'zhuye-agent';
 
-const agent = await ReflectAgent.spawn();
+const agent = await ZhuyeAgent.spawn();
 await agent.registerTool(
   'get_weather', '查询城市天气',
   { type: 'object', properties: { city: { type: 'string' } }, required: ['city'] },
@@ -94,8 +94,8 @@ await agent.close();
 ## 离线联调
 
 ```bash
-# 免 API key、无网络:内置 mock provider(REFLECT_MOCK_SCRIPT 可脚本化每次模型回复)
-REFLECT_MODEL=mock ./scripts/sdk_smoke.sh   # 对真实二进制跑两套 SDK 全链路(需先构建 release)
+# 免 API key、无网络:内置 mock provider(ZHUYE_MOCK_SCRIPT 可脚本化每次模型回复)
+ZHUYE_MODEL=mock ./scripts/sdk_smoke.sh   # 对真实二进制跑两套 SDK 全链路(需先构建 release)
 ```
 
 ## 延伸阅读

@@ -1,6 +1,6 @@
 """能力覆盖层 · 重连/恢复/容错。
 
-直接驱动 `reflect serve` 原始 JSONL wire(不经过任何 SDK)。
+直接驱动 `zhuye serve` 原始 JSONL wire(不经过任何 SDK)。
 
 覆盖:
 - R 组 重连与恢复:`--resume` / `-c` / `-r N` 三入口;进程崩溃后客户端如何感知
@@ -9,7 +9,7 @@
   未知 op / 错误事件不污染 turn 流。
 
 运行:tests/run_all.sh functional,或
-  REFLECT_BIN=... python3 -m pytest tests/functional/test_recovery.py -v
+  ZHUYE_BIN=... python3 -m pytest tests/functional/test_recovery.py -v
 """
 
 from __future__ import annotations
@@ -36,15 +36,15 @@ pytestmark = pytest.mark.usefixtures("sandbox")
 
 
 def test_R1_resume_按thread_id恢复会话(serve_session, mock_script, sandbox) -> None:
-    """`reflect serve --resume <thread id>` → 恢复会话并**续写同一份** rollout。
+    """`zhuye serve --resume <thread id>` → 恢复会话并**续写同一份** rollout。
 
-    依据:crates/runtime/reflect-exec/src/serve.rs:57-65(headless.rs:602-748)。
+    依据:crates/runtime/zhuye-exec/src/serve.rs:57-65(headless.rs:602-748)。
     关键实现细节:`--resume` 的参数取**会话文件名**里的 thread id ——
     `session_configured.session_id` 与它是两个不同的 uuid。
     """
     require_binary()
     script = mock_script(['{"type":"text","text":"first-reply"}'])
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         s.submit(
             {"type": "user_input", "items": [{"type": "text", "text": "第一轮"}]},
             timeout=DRAIN_TIMEOUT,
@@ -56,7 +56,7 @@ def test_R1_resume_按thread_id恢复会话(serve_session, mock_script, sandbox)
     script2 = mock_script(['{"type":"text","text":"second-reply"}'])
     with serve_session(
         args=["--resume", tid],
-        env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script2)},
+        env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script2)},
     ) as s2:
         evs = s2.submit(
             {"type": "user_input", "items": [{"type": "text", "text": "第二轮"}]},
@@ -77,10 +77,10 @@ def test_R1_resume_按thread_id恢复会话(serve_session, mock_script, sandbox)
 
 
 def test_R2_continue_last_续最近会话(serve_session, mock_script, sandbox) -> None:
-    """`reflect serve -c` → 续最近一次会话。"""
+    """`zhuye serve -c` → 续最近一次会话。"""
     require_binary()
     script = mock_script(['{"type":"text","text":"first-reply"}'])
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         s.submit(
             {"type": "user_input", "items": [{"type": "text", "text": "第一轮"}]},
             timeout=DRAIN_TIMEOUT,
@@ -88,7 +88,7 @@ def test_R2_continue_last_续最近会话(serve_session, mock_script, sandbox) -
     time.sleep(0.8)
     script2 = mock_script(['{"type":"text","text":"resumed-reply"}'])
     with serve_session(
-        args=["-c"], env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script2)}
+        args=["-c"], env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script2)}
     ) as s2:
         evs = s2.submit(
             {"type": "user_input", "items": [{"type": "text", "text": "续"}]},
@@ -101,10 +101,10 @@ def test_R2_continue_last_续最近会话(serve_session, mock_script, sandbox) -
 
 
 def test_R3_resume_by_index_按序号恢复(serve_session, mock_script, sandbox) -> None:
-    """`reflect serve -r 1` → 按序号(1 = 最近)恢复会话。"""
+    """`zhuye serve -r 1` → 按序号(1 = 最近)恢复会话。"""
     require_binary()
     script = mock_script(['{"type":"text","text":"first-reply"}'])
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         s.submit(
             {"type": "user_input", "items": [{"type": "text", "text": "第一轮"}]},
             timeout=DRAIN_TIMEOUT,
@@ -113,7 +113,7 @@ def test_R3_resume_by_index_按序号恢复(serve_session, mock_script, sandbox)
     script2 = mock_script(['{"type":"text","text":"resumed-by-index"}'])
     with serve_session(
         args=["-r", "1"],
-        env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script2)},
+        env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script2)},
     ) as s2:
         evs = s2.submit(
             {"type": "user_input", "items": [{"type": "text", "text": "续"}]},
@@ -138,7 +138,7 @@ def test_R4_进程崩溃_客户端靠EOF感知断开(serve_session, mock_script)
             '{"type":"text","text":"never"}',
         ]
     )
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         s.send(
             {
                 "type": "register_tools",
@@ -176,11 +176,11 @@ def test_R4_进程崩溃_客户端靠EOF感知断开(serve_session, mock_script)
 def test_R5_stdin_EOF_优雅退出(serve_session, mock_script) -> None:
     """stdin EOF 等价于 shutdown:进程退出码 0。
 
-    依据:sdks/PROTOCOL.md §6、crates/runtime/reflect-exec/src/serve.rs:194-202。
+    依据:sdks/PROTOCOL.md §6、crates/runtime/zhuye-exec/src/serve.rs:194-202。
     """
     require_binary()
     script = mock_script(['{"type":"text","text":"x"}'])
-    s = serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)})
+    s = serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)})
     assert s._proc.stdin is not None
     s._proc.stdin.close()
     try:
@@ -196,7 +196,7 @@ def test_R5_stdin_EOF_优雅退出(serve_session, mock_script) -> None:
 def test_X1_坏行不终止会话(serve_session, mock_script) -> None:
     """写入非法 JSON → 全局 error(invalid_submission)→ 会话存活,下一轮正常。
 
-    依据:crates/runtime/reflect-exec/src/serve.rs:207-224、sdks/PROTOCOL.md §2。
+    依据:crates/runtime/zhuye-exec/src/serve.rs:207-224、sdks/PROTOCOL.md §2。
     """
     require_binary()
     script = mock_script(
@@ -205,7 +205,7 @@ def test_X1_坏行不终止会话(serve_session, mock_script) -> None:
             '{"type":"text","text":"t2"}',
         ]
     )
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         s.write_line("this-is-not-json")
         err = s.wait_global(
             lambda e: e.get("msg", {}).get("type") == "error"
@@ -228,7 +228,7 @@ def test_X2_空工具名被拒(serve_session, mock_script) -> None:
     """register_tools 带空工具名 → 全局 error(tool_name_invalid)。"""
     require_binary()
     script = mock_script(['{"type":"text","text":"t1"}'])
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         s.send(
             {
                 "type": "register_tools",
@@ -253,7 +253,7 @@ def test_X3_工具名撞内置被拒(serve_session, mock_script) -> None:
     """register_tools 用内置工具名(bash)→ 全局 error(tool_name_conflict)。"""
     require_binary()
     script = mock_script(['{"type":"text","text":"t1"}'])
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         s.send(
             {
                 "type": "register_tools",
@@ -280,7 +280,7 @@ def test_X3_工具名撞内置被拒(serve_session, mock_script) -> None:
 def test_X4_远程工具超时_以错误输出收尾(serve_session, mock_script) -> None:
     """不回执 → 超时后工具以错误输出收尾(is_error + `timed out`),turn 不挂死。
 
-    依据:crates/abilities/reflect-tools/src/remote.rs:96-103。
+    依据:crates/abilities/zhuye-tools/src/remote.rs:96-103。
     """
     require_binary()
     script = mock_script(
@@ -291,9 +291,9 @@ def test_X4_远程工具超时_以错误输出收尾(serve_session, mock_script)
     )
     with serve_session(
         env={
-            "REFLECT_MODEL": "mock",
-            "REFLECT_MOCK_SCRIPT": str(script),
-            "REFLECT_REMOTE_TOOL_TIMEOUT_SECS": "1",
+            "ZHUYE_MODEL": "mock",
+            "ZHUYE_MOCK_SCRIPT": str(script),
+            "ZHUYE_REMOTE_TOOL_TIMEOUT_SECS": "1",
         }
     ) as s:
         s.send(
@@ -337,7 +337,7 @@ def test_X5_未知op不炸会话(serve_session, mock_script) -> None:
             '{"type":"text","text":"t2"}',
         ]
     )
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         s.write_line('{"id":"u-unknown","op":{"type":"totally_unknown_op"}}')
         err = s.wait_global(
             lambda e: e.get("msg", {}).get("code") == "invalid_submission"
@@ -357,7 +357,7 @@ def test_X6_错误事件不污染turn流(serve_session, mock_script) -> None:
     """全局 error(id=="")不进按 id 路由的 turn 事件流。"""
     require_binary()
     script = mock_script(['{"type":"text","text":"t1"}'])
-    with serve_session(env={"REFLECT_MODEL": "mock", "REFLECT_MOCK_SCRIPT": str(script)}) as s:
+    with serve_session(env={"ZHUYE_MODEL": "mock", "ZHUYE_MOCK_SCRIPT": str(script)}) as s:
         s.write_line("this-is-not-json")
         s.wait_global(lambda e: e.get("msg", {}).get("code") == "invalid_submission")
         sid = s.send(

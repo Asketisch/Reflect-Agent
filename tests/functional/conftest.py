@@ -12,23 +12,23 @@ from typing import Callable, Iterator
 
 import pytest
 
-from wire import DRAIN_TIMEOUT, REFLECT_BIN, Sandbox, ServeSession
+from wire import DRAIN_TIMEOUT, ZHUYE_BIN, Sandbox, ServeSession
 
 
 @pytest.fixture()
 def sandbox(tmp_path: Path) -> Iterator[Sandbox]:
     """每个用例一份隔离 HOME + cwd。
 
-    HOME 里预写 `~/.reflect/config.toml`(`[hooks] enabled = []`):serve/CLI
+    HOME 里预写 `~/.zhuye/config.toml`(`[hooks] enabled = []`):serve/CLI
     默认启用 VerificationHook(Stop 时跑 `cargo test`)等重 hook,单轮会拖到
     分钟级;能力用例只验行为语义,不验 hook 计时。config.toml 必须存在 ——
     否则 ConfigWatcher 启动即报错退出。
     """
     home = tmp_path / "home"
     cwd = tmp_path / "cwd"
-    (home / ".reflect").mkdir(parents=True)
+    (home / ".zhuye").mkdir(parents=True)
     cwd.mkdir(parents=True)
-    (home / ".reflect" / "config.toml").write_text(
+    (home / ".zhuye" / "config.toml").write_text(
         "# 测试用最小配置:关闭全部内置 hook\n[hooks]\nenabled = []\n"
     )
     yield Sandbox(home=home, cwd=cwd)
@@ -38,7 +38,7 @@ def sandbox(tmp_path: Path) -> Iterator[Sandbox]:
 def mock_script(tmp_path: Path) -> Callable[[list[str]], Path]:
     """写 mock provider 脚本:JSONL,每行一次模型回复。
 
-    行格式(见 crates/abilities/reflect-llm/src/providers/mock.rs):
+    行格式(见 crates/abilities/zhuye-llm/src/providers/mock.rs):
     `{"type":"text","text":"..."}` / `{"type":"tool_call","name":"t","args":{}}`
     """
 
@@ -53,7 +53,7 @@ def mock_script(tmp_path: Path) -> Callable[[list[str]], Path]:
 
 @pytest.fixture()
 def serve_session(sandbox: Sandbox) -> Callable[..., ServeSession]:
-    """起 `reflect serve` 会话的工厂(自动收尾)。"""
+    """起 `zhuye serve` 会话的工厂(自动收尾)。"""
 
     created: list[ServeSession] = []
 

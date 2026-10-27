@@ -1,7 +1,7 @@
 //! Minimal TUI diagnostic: isolates whether Chinese IME causes a crossterm
 //! panic/exit, or whether the problem is in the application logic.
 //!
-//! Mirrors Reflect-Agent's exact terminal setup and event-read approach.
+//! Mirrors ZhuYe's exact terminal setup and event-read approach.
 //! Prints every event to the alt-screen so you can see exactly what crossterm
 //! produces.  Ctrl-C twice to quit.
 
@@ -23,7 +23,7 @@ fn main() {
         original_hook(info);
     }));
 
-    // --- Same terminal setup as Reflect-Agent ---
+    // --- Same terminal setup as ZhuYe ---
     execute!(io::stdout(), EnableBracketedPaste).unwrap();
     execute!(io::stdout(), EnterAlternateScreen).unwrap();
     terminal::enable_raw_mode().unwrap();
@@ -49,7 +49,7 @@ fn main() {
             );
         });
 
-        // --- Event reader: same catch_unwind approach as Reflect-Agent ---
+        // --- Event reader: same catch_unwind approach as ZhuYe ---
         match event::poll(std::time::Duration::from_millis(200)) {
             Ok(true) => {}
             Ok(false) => continue,
