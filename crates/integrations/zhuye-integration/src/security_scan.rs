@@ -181,6 +181,8 @@ mod tests {
 
     /// 卡死命令:直接把 `sleep 30` 当 audit 命令跑,超时后必须返回
     /// ran=false 且耗时远小于 30s(无需 PATH 注入 —— 内核函数收任意 Command)。
+    /// 仅 Unix:/bin/sleep 与 /bin/echo 是 Unix 路径,Windows runner 无。
+    #[cfg(unix)]
     #[test]
     fn audit_timeout_kills_stuck_command() {
         let started = Instant::now();
