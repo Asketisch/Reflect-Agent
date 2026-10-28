@@ -1,4 +1,4 @@
-"""zhuye-agent Python SDK —— 让脚本项目能直接驱动 ZhuYe Agent。
+"""zhuye Python SDK —— 让脚本项目能直接驱动 ZhuYe Agent。
 
 底层通过 spawn `zhuye serve` 子进程、走 JSONL stdio 协议,**零原生
 依赖、零 Python 运行时第三方包**(仅 stdlib)。需要本机 `zhuye` 二

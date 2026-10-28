@@ -36,7 +36,7 @@ concurrency:
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────
-  # 发布门禁:三处版本一致性(手动 dispatch 时跳过与 tag 的比对)+
+  # 发布门禁:四处版本一致性(手动 dispatch 时跳过与 tag 的比对)+
   # 双 SDK 离线测试(mock,无网络)。任一失败则两个发布 job 均不执行。
   # ─────────────────────────────────────────────────────────────────────
   gate:
@@ -61,14 +61,16 @@ jobs:
           set -euo pipefail
           CARGO_VER=$(awk '/^\[workspace\.package\]/{f=1;next} /^\[/{f=0} f && /^version = /{print; exit}' Cargo.toml | cut -d'"' -f2)
           PY_VER=$(sed -n 's/^version = "\(.*\)"/\1/p' sdks/python/pyproject.toml | head -n1)
+          PY_INIT_VER=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' sdks/python/zhuye/__init__.py | head -n1)
           TS_VER=$(node -p "require('./sdks/typescript/package.json').version")
-          echo "workspace=$CARGO_VER  python=$PY_VER  ts=$TS_VER"
+          echo "workspace=$CARGO_VER  python=$PY_VER  python-init=$PY_INIT_VER  ts=$TS_VER"
           [ "$CARGO_VER" = "$PY_VER" ] || { echo "FAIL: workspace($CARGO_VER) != python($PY_VER)"; exit 1; }
+          [ "$PY_VER" = "$PY_INIT_VER" ] || { echo "FAIL: python($PY_VER) != __init__ __version__($PY_INIT_VER)"; exit 1; }
           [ "$PY_VER" = "$TS_VER" ] || { echo "FAIL: python($PY_VER) != ts($TS_VER)"; exit 1; }
-          # 仅 tag 触发时要求三处版本与 tag 一致;手动 dispatch 在分支上,无此约束
+          # 仅 tag 触发时要求四处版本与 tag 一致;手动 dispatch 在分支上,无此约束
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then
             TAG_VER="${GITHUB_REF_NAME#v}"
-            for v in "$CARGO_VER" "$PY_VER" "$TS_VER"; do
+            for v in "$CARGO_VER" "$PY_VER" "$PY_INIT_VER" "$TS_VER"; do
               [ "$v" = "$TAG_VER" ] || { echo "FAIL: 版本 $v != tag v$TAG_VER"; exit 1; }
             done
           fi
@@ -109,6 +111,16 @@ jobs:
       - name: 元数据检查(twine check)
         run: twine check sdks/python/dist/*
 
+      # 安装冒烟:对本地 wheel 做干净 venv 安装 + import,捕获「构建过但
+      # 装不上 / 缺文件 / 入口导入失败」类问题(dry-run 与正式发布都跑)。
+      - name: 安装冒烟(本地 wheel + import)
+        run: |
+          set -euo pipefail
+          SMOKE="$(mktemp -d)"
+          python3 -m venv "$SMOKE/venv"
+          "$SMOKE/venv/bin/pip" install --quiet --disable-pip-version-check sdks/python/dist/*.whl
+          "$SMOKE/venv/bin/python" -c "import zhuye; print('wheel smoke ok:', zhuye.__version__)"
+
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
@@ -122,6 +134,22 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: sdks/python/dist
+
+      # 消费者视角验证:发布成功后从 PyPI registry 真实安装并断言
+      # __version__(registry CDN 有传播延迟,带重试)。
+      - name: 发布后验证(从 registry 安装)
+        if: startsWith(github.ref, 'refs/tags/v') && inputs.dry_run != true
+        run: |
+          set -euo pipefail
+          PY_VER=$(sed -n 's/^version = "\(.*\)"/\1/p' sdks/python/pyproject.toml | head -n1)
+          ok=""
+          for i in 1 2 3 4 5 6; do
+            if pip install --quiet --disable-pip-version-check "zhuye==$PY_VER"; then ok=1; break; fi
+            echo "registry 尚未可见,30s 后重试($i/6)…"
+            sleep 30
+          done
+          if [ -z "$ok" ]; then echo "FAIL: $PY_VER 未在 registry 可见"; exit 1; fi
+          python -c "import zhuye; assert zhuye.__version__ == '$PY_VER', zhuye.__version__; print('registry smoke ok:', zhuye.__version__)"
 
   # ─────────────────────────────────────────────────────────────────────
   # npm:流程与 PyPI 对称。npm pack 出真实 tgz 供 artifact 检查,
@@ -155,6 +183,17 @@ jobs:
       - name: 发布清单校验(publish --dry-run)
         run: (cd sdks/typescript && npm publish --dry-run)
 
+      # 安装冒烟:对 pack 出的真实 tgz 在干净目录安装 + ESM import,
+      # 捕获「打包缺文件 / 入口导出失败」类问题(dry-run 与正式都跑)。
+      - name: 安装冒烟(tgz 本地安装 + ESM import)
+        run: |
+          set -euo pipefail
+          SMOKE="$(mktemp -d)"
+          cd "$SMOKE"
+          npm init -y >/dev/null
+          npm install "$GITHUB_WORKSPACE"/sdks/typescript/packing/*.tgz --no-fund --no-audit
+          node --input-type=module -e "const m = await import('zhuye'); if (typeof m.ZhuyeAgent !== 'function') throw new Error('ZhuyeAgent 导出缺失'); console.log('tgz smoke ok: ZhuyeAgent =', typeof m.ZhuyeAgent)"
+
       - name: 上传发布包预览
         uses: actions/upload-artifact@v4
         with:
@@ -166,3 +205,22 @@ jobs:
       - name: 发布到 npm(OIDC + provenance,无 token)
         if: startsWith(github.ref, 'refs/tags/v') && inputs.dry_run != true
         run: (cd sdks/typescript && npm publish --provenance)
+
+      # 消费者视角验证:发布成功后从 npm registry 真实安装并 ESM import
+      # (registry 有传播延迟,带重试)。
+      - name: 发布后验证(从 registry 安装)
+        if: startsWith(github.ref, 'refs/tags/v') && inputs.dry_run != true
+        run: |
+          set -euo pipefail
+          TS_VER=$(node -p "require('$GITHUB_WORKSPACE/sdks/typescript/package.json').version")
+          SMOKE="$(mktemp -d)"
+          cd "$SMOKE"
+          npm init -y >/dev/null
+          ok=""
+          for i in 1 2 3 4 5 6; do
+            if npm install "zhuye@$TS_VER" --no-fund --no-audit; then ok=1; break; fi
+            echo "registry 尚未可见,15s 后重试($i/6)…"
+            sleep 15
+          done
+          if [ -z "$ok" ]; then echo "FAIL: zhuye@$TS_VER 未在 registry 可见"; exit 1; fi
+          node --input-type=module -e "const m = await import('zhuye'); if (typeof m.ZhuyeAgent !== 'function') throw new Error('ZhuyeAgent 导出缺失'); console.log('registry smoke ok')"
