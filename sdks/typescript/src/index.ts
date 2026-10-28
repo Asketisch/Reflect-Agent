@@ -1,4 +1,4 @@
-//! `zhuye-agent` —— TS SDK 公共入口。
+//! `zhuye` —— TS SDK 公共入口。
 
 export * from './protocol.js';
 export {

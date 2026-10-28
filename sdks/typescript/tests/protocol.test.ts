@@ -230,4 +230,75 @@ describe('ZhuyeAgent 协议回路(mock serve 驱动)', () => {
     expect(types).toContain('agent_message_delta');
     expect(types[types.length - 1]).toBe('turn_complete');
   }, 10_000);
+
+  it('nextGlobalEvent 读取全局事件(含握手事件本身)', async () => {
+    // 握手 session_configured(id="")也进入全局队列(对齐 Python
+    // `_global_queue` 语义:K9 e2e 依赖此行为)。
+    const handshake = await agent.nextGlobalEvent({ timeoutMs: 2000 });
+    expect(handshake?.id).toBe('');
+    expect(handshake?.msg.type).toBe('session_configured');
+    // 注入一条后续全局事件:原样可读。
+    (child.stdout as Readable).push(
+      JSON.stringify({ id: '', msg: { type: 'token_count', info: { total: 42 } } }) + '\n',
+    );
+    const ev = await agent.nextGlobalEvent({ timeoutMs: 2000 });
+    expect(ev?.id).toBe('');
+    expect(ev?.msg.type).toBe('token_count');
+    // 全局事件不得混入 submission 的事件迭代器。
+    const events: EventMsg[] = [];
+    for await (const e of await agent.submit('foo')) events.push(e.msg);
+    expect(events.some((m) => m.type === 'token_count')).toBe(false);
+  }, 10_000);
+
+  it('nextGlobalEvent 超时抛错(对齐 Python queue.Empty)', async () => {
+    // 先取走握手事件;之后无新全局事件到达 → 超时抛错而非挂死。
+    await agent.nextGlobalEvent({ timeoutMs: 2000 });
+    await expect(agent.nextGlobalEvent({ timeoutMs: 100 })).rejects.toThrow('timed out');
+  }, 10_000);
+
+  it('nextGlobalEvent 在 stdout EOF 后返回 null', async () => {
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const eofAgent = await ZhuyeAgent.fromStdio(stdin, stdout, 5000);
+    try {
+      stdout.write(JSON.stringify({ id: '', msg: {
+        type: 'session_configured', session_id: 's', model: 'mock/mock-1',
+        provider: 'mock', approval_policy: 'auto', sandbox_policy: 'workspace_only',
+      } }) + '\n');
+      stdout.end();
+      // EOF 后:队列中已有的事件仍可读,随后返回 null(对齐 Python None)。
+      const handshake = await eofAgent.nextGlobalEvent({ timeoutMs: 2000 });
+      expect(handshake?.msg.type).toBe('session_configured');
+      expect(await eofAgent.nextGlobalEvent({ timeoutMs: 2000 })).toBeNull();
+    } finally {
+      await eofAgent.close();
+    }
+  }, 10_000);
+
+  it('prompt 遇 turn_aborted 抛错(对齐 Python,不静默返回部分文本)', async () => {
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const abortAgent = await ZhuyeAgent.fromStdio(stdin, stdout, 5000);
+    try {
+      stdout.write(JSON.stringify({ id: '', msg: {
+        type: 'session_configured', session_id: 's', model: 'mock/mock-1',
+        provider: 'mock', approval_policy: 'auto', sandbox_policy: 'workspace_only',
+      } }) + '\n');
+      const pending = abortAgent.prompt('hi');
+      // 从 stdin 捕获 prompt 内部生成的 submission id,向同 id 通道
+      // 注入 delta + turn_aborted。
+      const subId = await new Promise<string>((resolve) => {
+        stdin.once('data', (c: Buffer) => resolve(JSON.parse(c.toString().trim()).id));
+      });
+      stdout.write(JSON.stringify({ id: subId, msg: {
+        type: 'agent_message_delta', delta: 'part',
+      } }) + '\n');
+      stdout.write(JSON.stringify({ id: subId, msg: {
+        type: 'turn_aborted', turn_id: 't', reason: { type: 'user_interrupt' },
+      } }) + '\n');
+      await expect(pending).rejects.toThrow('zhuye turn aborted');
+    } finally {
+      await abortAgent.close();
+    }
+  }, 10_000);
 });
