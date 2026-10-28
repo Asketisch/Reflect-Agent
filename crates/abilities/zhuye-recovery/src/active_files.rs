@@ -375,13 +375,16 @@ fn extract_path_from_args(args: &Value) -> Option<String> {
             return Some(v.to_string());
         }
     }
-    // Fallback:扫所有 string 字段,挑第一个绝对路径
+    // Fallback:扫所有 string 字段,挑第一个绝对路径。
+    // Windows 上 "/abs/path"(无盘符)不算 is_absolute,但工具输出
+    // 常是 unix 风格绝对路径 —— has_root(含根分隔符)同样视为绝对。
     if let Some(map) = args.as_object() {
         for v in map.values() {
-            if let Some(s) = v.as_str()
-                && Path::new(s).is_absolute()
-            {
-                return Some(s.to_string());
+            if let Some(s) = v.as_str() {
+                let p = Path::new(s);
+                if p.is_absolute() || p.has_root() {
+                    return Some(s.to_string());
+                }
             }
         }
     }
