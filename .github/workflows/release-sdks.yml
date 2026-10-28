@@ -221,10 +221,12 @@ jobs:
           cd "$SMOKE"
           npm init -y >/dev/null
           ok=""
-          for i in 1 2 3 4 5 6; do
+          # npm 新版本传播可超过 90s(run 40732743011 曾因此验证失败,
+          # 包实际已发布成功),窗口放宽到 10×20s。
+          for i in 1 2 3 4 5 6 7 8 9 10; do
             if npm install "zhuye@$TS_VER" --no-fund --no-audit; then ok=1; break; fi
-            echo "registry 尚未可见,15s 后重试($i/6)…"
-            sleep 15
+            echo "registry 尚未可见,20s 后重试($i/10)…"
+            sleep 20
           done
           if [ -z "$ok" ]; then echo "FAIL: zhuye@$TS_VER 未在 registry 可见"; exit 1; fi
           node --input-type=module -e "const m = await import('zhuye'); if (typeof m.ZhuyeAgent !== 'function') throw new Error('ZhuyeAgent 导出缺失'); console.log('registry smoke ok')"
