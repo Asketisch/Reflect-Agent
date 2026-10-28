@@ -42,6 +42,15 @@ gate(版本一致性 + 双 SDK 单测)
 ./scripts/release_sdk.sh tag 0.2.0    # 正式发布:打 v0.2.0 并 push(⚠️ 触发下面两条流水线)
 ```
 
+## 触发面(仅 main)
+
+- `ci.yml`:push / PR → main,已经只挂 main;
+- 两个 release workflow 的**手动 dispatch 仅允许 main 分支**
+  (workflow 内 `dispatch-guard` job 强制,非 main dispatch 级联全跳);
+  正式发布由 tag 驱动,而 `release_sdk.sh tag` 在非 main 分支上**直接
+  拒绝**打 tag —— 所以完整发布路径 = 合并到 main → 从 main 打 tag;
+- dry-run 验证流水线改动同样从 main dispatch。
+
 ## 测试阶段(当前状态)
 
 **已发布**:`zhuye v0.1.1` 起双 registry 正式发布(PyPI 项目由 Pending

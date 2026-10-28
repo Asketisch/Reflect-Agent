@@ -23,8 +23,18 @@ jobs:
   # 矩阵覆盖三个 OS。每个 runner 只产本 OS 原生包 —— 不做交叉编译
   # (release 阶段交叉编译 toolchain 配置复杂,各平台原生构建最稳)。
   # ─────────────────────────────────────────────────────────────────────
+  # workflow_dispatch 仅允许从 main 触发;tag push(event=push)不受限。
+  # 非 main dispatch 在此失败,经 needs 链级联阻断 build 与 release job。
+  dispatch-guard:
+    if: github.event_name == 'push' || github.ref_name == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 触发面守卫
+        run: echo "dispatch 来源分支 = ${{ github.ref_name }}(仅 main 可触发)"
+
   build:
     name: build (${{ matrix.os }})
+    needs: [dispatch-guard]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false

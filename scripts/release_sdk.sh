@@ -183,8 +183,9 @@ cmd_tag() {
   [ -z "$(git -C "$ROOT" status --porcelain)" ] \
     || die "工作区不干净 —— 发布 tag 前先提交全部改动。"
   branch="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD)"
+  # 分支约束属于安全边界(--yes 也不绕过):发布 tag 必须打在 main 上。
   [ "$branch" = "main" ] \
-    || echo "WARN: 当前分支是 $branch(非 main),通常应从 main 发布。" >&2
+    || die "当前分支是 $branch —— 发布 tag 必须打在 main 上,请先合并到 main。"
   git -C "$ROOT" rev-parse -q --verify "refs/tags/v$ver" > /dev/null \
     && die "tag v$ver 已存在。"
 
