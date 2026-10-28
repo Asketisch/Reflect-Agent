@@ -181,7 +181,8 @@ jobs:
         run: (cd sdks/typescript && npm ci --no-fund --no-audit && npm run build)
 
       - name: 生成发布包预览
-        run: (cd sdks/typescript && npm pack --pack-destination packing)
+        # npm pack 不会自建 --pack-destination 目录,必须先 mkdir。
+        run: (cd sdks/typescript && mkdir -p packing && npm pack --pack-destination packing)
 
       - name: 发布清单校验(publish --dry-run)
         run: (cd sdks/typescript && npm publish --dry-run)
