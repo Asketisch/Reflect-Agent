@@ -3,7 +3,7 @@
 #
 # 子命令:
 #   check              版本一致性校验 + 本地构建双包并检查(不发布,零 registry 操作)
-#   bump <ver>         把 workspace / Python SDK / TS SDK 三处版本同步为 <ver>(幂等)
+#   bump <ver>         把 workspace / Python SDK / TS SDK 四处版本同步为 <ver>(幂等)
 #   tag [--yes] <ver>  校验通过后打 annotated tag v<ver> 并 push —— 正式发布动作!
 #
 # ⚠️ tag 子命令会同时触发两条发布流水线(推 v* tag 即生效):
@@ -19,13 +19,14 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PY_PROJECT="$ROOT/sdks/python/pyproject.toml"
+PY_INIT="$ROOT/sdks/python/zhuye/__init__.py"
 TS_PACKAGE="$ROOT/sdks/typescript/package.json"
 CARGO_TOML="$ROOT/Cargo.toml"
 OUT_DIR="$ROOT/target/sdk-release"    # 构建产物落点(已被 .gitignore 覆盖)
 
 die() { echo "FAIL: $*" >&2; exit 1; }
 
-# ── 三处版本号读取(与流水线 gate 保持同一口径)─────────────────────────
+# ── 四处版本号读取(与流水线 gate 保持同一口径)─────────────────────────
 cargo_version() {
   awk '/^\[workspace\.package\]/{f=1;next} /^\[/{f=0} f && /^version = /{print; exit}' \
     "$CARGO_TOML" | cut -d'"' -f2
@@ -34,18 +35,25 @@ python_version() {
   # [project] 段的 version 是文件中唯一顶层 version 行
   sed -n 's/^version = "\(.*\)"/\1/p' "$PY_PROJECT" | head -n1
 }
+py_init_version() {
+  # Python 包运行时的 __version__(与 pyproject 双写,必须同步)
+  sed -n 's/^__version__ = "\(.*\)"/\1/p' "$PY_INIT" | head -n1
+}
 ts_version() {
   node -p "require('$TS_PACKAGE').version"
 }
 
-# 打印三处版本对照表;不一致时直接退出(仅作展示与门禁,不返回值)
+# 打印四处版本对照表;不一致时直接退出(仅作展示与门禁,不返回值)
 check_consistency() {
   echo "版本对照:"
   echo "  Rust workspace: $(cargo_version)  ($CARGO_TOML)"
   echo "  Python SDK:     $(python_version)  ($PY_PROJECT)"
+  echo "  Python __version__: $(py_init_version)  ($PY_INIT)"
   echo "  TS SDK:         $(ts_version)  ($TS_PACKAGE)"
   [ "$(cargo_version)" = "$(python_version)" ] \
     || die "版本不一致 —— 先用 bump <ver> 统一。"
+  [ "$(python_version)" = "$(py_init_version)" ] \
+    || die "版本不一致(__init__.py __version__)—— 先用 bump <ver> 统一。"
   [ "$(python_version)" = "$(ts_version)" ] \
     || die "版本不一致 —— 先用 bump <ver> 统一。"
 }
@@ -74,6 +82,8 @@ cmd_check() {
   (cd "$ROOT/sdks/python" && "$venv/bin/python" -m build --outdir "$OUT_DIR/python")
   "$venv/bin/twine" check "$OUT_DIR/python"/*
   echo "产物:$OUT_DIR/python"
+  echo "注:本地产物不含内嵌二进制(平台 wheel 由 release-sdks.yml 的"
+  echo "    pypi matrix 内嵌 zhuye-cli 产物后产出);本地仅验证元数据。"
 
   # TS 侧:npm ci 保证与 lock 一致,pack --dry-run 预览发布文件清单(不写文件)
   echo
@@ -85,23 +95,25 @@ cmd_check() {
     && npm pack --dry-run --pack-destination "$OUT_DIR/ts")
 
   echo
-  echo "PASSED: 版本 $ver 三处一致,双包构建与元数据检查全部通过(未发布任何内容)。"
+  echo "PASSED: 版本 $ver 四处一致,双包构建与元数据检查全部通过(未发布任何内容)。"
 }
 
-# ── bump:三处版本同步写入(幂等)──────────────────────────────────────
+# ── bump:四处版本同步写入(幂等)──────────────────────────────────────
 cmd_bump() {
   local ver="$1"
   is_semver "$ver" || die "bump 需要合法 semver(如 0.2.0、1.0.0-rc.1),收到:$ver"
 
-  local old_c old_p old_t
-  old_c="$(cargo_version)"; old_p="$(python_version)"; old_t="$(ts_version)"
-  if [ "$old_c" = "$ver" ] && [ "$old_p" = "$ver" ] && [ "$old_t" = "$ver" ]; then
-    echo "三处版本已经是 $ver,无需 bump。"
+  local old_c old_p old_i old_t
+  old_c="$(cargo_version)"; old_p="$(python_version)"
+  old_i="$(py_init_version)"; old_t="$(ts_version)"
+  if [ "$old_c" = "$ver" ] && [ "$old_p" = "$ver" ] && [ "$old_i" = "$ver" ] && [ "$old_t" = "$ver" ]; then
+    echo "四处版本已经是 $ver,无需 bump。"
     return 0
   fi
 
   # 统一用 python3 做精确锚点替换:只动 [workspace.package] 段的 version、
-  # pyproject 的 version 行、package.json 的 "version" 键,不碰依赖版本
+  # pyproject 的 version 行、__init__.py 的 __version__、package.json 的
+  # "version" 键,不碰依赖版本
   python3 - "$CARGO_TOML" "$old_c" "$ver" <<'PYEOF'
 import pathlib, sys
 
@@ -127,6 +139,15 @@ text = path.read_text(encoding="utf-8")
 assert text.count(old_line) == 1, f"pyproject 中 {old_line!r} 不唯一"
 path.write_text(text.replace(old_line, new_line), encoding="utf-8")
 PYEOF
+  python3 - "$PY_INIT" "$old_i" "$ver" <<'PYEOF'
+import pathlib, sys
+
+path, old, new = (pathlib.Path(sys.argv[i]) for i in (1, 2, 3))
+old_line, new_line = f'__version__ = "{old}"', f'__version__ = "{new}"'
+text = path.read_text(encoding="utf-8")
+assert text.count(old_line) == 1, f"__init__.py 中 {old_line!r} 不唯一"
+path.write_text(text.replace(old_line, new_line), encoding="utf-8")
+PYEOF
   python3 - "$TS_PACKAGE" "$old_t" "$ver" <<'PYEOF'
 import pathlib, sys
 
@@ -143,7 +164,7 @@ PYEOF
 
   echo
   check_consistency
-  echo "bump 完成:$old_c / $old_p / $old_t → $ver(Cargo.lock 已刷新)"
+  echo "bump 完成:$old_c / $old_p / $old_i / $old_t → $ver(Cargo.lock 已刷新)"
 }
 
 # ── tag:正式发布触发器 ────────────────────────────────────────────────

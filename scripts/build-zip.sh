@@ -92,7 +92,8 @@ fi
 # 路径 ────────────────────────────────────────────────────────────────
 DIST_DIR="${REPO_ROOT}/dist"
 PKG_NAME="${APP_NAME}-${VERSION}-${TARGET_TRIPLE}"
-STAGING_DIR="$(mktemp -d -t zhuye-zip-staging)"
+# BSD/GNU mktemp 通用写法:-t 前缀式在 GNU 上要求模板含 X 占位,直接自拼。
+STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/zhuye-zip-staging.XXXXXX")"
 ARCHIVE_PATH="${DIST_DIR}/${PKG_NAME}.zip"
 
 echo "→ 打包 zip: ${PKG_NAME}"

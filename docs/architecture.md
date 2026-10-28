@@ -63,8 +63,8 @@ crates/
     └── zhuye-py              PyO3 Python 绑定(同步 run API)
 sdks/                          多语言 SDK
 ├── PROTOCOL.md                    serve wire 协议规范
-├── python/                        纯 stdlib Python SDK(zhuye-agent)
-└── typescript/                    纯 TS npm SDK(zhuye-agent)
+├── python/                        纯 stdlib Python SDK(zhuye)
+└── typescript/                    纯 TS npm SDK(zhuye)
 ```
 
 `zhuye` 二进制由 `zhuye-cli` crate 产出,是本仓库的**薄 headless 入口**;

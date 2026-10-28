@@ -1,0 +1,20 @@
+[package]
+name = "zhuye-wheel-stub"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# maturin 形式依赖:pyproject 的 bindings=bin 要求 manifest 里有个 bin
+# target 才能构建。真正的平台二进制由 CI 从 zhuye-cli 编译后拷入
+# zhuye/bin/ 作为包数据(见 release-sdks.yml 的 pypi job),不经过这里
+# —— 本 stub 只为让 maturin 满意,产物是 venv scripts 里的一个无害
+# 占位文件,刻意保持最小。
+[[bin]]
+name = "zhuye-wheel-stub"
+path = "src/main.rs"
+
+[dependencies]
+
+# 独立于根 workspace(sdks/ 不在根 members 内):空 [workspace] 断开
+# cargo 的上溯绑定,否则在 sdks/ 下构建会因"非 workspace 成员"报错。
+[workspace]

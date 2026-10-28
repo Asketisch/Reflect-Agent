@@ -16,6 +16,7 @@ import { ChildProcessWithoutNullStreams, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { Readable, Writable } from 'node:stream';
 
+import { resolveBundledBinary } from './binary.js';
 import {
   EVENT_ID_NONE,
   Event,
@@ -45,7 +46,11 @@ interface RegisteredTool {
 
 /** ZhuyeAgent 启动选项。 */
 export interface ZhuyeAgentOptions {
-  /** `zhuye` 二进制路径。默认读 env `ZHUYE_BIN` → PATH 上的 `zhuye`。 */
+  /**
+   * `zhuye` 二进制路径。缺省按优先级解析:env `ZHUYE_BIN` → 随包安装
+   * 的平台子包内嵌二进制(`zhuye-<平台>` optional dependency)→
+   * PATH 上的 `zhuye`。
+   */
   bin?: string;
   /** 工作目录(传给 serve 的 env)。 */
   cwd?: string;
@@ -101,7 +106,13 @@ export class ZhuyeAgent {
     // config 目录都定位不到),options.env 只做增量覆盖。
     const env: NodeJS.ProcessEnv = { ...process.env, ...options.env };
     const spawnOpts: SpawnOptions = {
-      bin: options.bin ?? process.env[ZHUYE_BIN_ENV] ?? DEFAULT_BIN,
+      // 解析优先级:显式指定 → 环境变量 → 随平台子包内嵌的二进制 →
+      // PATH 上的 `zhuye`。内嵌优先于 PATH:它与 SDK 版本严格配套。
+      bin:
+        options.bin ??
+        process.env[ZHUYE_BIN_ENV] ??
+        resolveBundledBinary() ??
+        DEFAULT_BIN,
       args: ['serve'],
       cwd: options.cwd,
       env,
@@ -136,6 +147,14 @@ export class ZhuyeAgent {
           `zhuye serve exited unexpectedly (code=${code} signal=${signal ?? 'none'})`,
         ),
       );
+    });
+    // spawn 失败(典型:二进制路径不存在,ENOENT):ChildProcess 的
+    // error 事件没有监听者会以 uncaught exception 打爆宿主进程;这里
+    // 转为握手失败(ready 尚未 settle 时立即拒绝,否则等握手超时)。
+    child.on('error', (err) => {
+      const failure = new Error(`zhuye serve failed to start: ${err.message}`);
+      readyReject(failure);
+      agent.handleServeExit(failure);
     });
     const handshakeMs = options.handshakeTimeoutMs ?? STDIN_HANDSHAKE_TIMEOUT_MS;
     const timer = setTimeout(() => {
@@ -228,7 +247,11 @@ export class ZhuyeAgent {
       if (msg.type === 'agent_message_delta') result += msg.delta;
       else if (msg.type === 'agent_message') result += msg.text;
       else if (msg.type === 'turn_complete') break;
-      else if (msg.type === 'turn_aborted') break;
+      else if (msg.type === 'turn_aborted') {
+        // 对齐 Python SDK:turn_aborted 不是正常完成,返回部分文本
+        // 容易被调用方误认为完整答案 —— 抛错强制处理。
+        throw new Error(`zhuye turn aborted: ${JSON.stringify(msg.reason)}`);
+      }
       else if (msg.type === 'error') {
         throw new Error(`zhuye error: ${msg.code}: ${msg.message}`);
       }
@@ -264,6 +287,38 @@ export class ZhuyeAgent {
     });
   }
 
+  /**
+   * 读取一条全局事件(`id=""`:approval_request / ask_user_question /
+   * token_count / permission_mode_changed 等,含握手的
+   * `session_configured` 本身),与 submit() 的事件迭代器相互独立;
+   * 未知事件原样返回。
+   *
+   * stdout EOF / close 之后返回 `null`;`timeoutMs` 到点抛错 ——
+   * 与 Python SDK 的 `next_global_event` 语义对齐(超时抛 `queue.Empty`,
+   * EOF 返回 None)。
+   */
+  async nextGlobalEvent(opts: { timeoutMs?: number } = {}): Promise<Event | null> {
+    const queued = this.globalQueue.shift();
+    if (queued) return queued;
+    if (this.globalEof) return null;
+    return new Promise<Event | null>((resolve, reject) => {
+      let timer: NodeJS.Timeout | undefined;
+      const waiter = (ev: Event | null) => {
+        if (timer !== undefined) clearTimeout(timer);
+        resolve(ev);
+      };
+      this.globalWaiters.push(waiter);
+      if (opts.timeoutMs !== undefined) {
+        timer = setTimeout(() => {
+          const idx = this.globalWaiters.indexOf(waiter);
+          if (idx >= 0) this.globalWaiters.splice(idx, 1);
+          reject(new Error(`zhuye nextGlobalEvent timed out after ${opts.timeoutMs}ms`));
+        }, opts.timeoutMs);
+        timer.unref?.();
+      }
+    });
+  }
+
   /** 优雅关闭:发 Shutdown → 等 ShutdownComplete → 杀进程。 */
   async close(): Promise<void> {
     if (this.closed) return;
@@ -294,7 +349,8 @@ export class ZhuyeAgent {
           // ignore
         }
         resolve();
-      }, 1000).unref?.();
+        // 2s 对齐 Python SDK(agent.close 的 wait(timeout=2.0))。
+      }, 2000).unref?.();
     });
   }
 
@@ -343,6 +399,12 @@ export class ZhuyeAgent {
       // 其他事件交给按 submission id 过滤的消费者。
       this.dispatchEvent(ev);
     }
+    // stdout EOF(子进程退出):唤醒所有仍挂起的 submission 迭代器
+    // 与全局事件等待者 —— 对齐 Python `_on_eof`:连接断开即按流末尾
+    // 收尾,而不是永久挂起。
+    for (const cb of [...this.eventListeners.values()]) cb(null);
+    this.eventListeners.clear();
+    this.pushGlobalEvent(null);
   }
 
   private async handleToolRequest(
@@ -382,8 +444,11 @@ export class ZhuyeAgent {
     }
   }
 
-  private eventListeners = new Map<string, (ev: Event) => void>();
-  private sessionListeners: Array<(ev: Event) => void> = [];
+  private eventListeners = new Map<string, (ev: Event | null) => void>();
+  /** 全局事件(`id=""`)缓冲:nextGlobalEvent() 的队列 + 挂起等待者。 */
+  private globalQueue: Event[] = [];
+  private globalWaiters: Array<(ev: Event | null) => void> = [];
+  private globalEof = false;
 
   private dispatchEvent(ev: Event): void {
     if (ev.id) {
@@ -395,16 +460,34 @@ export class ZhuyeAgent {
         if (isTerminal(ev.msg)) this.eventListeners.delete(ev.id);
       }
     } else {
-      // 全局事件(SessionConfigured 之后)转发给会话级订阅。
-      for (const cb of this.sessionListeners) cb(ev);
+      // 全局事件(含握手的 session_configured)入会话级队列,由
+      // nextGlobalEvent() 消费 —— 不入任何 submission 的迭代器。
+      this.pushGlobalEvent(ev);
     }
+  }
+
+  /** 全局事件入队;`ev === null` 表示 EOF:标记收尾并唤醒等待者。 */
+  private pushGlobalEvent(ev: Event | null): void {
+    if (ev === null) this.globalEof = true;
+    const waiter = this.globalWaiters.shift();
+    if (waiter) {
+      waiter(ev);
+      return;
+    }
+    if (ev !== null) this.globalQueue.push(ev);
   }
 
   private filterEventsById(submissionId: string): AsyncIterable<Event> {
     const queue: Event[] = [];
     const pending: ((ev: Event | null) => void)[] = [];
     let closed = false;
-    const onEvent = (ev: Event) => {
+    // ev === null 表示 stdout EOF / 连接断开:按流末尾收尾(效果与
+    // 收到终态事件一致),对齐 Python `_on_eof` 唤醒全部监听者。
+    const onEvent = (ev: Event | null) => {
+      if (ev === null) {
+        cleanup();
+        return;
+      }
       const next = pending.shift();
       if (next) next(ev);
       else queue.push(ev);

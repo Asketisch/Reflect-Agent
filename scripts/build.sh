@@ -22,7 +22,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="${SCRIPT_DIR}"
+# build.sh 位于 <repo>/scripts/ 下,仓库根是其上一级 —— cargo workspace
+# 的 target/ 固定在仓库根,产物检查路径必须指向那里。
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BINARY_NAME="zhuye"
 PACKAGE="zhuye-cli"
 INSTALL_DIR="/usr/local/bin"

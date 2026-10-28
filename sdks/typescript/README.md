@@ -1,19 +1,28 @@
-# zhuye-agent (TypeScript SDK)
+# zhuye (TypeScript SDK)
 
 让脚本项目(同样适用于 TS 服务端)直接驱动 ZhuYe Agent 的轻量 SDK。底层通过 spawn `zhuye serve` 子进程、走 JSONL stdio 协议,**零原生编译、零原生依赖**。
 
 ## 安装
 
 ```bash
-npm install zhuye-agent
+npm install zhuye
 ```
 
-需要本机有 `zhuye` 二进制在 PATH(或通过 `ZHUYE_BIN` 指向)。从 [Releases](https://cnb.cool/...) 下载,或从本仓库 `make build` 产出 `target/release/zhuye`。
+安装即用:主包通过 optional dependencies 自动安装当前平台的平台子包
+(`zhuye-darwin-arm64` / `zhuye-darwin-x64` / `zhuye-linux-x64` /
+`zhuye-linux-arm64` / `zhuye-win32-x64`),内嵌对应平台的 `zhuye`
+二进制,SDK 优先解析它 —— 无需自装二进制、无需配环境变量。
+
+二进制解析优先级:显式 `options.bin` → `ZHUYE_BIN` → 平台子包内嵌
+二进制 → PATH 上的 `zhuye`。当前平台不在支持矩阵(如 musl/Alpine)
+时回退 PATH:从 [GitHub Releases](https://github.com/Asketisch/ZhuYe/releases)
+下载,或从本仓库 `make build` 产出 `target/release/zhuye` 后以
+`ZHUYE_BIN` 指向。
 
 ## 用法
 
 ```ts
-import { ZhuyeAgent } from 'zhuye-agent';
+import { ZhuyeAgent } from 'zhuye';
 
 const agent = await ZhuyeAgent.spawn();
 
@@ -47,11 +56,22 @@ for await (const ev of await agent.submit('第二轮')) {
 await agent.close();
 ```
 
+## 全局事件
+
+`nextGlobalEvent({ timeoutMs })` 读取 `id=""` 的会话事件(`approval_request` /
+`token_count` / `permission_mode_changed` 等),与 `submit()` 的按 submission
+路由的事件迭代器独立。超时抛错,进程 stdout 关闭后返回 `null`;未知变体
+原样返回。
+
+```ts
+const handshake = await agent.nextGlobalEvent({ timeoutMs: 5000 });
+```
+
 ## 环境变量
 
 | 变量 | 作用 |
 |------|------|
-| `ZHUYE_BIN` | `zhuye` 二进制路径(默认搜索 PATH)。 |
+| `ZHUYE_BIN` | `zhuye` 二进制路径(最高优先级覆盖;缺省用平台子包内嵌二进制)。 |
 | `ZHUYE_MODEL` | 模型名(spec,例如 `mock/mock-1` 用于离线 SDK 测试)。 |
 | `ZHUYE_REMOTE_TOOL_TIMEOUT_SECS` | 远程工具等待客户端回执的上限,默认 120s。 |
 

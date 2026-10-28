@@ -1,17 +1,25 @@
 # SDK 双仓库发布流水线:Python SDK → PyPI,TS SDK → npm。
+# 自 v0.1.x 起携带平台二进制:pip / npm 安装后开箱即用,不再要求
+# 用户自装 `zhuye`(参考 Codex 的 npm 平台子包与 ruff 的 Python 平台
+# wheel 模式)。
 #
 # 触发:
-#   - `git push --tags v*` → 正式发布(前提:平台侧 Trusted Publishing 已配置,
-#     见 docs/release.md;未配置时 PyPI/npm 发布步骤会失败,CLI 的 release.yml
-#     不受影响);
-#   - Actions 页手动 dispatch → 默认 dry_run=true,只做构建 + 检查 + 产物上传,
-#     绝不发布(测试阶段验证流水线用这条路径)。
+#   - `git push --tags v*` → 正式发布;
+#   - Actions 页手动 dispatch → 默认 dry_run=true,只做构建 + 检查 +
+#     产物上传,绝不发布(改流水线本身时用这条路径验证)。
 #
 # 认证:两端均走 OIDC Trusted Publishing,仓库 secrets 不存任何 token。
-#   - PyPI 要求 id-token: write + environment `pypi`(登记五元组时须一致);
+#   - PyPI 要求 id-token: write + environment `pypi`;
 #   - npm 要求 npm CLI ≥ 11.5.1、Node ≥ 22.14、id-token: write + environment `npm`。
 #
-# 包名与版本一律从包清单文件读取,不在此处硬编码 —— 项目改名时本文件无需变动。
+# 包名与版本一律从包清单文件读取,不在此处硬编码。
+#
+# 流水线结构:
+#   gate        版本一致性 + 双 SDK 离线单测
+#   binaries    5 平台编译 zhuye-cli,产物 artifact 共享给两条生态线
+#   npm-platform 5 平台子包(zhuye-<os>-<arch>,二进制 + 动态生成清单)
+#   pypi        5 平台 wheel(内嵌二进制,maturin 自动平台 tag)+ sdist
+#   npm         主包 zhuye(发布前动态注入 optionalDependencies)
 
 name: release-sdks
 
@@ -34,10 +42,17 @@ concurrency:
   group: release-sdks-${{ github.ref }}
   cancel-in-progress: false
 
+# ─────────────────────────────────────────────────────────────────────
+# 平台矩阵:slug 同于 npm 平台子包后缀;wheel-tag 仅作文档注释 ——
+# 平台 tag 由 maturin 按构建宿主自动生成。
+# ─────────────────────────────────────────────────────────────────────
+env:
+  ZHUYE_CLI_PACKAGE: zhuye-cli
+
 jobs:
   # ─────────────────────────────────────────────────────────────────────
-  # 发布门禁:三处版本一致性(手动 dispatch 时跳过与 tag 的比对)+
-  # 双 SDK 离线测试(mock,无网络)。任一失败则两个发布 job 均不执行。
+  # 发布门禁:四处版本一致性(手动 dispatch 时跳过与 tag 的比对)+
+  # 双 SDK 离线测试(mock,无网络)。任一失败则后续 job 均不执行。
   # ─────────────────────────────────────────────────────────────────────
   gate:
     name: gate(版本一致性 + SDK 测试)
@@ -61,36 +76,203 @@ jobs:
           set -euo pipefail
           CARGO_VER=$(awk '/^\[workspace\.package\]/{f=1;next} /^\[/{f=0} f && /^version = /{print; exit}' Cargo.toml | cut -d'"' -f2)
           PY_VER=$(sed -n 's/^version = "\(.*\)"/\1/p' sdks/python/pyproject.toml | head -n1)
+          PY_INIT_VER=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' sdks/python/zhuye/__init__.py | head -n1)
           TS_VER=$(node -p "require('./sdks/typescript/package.json').version")
-          echo "workspace=$CARGO_VER  python=$PY_VER  ts=$TS_VER"
+          echo "workspace=$CARGO_VER  python=$PY_VER  python-init=$PY_INIT_VER  ts=$TS_VER"
           [ "$CARGO_VER" = "$PY_VER" ] || { echo "FAIL: workspace($CARGO_VER) != python($PY_VER)"; exit 1; }
+          [ "$PY_VER" = "$PY_INIT_VER" ] || { echo "FAIL: python($PY_VER) != __init__ __version__($PY_INIT_VER)"; exit 1; }
           [ "$PY_VER" = "$TS_VER" ] || { echo "FAIL: python($PY_VER) != ts($TS_VER)"; exit 1; }
-          # 仅 tag 触发时要求三处版本与 tag 一致;手动 dispatch 在分支上,无此约束
+          # 仅 tag 触发时要求四处版本与 tag 一致;手动 dispatch 在分支上,无此约束
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then
             TAG_VER="${GITHUB_REF_NAME#v}"
-            for v in "$CARGO_VER" "$PY_VER" "$TS_VER"; do
+            for v in "$CARGO_VER" "$PY_VER" "$PY_INIT_VER" "$TS_VER"; do
               [ "$v" = "$TAG_VER" ] || { echo "FAIL: 版本 $v != tag v$TAG_VER"; exit 1; }
             done
           fi
 
       - name: Python SDK 测试(离线)
+        # 用 `python -m pytest`(而非裸 pytest):前者把 CWD 加入
+        # sys.path,测试才能 `from zhuye import ...`;裸 pytest 只把
+        # 测试文件所在目录入 path,CI 上会 ModuleNotFoundError。
         run: |
           pip install --quiet pytest
-          (cd sdks/python && pytest -ra)
+          (cd sdks/python && python -m pytest -ra)
 
       - name: TS SDK 测试(离线)
         run: (cd sdks/typescript && npm ci --no-fund --no-audit && npm test)
 
   # ─────────────────────────────────────────────────────────────────────
-  # PyPI:dry-run 只构建 + twine check + 产物上传;tag 触发且非 dry-run
-  # 才用 Trusted Publishing(OIDC)真发布。发布失败时 artifact 已上传,
-  # 可直接检查产物定位问题。
+  # 平台二进制:一次编译,两条生态线(npm 子包 / Python wheel)共享。
+  # linux-arm64 用 GitHub 官方 arm runner;若不可用,退化方案是
+  # ubuntu-latest + cross 交叉编译(本仓库暂未配置)。
+  # ─────────────────────────────────────────────────────────────────────
+  binaries:
+    name: binaries(${{ matrix.slug }})
+    needs: gate
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - slug: darwin-arm64
+            runner: macos-14
+            exe: ''
+          - slug: darwin-x64
+            runner: macos-13
+            exe: ''
+          - slug: linux-x64
+            runner: ubuntu-22.04
+            exe: ''
+          - slug: linux-arm64
+            runner: ubuntu-24.04-arm
+            exe: ''
+          - slug: win32-x64
+            runner: windows-latest
+            exe: '.exe'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+
+      - name: 编译 zhuye-cli(release)
+        run: cargo build --release -p ${{ env.ZHUYE_CLI_PACKAGE }}
+
+      - name: 上传二进制产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.slug }}
+          path: target/release/zhuye${{ matrix.exe }}
+          if-no-files-found: error
+          retention-days: 30
+
+  # ─────────────────────────────────────────────────────────────────────
+  # npm 平台子包:zhuye-<slug>,内容 = 二进制 + 动态生成的清单。
+  # 清单不入库(版本随主包动态生成);打包统一在 ubuntu 上做,规避
+  # 各 OS 的 shell/路径差异;--provenance 要求 npm ≥ 11.5.1。
+  # ─────────────────────────────────────────────────────────────────────
+  npm-platform:
+    name: npm(${{ matrix.slug }})
+    needs: binaries
+    runs-on: ubuntu-latest
+    environment: npm
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - slug: darwin-arm64
+            exe: ''
+            os: darwin
+            cpu: arm64
+          - slug: darwin-x64
+            exe: ''
+            os: darwin
+            cpu: x64
+          - slug: linux-x64
+            exe: ''
+            os: linux
+            cpu: x64
+          - slug: linux-arm64
+            exe: ''
+            os: linux
+            cpu: arm64
+          - slug: win32-x64
+            exe: '.exe'
+            os: win32
+            cpu: x64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: 升级 npm CLI
+        run: npm install -g npm@latest
+
+      - name: 下载平台二进制
+        uses: actions/download-artifact@v4
+        with:
+          name: binary-${{ matrix.slug }}
+          path: binary
+
+      - name: 组装平台子包
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./sdks/typescript/package.json').version")
+          PKG_DIR="sdks/npm-platform/zhuye-${{ matrix.slug }}"
+          mkdir -p "$PKG_DIR/bin"
+          cp "binary/zhuye${{ matrix.exe }}" "$PKG_DIR/bin/zhuye${{ matrix.exe }}"
+          node -e '
+            const fs = require("node:fs");
+            const [slug, version, os, cpu] = process.argv.slice(1);
+            const pkg = {
+              name: `zhuye-${slug}`,
+              version,
+              description: `ZhuYe Agent CLI binary for ${os}/${cpu} (zhuye 平台子包,由主包按平台自动安装)`,
+              license: "MIT",
+              repository: { type: "git", url: "git+https://github.com/Asketisch/ZhuYe.git" },
+              os: [os],
+              cpu: [cpu],
+              files: ["bin"],
+            };
+            fs.writeFileSync(process.argv[5], JSON.stringify(pkg, null, 2) + "\n");
+          ' "${{ matrix.slug }}" "$VERSION" "${{ matrix.os }}" "${{ matrix.cpu }}" "$PKG_DIR/package.json"
+
+      - name: 发布包预览(publish --dry-run)
+        run: (cd "sdks/npm-platform/zhuye-${{ matrix.slug }}" && npm publish --dry-run)
+
+      - name: 上传发布包预览
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-platform-${{ matrix.slug }}
+          path: sdks/npm-platform/zhuye-${{ matrix.slug }}/**
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 发布到 npm(OIDC + provenance)
+        if: startsWith(github.ref, 'refs/tags/v') && inputs.dry_run != true
+        run: (cd "sdks/npm-platform/zhuye-${{ matrix.slug }}" && npm publish --provenance)
+
+  # ─────────────────────────────────────────────────────────────────────
+  # PyPI 平台 wheel:把对应二进制拷入 zhuye/bin/(python-source 内,自动
+  # 成为包数据),maturin 构建 —— 平台 tag 按宿主自动生成。maturin 编译
+  # 的只是 sdks/python/bindings-stub 形式占位,秒级。
+  # 各 matrix job 各自发布不同 wheel,同 workflow 多 job 上传受 PyPI 支持。
   # ─────────────────────────────────────────────────────────────────────
   pypi:
-    name: PyPI(构建 → 检查 → [dry-run 时不发布])
-    needs: gate
-    runs-on: ubuntu-latest
-    environment: pypi    # 须与 PyPI 侧 Pending Publisher 登记的 environment 一致
+    name: PyPI(${{ matrix.slug }})
+    needs: binaries
+    runs-on: ${{ matrix.runner }}
+    environment: pypi    # 须与 PyPI 侧 Trusted Publisher 登记的 environment 一致
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - slug: darwin-arm64
+            runner: macos-14
+            exe: ''
+          - slug: darwin-x64
+            runner: macos-13
+            exe: ''
+          - slug: linux-x64
+            runner: ubuntu-22.04
+            exe: ''
+          - slug: linux-arm64
+            runner: ubuntu-24.04-arm
+            exe: ''
+          - slug: win32-x64
+            runner: windows-latest
+            exe: '.exe'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -100,19 +282,44 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: 安装构建工具
-        run: pip install --quiet build twine
+      # maturin 编译 bindings-stub 需要本机 cargo
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: 构建 sdist + wheel
-        run: (cd sdks/python && python -m build --outdir dist)
+      - name: 安装构建工具
+        run: pip install --quiet maturin twine
+
+      - name: 下载平台二进制
+        uses: actions/download-artifact@v4
+        with:
+          name: binary-${{ matrix.slug }}
+          path: binary
+
+      - name: 内嵌二进制到包目录
+        run: |
+          set -euo pipefail
+          mkdir -p sdks/python/zhuye/bin
+          cp "binary/zhuye${{ matrix.exe }}" "sdks/python/zhuye/bin/zhuye${{ matrix.exe }}"
+
+      - name: 构建平台 wheel(maturin)
+        run: (cd sdks/python && maturin build -o dist)
 
       - name: 元数据检查(twine check)
         run: twine check sdks/python/dist/*
 
-      - name: 上传构建产物
+      # 安装冒烟:干净 venv 装本平台 wheel,断言内嵌二进制可解析且可执行。
+      - name: 安装冒烟(wheel 内嵌二进制)
+        run: |
+          set -euo pipefail
+          SMOKE="$(mktemp -d)"
+          python3 -m venv "$SMOKE/venv"
+          "$SMOKE/venv/bin/pip" install --quiet --disable-pip-version-check sdks/python/dist/*.whl
+          "$SMOKE/venv/bin/python" -c "import subprocess, zhuye; from zhuye.agent import _bundled_binary; p = _bundled_binary(); assert p, '内嵌二进制解析失败'; r = subprocess.run([p, '--version'], capture_output=True, text=True); assert r.returncode == 0, r.stderr; print('wheel smoke ok:', r.stdout.strip())"
+
+      - name: 上传 wheel 产物
         uses: actions/upload-artifact@v4
         with:
-          name: pypi-dist
+          name: pypi-wheel-${{ matrix.slug }}
           path: sdks/python/dist/*
           if-no-files-found: error
           retention-days: 30
@@ -124,12 +331,55 @@ jobs:
           packages-dir: sdks/python/dist
 
   # ─────────────────────────────────────────────────────────────────────
-  # npm:流程与 PyPI 对称。npm pack 出真实 tgz 供 artifact 检查,
-  # --dry-run 校验发布文件清单;tag 触发且非 dry-run 才真发布。
+  # sdist(源码分发,平台无关):保留 PyPI 元数据连续性;不含二进制,
+  # 不可独立编译(Rust workspace 依赖),预编译平台请用 wheel —— 见
+  # docs/release.md。
+  # ─────────────────────────────────────────────────────────────────────
+  pypi-sdist:
+    name: PyPI(sdist)
+    needs: binaries
+    runs-on: ubuntu-latest
+    environment: pypi
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安装构建工具
+        run: pip install --quiet maturin twine
+
+      - name: 构建 sdist
+        run: (cd sdks/python && maturin sdist -o dist)
+
+      - name: 元数据检查(twine check)
+        run: twine check sdks/python/dist/*
+
+      - name: 上传 sdist 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: pypi-sdist
+          path: sdks/python/dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 发布到 PyPI(OIDC,无 token)
+        if: startsWith(github.ref, 'refs/tags/v') && inputs.dry_run != true
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: sdks/python/dist
+
+  # ─────────────────────────────────────────────────────────────────────
+  # npm 主包:发布前动态注入 optionalDependencies(精确 pin 五个平台
+  # 子包,版本随主包),源码 package.json 不维护该字段。needs
+  # npm-platform 保证消费方安装时平台子包已可解析。
   # ─────────────────────────────────────────────────────────────────────
   npm:
-    name: npm(构建 → 检查 → [dry-run 时不发布])
-    needs: gate
+    name: npm(主包)
+    needs: npm-platform
     runs-on: ubuntu-latest
     environment: npm    # 须与 npm 侧 Trusted Publisher 登记的 environment 一致
     steps:
@@ -149,11 +399,54 @@ jobs:
       - name: 安装依赖 + 构建
         run: (cd sdks/typescript && npm ci --no-fund --no-audit && npm run build)
 
+      - name: 注入 optionalDependencies(平台子包,精确 pin)
+        run: |
+          cd sdks/typescript
+          node -e '
+            const fs = require("node:fs");
+            const path = "package.json";
+            const pkg = JSON.parse(fs.readFileSync(path, "utf8"));
+            const slugs = ["darwin-arm64", "darwin-x64", "linux-x64", "linux-arm64", "win32-x64"];
+            pkg.optionalDependencies = Object.fromEntries(slugs.map((s) => [`zhuye-${s}`, pkg.version]));
+            fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + "\n");
+            console.log("optionalDependencies =", JSON.stringify(pkg.optionalDependencies));
+          '
+
       - name: 生成发布包预览
-        run: (cd sdks/typescript && npm pack --pack-destination packing)
+        # npm pack 不会自建 --pack-destination 目录,必须先 mkdir。
+        run: (cd sdks/typescript && mkdir -p packing && npm pack --pack-destination packing)
 
       - name: 发布清单校验(publish --dry-run)
         run: (cd sdks/typescript && npm publish --dry-run)
+
+      # 安装冒烟:dry-run 时平台子包在 registry 上尚不存在此版本,
+      # optional 安装被静默容忍 → 只断言 SDK import;tag 正式发布时
+      # 平台子包已发布 → 进一步断言内嵌二进制解析与执行。
+      - name: 安装冒烟(tgz 本地安装 + 内嵌二进制)
+        run: |
+          set -euo pipefail
+          SMOKE="$(mktemp -d)"
+          cd "$SMOKE"
+          npm init -y >/dev/null
+          npm install "$GITHUB_WORKSPACE"/sdks/typescript/packing/*.tgz --no-fund --no-audit
+          node --input-type=module -e "
+            const m = await import('zhuye');
+            if (typeof m.ZhuyeAgent !== 'function') throw new Error('ZhuyeAgent 导出缺失');
+            const bundled = m.resolveBundledBinary();
+            const strict = process.env.ZHUYE_SMOKE_STRICT === '1';
+            console.log('tgz smoke: bundled =', bundled);
+            if (bundled) {
+              const { execFileSync } = await import('node:child_process');
+              const out = execFileSync(bundled, ['--version']).toString().trim();
+              console.log('tgz smoke ok: 内嵌二进制 --version =', out);
+            } else if (strict) {
+              throw new Error('tag 发布场景平台子包应已可解析');
+            } else {
+              console.log('tgz smoke ok(dry-run,平台子包未发布,仅 import)');
+            }
+          "
+        env:
+          ZHUYE_SMOKE_STRICT: ${{ startsWith(github.ref, 'refs/tags/v') && '1' || '' }}
 
       - name: 上传发布包预览
         uses: actions/upload-artifact@v4
@@ -166,3 +459,30 @@ jobs:
       - name: 发布到 npm(OIDC + provenance,无 token)
         if: startsWith(github.ref, 'refs/tags/v') && inputs.dry_run != true
         run: (cd sdks/typescript && npm publish --provenance)
+
+      # 消费者视角验证:发布成功后从 npm registry 真实安装(zhuye 主包
+      # 连同平台子包),断言内嵌二进制解析与执行。registry 有传播延迟,
+      # 带重试;npm 新版本传播可超过 90s(v0.1.1 实证),窗口 10×20s。
+      - name: 发布后验证(从 registry 安装)
+        if: startsWith(github.ref, 'refs/tags/v') && inputs.dry_run != true
+        run: |
+          set -euo pipefail
+          TS_VER=$(node -p "require('$GITHUB_WORKSPACE/sdks/typescript/package.json').version")
+          SMOKE="$(mktemp -d)"
+          cd "$SMOKE"
+          npm init -y >/dev/null
+          ok=""
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            if npm install "zhuye@$TS_VER" --no-fund --no-audit; then ok=1; break; fi
+            echo "registry 尚未可见,20s 后重试($i/10)…"
+            sleep 20
+          done
+          if [ -z "$ok" ]; then echo "FAIL: zhuye@$TS_VER 未在 registry 可见"; exit 1; fi
+          node --input-type=module -e "
+            const m = await import('zhuye');
+            if (typeof m.ZhuyeAgent !== 'function') throw new Error('ZhuyeAgent 导出缺失');
+            const bundled = m.resolveBundledBinary();
+            if (!bundled) throw new Error('平台子包未随安装落地,内嵌解析失败');
+            const { execFileSync } = await import('node:child_process');
+            console.log('registry smoke ok: 内嵌二进制 --version =', execFileSync(bundled, ['--version']).toString().trim());
+          "

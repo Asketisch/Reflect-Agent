@@ -281,6 +281,18 @@ class ShutdownComplete(TypedDict):
     type: Literal["shutdown_complete"]
 
 
+class SubmissionClosed(TypedDict):
+    """v1.3 SDK:某条 submission 的 per-turn 通道已排空(该 submission 在
+    core 处理完毕,不会再有任何事件)。`Event.id` 携带对应 submission id。
+
+    serve 在 drain task 结束时发出;非 turn 操作(compact / rewind /
+    权限模式切换 / goal 等)没有 `turn_complete` 之类的终态事件,
+    `submit()` 迭代器靠本事件收尾,否则会永久挂起。
+    """
+
+    type: Literal["submission_closed"]
+
+
 class AgentMessage(TypedDict):
     type: Literal["agent_message"]
     text: str
@@ -609,6 +621,7 @@ EventMsg = Union[
     TurnAborted,
     TurnRewound,
     ShutdownComplete,
+    SubmissionClosed,
     AgentMessage,
     AgentMessageDelta,
     ThinkingDelta,

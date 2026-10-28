@@ -1,4 +1,4 @@
-"""zhuye-agent Python SDK 测试:用本地 Node "mock serve" 驱动协议。
+"""zhuye Python SDK 测试:用本地 Node "mock serve" 驱动协议。
 
 不依赖真 `zhuye` 二进制 —— mock 子进程用 Node 简单回显 JSONL,
 覆盖 SDK 的协议回路(handshake / submit / prompt / register_tool /
@@ -268,6 +268,10 @@ def test_optional_fields_preserve_required_keys() -> None:
     assert protocol.ThreadSettings.__optional_keys__ == {"effort", "permission_mode", "model"}
     assert protocol.ErrorEvent.__required_keys__ == {"type", "code", "message"}
     assert protocol.ErrorEvent.__optional_keys__ == {"details"}
+    # v1.3 收尾标记:类型层与 TS SDK 的 SubmissionClosed 对齐(此前仅在
+    # agent._is_terminal 做字符串判定,联合类型漏了该变体)。
+    assert protocol.SubmissionClosed.__required_keys__ == {"type"}
+    assert protocol.SubmissionClosed.__optional_keys__ == set()
 
 
 def test_global_events_and_eof(agent: ZhuyeAgent) -> None:

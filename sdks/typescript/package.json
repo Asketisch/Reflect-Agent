@@ -1,6 +1,6 @@
 {
-  "name": "zhuye-agent",
-  "version": "0.1.0",
+  "name": "zhuye",
+  "version": "0.1.1",
   "description": "ZhuYe Agent SDK for TypeScript: spawn `zhuye serve` and drive it over JSONL stdio.",
   "author": "ZhuYe Agent Contributors",
   "homepage": "https://github.com/Asketisch/ZhuYe#readme",

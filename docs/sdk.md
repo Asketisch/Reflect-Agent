@@ -64,7 +64,7 @@ agent.close()
 `sdks/typescript`,纯 TS 零运行时依赖,API 与 Python 版同构:
 
 ```ts
-import { ZhuyeAgent } from 'zhuye-agent';
+import { ZhuyeAgent } from 'zhuye';
 
 const agent = await ZhuyeAgent.spawn();
 await agent.registerTool(

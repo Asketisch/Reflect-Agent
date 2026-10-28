@@ -1,14 +1,22 @@
-# zhuye-agent (Python SDK)
+# zhuye (Python SDK)
 
 让 Python 项目直接驱动 Zhuye Agent 的轻量 SDK。底层通过 spawn `zhuye serve` 子进程、走 JSONL stdio 协议,**零运行时依赖**(仅 stdlib)。
 
 ## 安装
 
 ```bash
-pip install zhuye-agent
+pip install zhuye
 ```
 
-需要本机有 `zhuye` 二进制在 PATH(或通过 `ZHUYE_BIN` 指向)。从 [Releases](https://cnb.cool/...) 下载,或从本仓库 `make build` 产出 `target/release/zhuye`。
+安装即用:PyPI 提供平台 wheel(macOS arm64 / x86_64,Linux x86_64 /
+aarch64 glibc,Windows x86_64),内嵌对应平台的 `zhuye` 二进制,SDK
+优先解析它 —— 无需自装二进制、无需配环境变量。
+
+二进制解析优先级:显式 `options.bin` → `ZHUYE_BIN` → wheel 内嵌
+二进制 → PATH 上的 `zhuye`。当前平台不在支持矩阵(如 musl/Alpine)
+时回退 PATH:从 [GitHub Releases](https://github.com/Asketisch/ZhuYe/releases)
+下载,或从本仓库 `make build` 产出 `target/release/zhuye` 后以
+`ZHUYE_BIN` 指向。
 
 ## 用法
 
@@ -65,18 +73,18 @@ handshake = agent.next_global_event(timeout_secs=5)
 
 | 变量 | 作用 |
 |------|------|
-| `ZHUYE_BIN` | `zhuye` 二进制路径(默认搜索 PATH)。 |
+| `ZHUYE_BIN` | `zhuye` 二进制路径(最高优先级覆盖;缺省用 wheel 内嵌二进制)。 |
 | `ZHUYE_MODEL` | 模型 spec(`mock/mock-1` 用于离线 SDK 集成测试)。 |
 | `ZHUYE_REMOTE_TOOL_TIMEOUT_SECS` | 远程工具等待客户端回执的上限,默认 120s。 |
 
 ## 测试
 
 ```bash
-pip install -e .[dev]
-pytest -ra
+python3 -m pip install pytest
+python3 -m pytest -ra
 ```
 
-mock serve 进程跑在 Node 上(Node ≥ 18),不依赖真 `zhuye` 二进制 —— 测试完全离线,也不需要网络/API key。
+mock serve 进程跑在 Node 上(Node ≥ 18),不依赖真 `zhuye` 二进制 —— 测试完全离线,也不需要网络/API key。仓库内开发直接以源码树运行(`python -m pytest` 会把本目录加入 `sys.path`),无需构建安装;打包后端为 maturin(平台 wheel 由 CI 产出并内嵌二进制,见 `docs/release.md`),本地构建需 Rust 工具链。
 
 端到端测试(对真 `zhuye serve` 子进程的集成)在仓库 CI 里跑;在仓库根配置好 `ZHUYE_BIN` 后执行 `./tests/run_all.sh sdk-python`。
 
