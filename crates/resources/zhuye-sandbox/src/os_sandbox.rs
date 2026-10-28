@@ -248,11 +248,13 @@ impl OsSandbox {
             OsSandboxStatus::NoBackend => {
                 if self.strict {
                     format!(
-                        "os-sandbox: 已请求启用但当前平台无可用 backend — 严格模式下 BashTool 会失败关闭;{net};{sensitive}"
+                        "os-sandbox: 已请求启用但当前平台无可用 backend — 严格模式下 BashTool 会失败关闭;{net};{sensitive};strict={}",
+                        self.strict
                     )
                 } else {
                     format!(
-                        "os-sandbox: 已请求启用但当前平台无可用 backend(降级透传);{net};{sensitive}"
+                        "os-sandbox: 已请求启用但当前平台无可用 backend(降级透传);{net};{sensitive};strict={}",
+                        self.strict
                     )
                 }
             }
