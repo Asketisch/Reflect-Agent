@@ -369,11 +369,11 @@ fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
             Component::Normal(s) => parts.push(s.to_os_string()),
         }
     }
-    let sep = std::path::MAIN_SEPARATOR.to_os_string();
+    let sep = std::path::MAIN_SEPARATOR.to_string();
     let mut out = std::ffi::OsString::new();
     out.push(prefix);
     if absolute {
-        out.push(std::path::MAIN_SEPARATOR.to_os_string());
+        out.push(std::path::MAIN_SEPARATOR.to_string());
     }
     for (i, part) in parts.iter().enumerate() {
         if i > 0 {
