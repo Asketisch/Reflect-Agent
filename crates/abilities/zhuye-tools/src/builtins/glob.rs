@@ -100,7 +100,11 @@ impl Tool for GlobTool {
         let workspace = ctx.workspace_path();
         let mut body = paths
             .iter()
-            .map(|(p, _)| crate::sandbox::display_path_relative(p, &workspace))
+            .map(|(p, _)| {
+                // glob 惯例:输出统一正斜杠。Windows 上 display_path_relative
+                // 给出反斜杠形式,对 glob 语义与 LLM 消费方都不友好。
+                crate::sandbox::display_path_relative(p, &workspace).replace('\\', "/")
+            })
             .collect::<Vec<_>>()
             .join("\n");
         if truncated {

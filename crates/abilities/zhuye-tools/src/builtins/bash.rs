@@ -654,13 +654,25 @@ impl Tool for BashTool {
 mod tests {
     use super::*;
 
+    /// 测试用上下文:显式关闭 OS 沙箱。
+    ///
+    /// 与进程 env 解耦 —— 同文件的 env 保存/恢复测试(SANDBOX_ENV_LOCK
+    /// 串行化)在并行执行时会形成「恢复为默认 strict」的窗口,Windows
+    /// 上无沙箱后端 + strict = fail-closed,未显式关沙箱的执行类测试
+    /// 会随机失败。沙箱自身的行为由 env 专项测试覆盖。
+    fn unsandboxed_ctx(ws: impl Into<std::path::PathBuf>) -> ToolContext {
+        let mut ctx = ToolContext::for_workspace(ws);
+        ctx.os_sandbox = Some(false);
+        ctx
+    }
+
     // 注:`classify_command` / `BashCommandClass` 的分类单测已随实现一起
     // 搬到 `zhuye-hooks::bash_classify`。本模块只保留 BashTool 执行行为测试。
 
     #[tokio::test]
     async fn echo_runs_and_captures_stdout() {
         let t = BashTool::default();
-        let ctx = ToolContext::for_workspace(".");
+        let ctx = unsandboxed_ctx(".");
         let out = t
             .execute(ctx, serde_json::json!({"cmd": "echo hello"}))
             .await
@@ -693,7 +705,7 @@ mod tests {
         let deltas: std::sync::Arc<std::sync::Mutex<Vec<(bool, String)>>> =
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink_deltas = deltas.clone();
-        let mut ctx = ToolContext::for_workspace("/tmp");
+        let mut ctx = unsandboxed_ctx("/tmp");
         ctx.progress = Some(crate::tool::ProgressSink(std::sync::Arc::new(
             move |is_stderr, delta| {
                 sink_deltas
@@ -755,7 +767,7 @@ mod tests {
         }
         let out = BashTool::default()
             .execute(
-                ToolContext::for_workspace("/tmp"),
+                unsandboxed_ctx("/tmp"),
                 serde_json::json!({"cmd": "echo plain-path"}),
             )
             .await;
@@ -793,7 +805,7 @@ mod tests {
         let started = std::time::Instant::now();
         let out = BashTool::default()
             .execute(
-                ToolContext::for_workspace("/tmp"),
+                unsandboxed_ctx("/tmp"),
                 serde_json::json!({"cmd": "seq 1 30000", "timeout_ms": 30000}),
             )
             .await;
@@ -821,10 +833,7 @@ mod tests {
         let t = BashTool::default();
         // 成功命令。
         let ok = t
-            .execute(
-                ToolContext::for_workspace("."),
-                serde_json::json!({"cmd": "true"}),
-            )
+            .execute(unsandboxed_ctx("."), serde_json::json!({"cmd": "true"}))
             .await
             .unwrap();
         assert_eq!(
@@ -835,10 +844,7 @@ mod tests {
         assert!(!ok.is_error, "exit 0 不应标记为 error");
         // 失败命令。
         let fail = t
-            .execute(
-                ToolContext::for_workspace("."),
-                serde_json::json!({"cmd": "false"}),
-            )
+            .execute(unsandboxed_ctx("."), serde_json::json!({"cmd": "false"}))
             .await
             .unwrap();
         assert_eq!(
@@ -854,7 +860,7 @@ mod tests {
     async fn progress_sink_preserves_failure_exit_code() {
         let deltas = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let captured = deltas.clone();
-        let mut ctx = ToolContext::for_workspace("/tmp");
+        let mut ctx = unsandboxed_ctx("/tmp");
         ctx.os_sandbox = Some(false);
         ctx.progress = Some(crate::tool::ProgressSink(std::sync::Arc::new(
             move |_, delta| {
@@ -875,7 +881,7 @@ mod tests {
     /// 两条流都超过捕获上限时,状态行可能丢失,进程退出码仍须保留失败。
     #[tokio::test]
     async fn truncated_streams_preserve_failure_exit_code() {
-        let mut ctx = ToolContext::for_workspace("/tmp");
+        let mut ctx = unsandboxed_ctx("/tmp");
         ctx.os_sandbox = Some(false);
         ctx.progress = Some(crate::tool::ProgressSink(std::sync::Arc::new(|_, _| {})));
         let bytes = OUTPUT_LIMIT + 1024;
@@ -906,7 +912,7 @@ mod tests {
         let t = BashTool::default();
         let out = t
             .execute(
-                ToolContext::for_workspace("."),
+                unsandboxed_ctx("."),
                 serde_json::json!({"command": "echo via-command-alias"}),
             )
             .await
@@ -949,7 +955,7 @@ mod tests {
         let t = BashTool::default();
         let out = t
             .execute(
-                ToolContext::for_workspace("."),
+                unsandboxed_ctx("."),
                 serde_json::json!({
                     "cmd": "echo from-cmd",
                     "command": "echo from-command-should-not-run"
@@ -1003,7 +1009,7 @@ mod tests {
         let cmd =
             format!("touch {marker} 2>/dev/null; test -f {marker} && echo WROTE || echo BLOCKED");
         let t = BashTool::default();
-        let ctx = ToolContext::for_workspace("/tmp");
+        let ctx = unsandboxed_ctx("/tmp");
         let out = t
             .execute(ctx, serde_json::json!({"cmd": cmd, "timeout_ms": 15000}))
             .await
@@ -1045,7 +1051,7 @@ mod tests {
             std::env::set_var("ZHUYE_SANDBOX_STRICT", "0");
         }
         let t = BashTool::default();
-        let ctx = ToolContext::for_workspace("/tmp");
+        let ctx = unsandboxed_ctx("/tmp");
         let out = t
             .execute(ctx, serde_json::json!({"cmd": "echo unsandboxed-ok"}))
             .await
@@ -1090,7 +1096,7 @@ mod tests {
             std::env::set_var("ZHUYE_SANDBOX_STRICT", "1");
         }
         let t = BashTool::default();
-        let ctx = ToolContext::for_workspace("/tmp");
+        let ctx = unsandboxed_ctx("/tmp");
         let out = t
             .execute(ctx, serde_json::json!({"cmd": "echo should-not-run"}))
             .await;
@@ -1165,13 +1171,17 @@ mod tests {
 
     /// cwd 跨调用持久:第一次 `cd` 进子目录(metadata.cwd 更新 + 输出带
     /// `[cwd: ...]` 提示),第二次 `pwd` 直接落在该目录且不再重复提示。
+    /// 仅 Unix:断言依赖 shell `pwd` 输出与 OS 路径形态一致(Git Bash
+    /// 在 Windows 上输出 /c/... 形式,与 Windows 路径不可比)。
+    /// Windows 的 cwd 归一化属后续移植工作。
+    #[cfg(unix)]
     #[tokio::test]
     async fn cwd_persists_across_calls() {
         let dir = std::env::temp_dir().join(format!("zhuye-bash-cwd-{}-p", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let tool = BashTool::default();
-        let ctx = ToolContext::for_workspace("/tmp");
+        let ctx = unsandboxed_ctx("/tmp");
         let out1 = tool
             .execute(
                 ctx.clone(),
@@ -1215,12 +1225,14 @@ mod tests {
 
     /// sentinel 行剥除:最终输出不泄漏协议行,且无尾部换行的输出(如
     /// `printf hello`)保持字节语义不变。
+    /// 仅 Unix:sentinel 行的剥离依赖 cwd 形态一致(同 cwd_persists)。
+    #[cfg(unix)]
     #[tokio::test]
     async fn sentinel_line_stripped_and_byte_semantics_kept() {
         let t = BashTool::default();
         let out = t
             .execute(
-                ToolContext::for_workspace("/tmp"),
+                unsandboxed_ctx("/tmp"),
                 serde_json::json!({"cmd": "printf hello"}),
             )
             .await
@@ -1243,7 +1255,7 @@ mod tests {
         let t = BashTool::default();
         let out = t
             .execute(
-                ToolContext::for_workspace("/tmp"),
+                unsandboxed_ctx("/tmp"),
                 serde_json::json!({"cmd": "exit 7"}),
             )
             .await
@@ -1259,7 +1271,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let tool = BashTool::default();
-        let ctx = ToolContext::for_workspace("/tmp");
+        let ctx = unsandboxed_ctx("/tmp");
         tool.execute(
             ctx.clone(),
             serde_json::json!({"cmd": format!("cd -- {}", shell_quote(&dir))}),
@@ -1292,7 +1304,7 @@ mod tests {
         }
         let out = BashTool::default()
             .execute(
-                ToolContext::for_workspace("/tmp"),
+                unsandboxed_ctx("/tmp"),
                 // stdout 与 stderr 双流超限:确保合并文本必然超过
                 // OUTPUT_LIMIT(stdout 单流恰好在 cap 上不会触发截断)。
                 serde_json::json!({"cmd": "seq 1 30000; seq 1 1000 1>&2", "timeout_ms": 30000}),
