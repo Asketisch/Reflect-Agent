@@ -50,12 +50,23 @@ env:
   ZHUYE_CLI_PACKAGE: zhuye-cli
 
 jobs:
+  # workflow_dispatch 仅允许从 main 触发;tag push(event=push)不受限。
+  # 非 main dispatch 在此失败,经 needs 链(gate → binaries → …)级联
+  # 阻断全部后续 job。
+  dispatch-guard:
+    if: github.event_name == 'push' || github.ref_name == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 触发面守卫
+        run: echo "dispatch 来源分支 = ${{ github.ref_name }}(仅 main 可触发)"
+
   # ─────────────────────────────────────────────────────────────────────
   # 发布门禁:四处版本一致性(手动 dispatch 时跳过与 tag 的比对)+
   # 双 SDK 离线测试(mock,无网络)。任一失败则后续 job 均不执行。
   # ─────────────────────────────────────────────────────────────────────
   gate:
     name: gate(版本一致性 + SDK 测试)
+    needs: [dispatch-guard]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
