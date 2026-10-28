@@ -1,14 +1,14 @@
-# zhuye-agent (Python SDK)
+# zhuye (Python SDK)
 
 让 Python 项目直接驱动 Zhuye Agent 的轻量 SDK。底层通过 spawn `zhuye serve` 子进程、走 JSONL stdio 协议,**零运行时依赖**(仅 stdlib)。
 
 ## 安装
 
 ```bash
-pip install zhuye-agent
+pip install zhuye
 ```
 
-需要本机有 `zhuye` 二进制在 PATH(或通过 `ZHUYE_BIN` 指向)。从 [Releases](https://cnb.cool/...) 下载,或从本仓库 `make build` 产出 `target/release/zhuye`。
+需要本机有 `zhuye` 二进制在 PATH(或通过 `ZHUYE_BIN` 指向)。从 [GitHub Releases](https://github.com/Asketisch/ZhuYe/releases) 下载,或从本仓库 `make build` 产出 `target/release/zhuye`。
 
 ## 用法
 

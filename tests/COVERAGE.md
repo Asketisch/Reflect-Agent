@@ -10,8 +10,8 @@
 |---|---|---|---|---|
 | **能力覆盖层**(主) | `tests/functional/` | **Rust 代码在真产物上的行为**(原始 JSONL wire) | ❌ | 54 条 |
 | CLI 参数面 | `tests/rust/*.sh` | 17 个子命令的参数矩阵与输出契约 | ❌ | 320+ 断言 |
-| SDK 绑定层 | `tests/sdk-python/`、`tests/sdk-ts/` | 两个**客户端自己**的行为 | ✅ | Python 9 条 / TS 5 条 |
-| SDK 单测 | `sdks/*/tests/` | SDK 纯逻辑(mock serve),随包发布 | ✅ | Python 9 / TS 7 条 |
+| SDK 绑定层 | `tests/sdk-python/`、`tests/sdk-ts/` | 两个**客户端自己**的行为 | ✅ | Python 10 条 / TS 10 条 |
+| SDK 单测 | `sdks/*/tests/` | SDK 纯逻辑(mock serve),随包发布 | ✅ | Python 12 / TS 13 条 |
 | crate 单测 | `crates/**/tests/` | 内部单元与集成 | — | 既有 |
 | **实模型演练层**(可选) | `tests/live/` | **真实模型**下的引擎行为(协议形状) | ❌ | 12 条 |
 
@@ -28,14 +28,14 @@
 
 | 能力域 | 能力覆盖层 | CLI 参数面 | SDK 绑定层 | crate 单测 | 实模型层 |
 |---|---|---|---|---|---|
-| 基础通信(握手/单轮/多轮/事件流/终态/工具参数增量) | D1–D5、D9 | cli_core | K1–K2 | ✅ | L1–L4 |
+| 基础通信(握手/单轮/多轮/事件流/终态/工具参数增量) | D1–D5、D9 | cli_core | K1–K2、K5 | ✅ | L1–L4 |
 | 并发与路由 | S1–S3 | — | — | — | — |
 | 内置工具调用与 OS 沙箱 | T1–T2、T8–T10 | tools_drive | — | ✅ | T1–T3 |
 | 远程工具(注册/往返/失败/超时) | T3–T4、X4 | serve_ops | K3、K8 | ✅ | — |
 | 审批交互(approve / deny / bubble / shell 规则) | T5–T7 | integrations | — | ✅ | — |
 | 会话状态 Op(19 Op) | A1–A12 | serve_ops | K4、K9 | ✅ | — |
 | 重连与恢复(resume / -c / -r / 崩溃 / EOF) | R1–R5 | cli_core(exec --resume) | — | ✅ | P2 |
-| 容错与失败恢复 | X1–X6 | — | — | ✅ | X1 |
+| 容错与失败恢复 | X1–X6 | — | K7 | ✅ | X1 |
 | 持久化(rollout / 截断 / 索引) | P1–P5 | cli_deep(session) | — | ✅ | P1–P2 |
 | 编排(子代理/讨论/任务/团队/流水线/goal) | O1–O5 | cli_modules、cli_deep | — | ✅ | — |
 | CLI 能力面 | C1–C6 | cli_deep(194 断言) | — | — | — |
@@ -193,6 +193,7 @@ Result + rounds_completed)/ 任务与团队(create → ls)/ 流水线错误路�
 - D7:流式输出分支保留内部状态行用于退出码解析,只从增量事件中过滤它;T8/T9 已验证 OS 沙箱拒绝后的 `is_error=true` 与非零退出码;T10 验证双流截断、状态行丢失后仍回退到原命令退出码。
 - D8:当前 `classify_action` 对 `InvalidRequest` 返回 `GiveUp`,不会进入构造冷却原因的分支;旧记录所述一小时冷却不成立。
 - D10:双 SDK 新增 `ToolCallOutputDelta` 类型,逻辑测试覆盖输出增量字段透传及未知变体兼容。
+- D11:TS SDK 新增 `nextGlobalEvent` 公开读取口(此前 `id=""` 全局事件被静默丢弃),并补齐 K5/K7/K7b/K8/K9 真二进制用例与 Python 侧对齐;TS `prompt()` 遇 `turn_aborted` 改为抛错(不再静默返回部分文本);Python 补 `SubmissionClosed` 类型声明;TS stdout EOF 现在会唤醒挂起的迭代器(对齐 Python `_on_eof`);发布名落定为 `zhuye`,`__version__` 纳入四处版本联动。
 - Python 3.10 兼容性:移除 Python 3.11 才提供的 `typing.NotRequired` 依赖,用 `TypedDict` 继承区分必填与可选字段,保持零运行时依赖。
 
 ### 实模型层观测到的上游限制(非 Zhuye 缺陷)
@@ -224,7 +225,7 @@ Result + rounds_completed)/ 任务与团队(create → ls)/ 流水线错误路�
 | `live/test_live_persistence.py` | 3 条(P1–P2、X1) |
 | **实模型演练层合计** | **10 条**(默认 SKIP,需 `ZHUYE_LIVE=1`) |
 | `sdk-python/test_sdk_real_bin.py` | 10 条(K1–K9) |
-| `sdk-ts/real-bin.test.mjs` | 5 条 |
+| `sdk-ts/real-bin.test.mjs` | 10 条(K1–K9,与 Python 侧对齐) |
 | `rust/cli_core.sh` | 71 断言 |
 | `rust/cli_deep.sh` | 194 断言 |
 | `rust/serve_ops.sh` | 42 断言 |
