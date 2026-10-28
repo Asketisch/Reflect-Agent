@@ -347,41 +347,41 @@ fn path_to_uri(path: &std::path::Path) -> Result<Uri, String> {
 /// 这是 `Path::canonicalize` 的纯函数版(不依赖 fs,文件存在与否都行)。
 fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
     use std::path::{Component, PathBuf};
-    let mut stack: Vec<PathBuf> = Vec::new();
+    // 用字符串拼接而非 PathBuf::push 重建:Windows 上对 "C:"(盘符前缀、
+    // 无根)push 相对组件是**盘符相对语义**,不补分隔符,会得到
+    // "C:Users\..." 这样的路径,与 workspace 的组件序列失配。
+    let mut prefix = std::ffi::OsString::new();
+    let mut parts: Vec<std::ffi::OsString> = Vec::new();
     let mut absolute = false;
     for comp in path.components() {
         match comp {
-            Component::Prefix(p) => stack.push(PathBuf::from(p.as_os_str())),
-            Component::RootDir => {
-                absolute = true;
-                // Unix:根分隔符入栈,后续组件 push 会拼接成 /a/b。
-                // Windows:RootDir 紧随 Prefix(如 "C:")之后,PathBuf::push
-                // 自会补分隔符;这里若压入 "/" 或清空栈,都会破坏与
-                // workspace 的 strip_prefix 前缀比对(得到 "C:/\...")
-                // 而误判逃逸,故保持 Prefix 原样在栈中。
-                #[cfg(unix)]
-                {
-                    stack.clear();
-                    stack.push(PathBuf::from("/"));
-                }
-            }
+            Component::Prefix(p) => prefix = p.as_os_str().to_os_string(),
+            Component::RootDir => absolute = true,
             Component::CurDir => {}
             Component::ParentDir => {
                 // 如果栈顶是 normal 组件就弹出;否则保留 `..`。
-                if stack.len() > if absolute { 1 } else { 0 } {
-                    stack.pop();
+                if !parts.is_empty() {
+                    parts.pop();
                 } else if !absolute {
-                    stack.push(PathBuf::from(".."));
+                    parts.push("..".into());
                 }
             }
-            Component::Normal(s) => stack.push(PathBuf::from(s)),
+            Component::Normal(s) => parts.push(s.to_os_string()),
         }
     }
-    let mut out = PathBuf::new();
-    for p in &stack {
-        out.push(p);
+    let sep = std::path::MAIN_SEPARATOR.to_os_string();
+    let mut out = std::ffi::OsString::new();
+    out.push(prefix);
+    if absolute {
+        out.push(std::path::MAIN_SEPARATOR.to_os_string());
     }
-    out
+    for (i, part) in parts.iter().enumerate() {
+        if i > 0 {
+            out.push(sep.clone());
+        }
+        out.push(part);
+    }
+    PathBuf::from(out)
 }
 
 #[cfg(test)]
