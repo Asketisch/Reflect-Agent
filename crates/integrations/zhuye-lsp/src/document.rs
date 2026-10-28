@@ -157,7 +157,6 @@ mod tests {
     use super::*;
     use parking_lot::RwLock;
     use std::collections::HashMap;
-    use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;
