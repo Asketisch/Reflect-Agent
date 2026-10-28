@@ -39,27 +39,6 @@ fn is_safe_git_arg(value: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || "._/:@+~-\\".contains(c))
 }
 
-#[cfg(test)]
-mod safe_arg_tests {
-    use super::is_safe_git_arg;
-
-    #[test]
-    fn rejects_option_injection() {
-        assert!(!is_safe_git_arg("--upload-pack=touch /tmp/x"));
-        assert!(!is_safe_git_arg("-c"));
-        assert!(!is_safe_git_arg("has space"));
-        assert!(!is_safe_git_arg("has;semicolon"));
-    }
-
-    #[test]
-    fn allows_urls_refs_and_windows_paths() {
-        assert!(is_safe_git_arg("https://github.com/x/y.git"));
-        assert!(is_safe_git_arg("main"));
-        assert!(is_safe_git_arg("v1.2.0+build"));
-        assert!(is_safe_git_arg(r"C:\Users\me\AppData\Local\Temp\repo"));
-    }
-}
-
 #[async_trait]
 impl MarketplaceFetcher for GitFetcher {
     async fn fetch(&self, source: &MarketplaceSource, dest: &Path) -> Result<PathBuf> {
@@ -181,5 +160,25 @@ impl MarketplaceFetcher for GitFetcher {
             )));
         }
         Ok(())
+    }
+}
+#[cfg(test)]
+mod safe_arg_tests {
+    use super::is_safe_git_arg;
+
+    #[test]
+    fn rejects_option_injection() {
+        assert!(!is_safe_git_arg("--upload-pack=touch /tmp/x"));
+        assert!(!is_safe_git_arg("-c"));
+        assert!(!is_safe_git_arg("has space"));
+        assert!(!is_safe_git_arg("has;semicolon"));
+    }
+
+    #[test]
+    fn allows_urls_refs_and_windows_paths() {
+        assert!(is_safe_git_arg("https://github.com/x/y.git"));
+        assert!(is_safe_git_arg("main"));
+        assert!(is_safe_git_arg("v1.2.0+build"));
+        assert!(is_safe_git_arg(r"C:\Users\me\AppData\Local\Temp\repo"));
     }
 }
