@@ -354,8 +354,16 @@ fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
             Component::Prefix(p) => stack.push(PathBuf::from(p.as_os_str())),
             Component::RootDir => {
                 absolute = true;
-                stack.clear();
-                stack.push(PathBuf::from("/"));
+                // Unix:根分隔符入栈,后续组件 push 会拼接成 /a/b。
+                // Windows:RootDir 紧随 Prefix(如 "C:")之后,PathBuf::push
+                // 自会补分隔符;这里若压入 "/" 或清空栈,都会破坏与
+                // workspace 的 strip_prefix 前缀比对(得到 "C:/\...")
+                // 而误判逃逸,故保持 Prefix 原样在栈中。
+                #[cfg(unix)]
+                {
+                    stack.clear();
+                    stack.push(PathBuf::from("/"));
+                }
             }
             Component::CurDir => {}
             Component::ParentDir => {

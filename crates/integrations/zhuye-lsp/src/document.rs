@@ -201,7 +201,8 @@ mod tests {
     #[test]
     fn uri_path_round_trip_uses_file_scheme() {
         use std::str::FromStr;
-        let path = PathBuf::from("/tmp/x.rs");
+        // Windows 上 from_file_path 要求带盘符的绝对路径,不能用 /tmp。
+        let path = std::env::temp_dir().join("zhuye-lsp-uri-roundtrip.rs");
         let url = url::Url::from_file_path(path).expect("from_file_path");
         let uri = lsp_types::Uri::from_str(url.as_str()).expect("uri parse");
         // lsp_types 0.97 用 fluent_uri::Scheme(无 PartialEq<str>),转字符串比对。
