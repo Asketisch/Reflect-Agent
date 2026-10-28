@@ -76,9 +76,12 @@ jobs:
           fi
 
       - name: Python SDK 测试(离线)
+        # 用 `python -m pytest`(而非裸 pytest):前者把 CWD 加入
+        # sys.path,测试才能 `from zhuye import ...`;裸 pytest 只把
+        # 测试文件所在目录入 path,CI 上会 ModuleNotFoundError。
         run: |
           pip install --quiet pytest
-          (cd sdks/python && pytest -ra)
+          (cd sdks/python && python -m pytest -ra)
 
       - name: TS SDK 测试(离线)
         run: (cd sdks/typescript && npm ci --no-fund --no-audit && npm test)
