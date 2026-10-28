@@ -96,6 +96,21 @@ def _is_terminal(msg: dict[str, Any]) -> bool:
     return t in ("turn_complete", "turn_aborted", "shutdown_complete", "submission_closed")
 
 
+def _bundled_binary(package_dir: Optional[Path] = None) -> Optional[str]:
+    """随包安装的内嵌 `zhuye` 二进制路径;未内嵌时返回 None。
+
+    平台 wheel 由 CI 构建:先把 zhuye-cli 编译产物拷到包目录 `bin/` 下
+    再打包(maturin),`pip install zhuye` 后开箱即用。源码运行(本仓库)
+    无此目录 → 返回 None,spawn 链回退 PATH 上的 `zhuye`。
+
+    `package_dir` 参数供单测注入;生产路径取本模块所在包目录。
+    """
+    pkg_dir = package_dir if package_dir is not None else Path(__file__).resolve().parent
+    exe = "zhuye.exe" if os.name == "nt" else "zhuye"
+    candidate = pkg_dir / "bin" / exe
+    return str(candidate) if candidate.is_file() else None
+
+
 class ZhuyeAgent:
     """与 `zhuye serve` 子进程保持常驻会话的 Python 主类。
 
@@ -132,11 +147,17 @@ class ZhuyeAgent:
 
     @classmethod
     def spawn(cls, options: Optional[ZhuyeAgentOptions] = None) -> "ZhuyeAgent":
-        """启动 `zhuye serve` 子进程,等到 `session_configured` 即返回。"""
+        """启动 `zhuye serve` 子进程,等到 `session_configured` 即返回。
+
+        二进制解析优先级:显式 `options.bin` → env `ZHUYE_BIN` → 随包
+        安装的内嵌二进制(平台 wheel 自带)→ PATH 上的 `zhuye`。
+        内嵌优先于 PATH:它与 SDK 版本严格配套。
+        """
         options = options or ZhuyeAgentOptions()
         bin_path = (
             options.bin
             or os.environ.get(ZHUYE_BIN_ENV)
+            or _bundled_binary()
             or shutil.which(DEFAULT_BIN)
         )
         if not bin_path:

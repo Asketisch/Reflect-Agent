@@ -16,6 +16,7 @@ import { ChildProcessWithoutNullStreams, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { Readable, Writable } from 'node:stream';
 
+import { resolveBundledBinary } from './binary.js';
 import {
   EVENT_ID_NONE,
   Event,
@@ -45,7 +46,11 @@ interface RegisteredTool {
 
 /** ZhuyeAgent 启动选项。 */
 export interface ZhuyeAgentOptions {
-  /** `zhuye` 二进制路径。默认读 env `ZHUYE_BIN` → PATH 上的 `zhuye`。 */
+  /**
+   * `zhuye` 二进制路径。缺省按优先级解析:env `ZHUYE_BIN` → 随包安装
+   * 的平台子包内嵌二进制(`zhuye-<平台>` optional dependency)→
+   * PATH 上的 `zhuye`。
+   */
   bin?: string;
   /** 工作目录(传给 serve 的 env)。 */
   cwd?: string;
@@ -101,7 +106,13 @@ export class ZhuyeAgent {
     // config 目录都定位不到),options.env 只做增量覆盖。
     const env: NodeJS.ProcessEnv = { ...process.env, ...options.env };
     const spawnOpts: SpawnOptions = {
-      bin: options.bin ?? process.env[ZHUYE_BIN_ENV] ?? DEFAULT_BIN,
+      // 解析优先级:显式指定 → 环境变量 → 随平台子包内嵌的二进制 →
+      // PATH 上的 `zhuye`。内嵌优先于 PATH:它与 SDK 版本严格配套。
+      bin:
+        options.bin ??
+        process.env[ZHUYE_BIN_ENV] ??
+        resolveBundledBinary() ??
+        DEFAULT_BIN,
       args: ['serve'],
       cwd: options.cwd,
       env,

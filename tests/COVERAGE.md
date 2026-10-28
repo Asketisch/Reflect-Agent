@@ -11,7 +11,7 @@
 | **能力覆盖层**(主) | `tests/functional/` | **Rust 代码在真产物上的行为**(原始 JSONL wire) | ❌ | 54 条 |
 | CLI 参数面 | `tests/rust/*.sh` | 17 个子命令的参数矩阵与输出契约 | ❌ | 320+ 断言 |
 | SDK 绑定层 | `tests/sdk-python/`、`tests/sdk-ts/` | 两个**客户端自己**的行为 | ✅ | Python 10 条 / TS 10 条 |
-| SDK 单测 | `sdks/*/tests/` | SDK 纯逻辑(mock serve),随包发布 | ✅ | Python 12 / TS 13 条 |
+| SDK 单测 | `sdks/*/tests/` | SDK 纯逻辑(mock serve),随包发布 | ✅ | Python 15 / TS 18 条 |
 | crate 单测 | `crates/**/tests/` | 内部单元与集成 | — | 既有 |
 | **实模型演练层**(可选) | `tests/live/` | **真实模型**下的引擎行为(协议形状) | ❌ | 12 条 |
 
@@ -194,6 +194,7 @@ Result + rounds_completed)/ 任务与团队(create → ls)/ 流水线错误路�
 - D8:当前 `classify_action` 对 `InvalidRequest` 返回 `GiveUp`,不会进入构造冷却原因的分支;旧记录所述一小时冷却不成立。
 - D10:双 SDK 新增 `ToolCallOutputDelta` 类型,逻辑测试覆盖输出增量字段透传及未知变体兼容。
 - D11:TS SDK 新增 `nextGlobalEvent` 公开读取口(此前 `id=""` 全局事件被静默丢弃),并补齐 K5/K7/K7b/K8/K9 真二进制用例与 Python 侧对齐;TS `prompt()` 遇 `turn_aborted` 改为抛错(不再静默返回部分文本);Python 补 `SubmissionClosed` 类型声明;TS stdout EOF 现在会唤醒挂起的迭代器(对齐 Python `_on_eof`);发布名落定为 `zhuye`,`__version__` 纳入四处版本联动。
+- D12:SDK 随包分发平台二进制(参考 Codex / ruff 模式)—— npm 主包按平台安装 `zhuye-<slug>` 子包(optional dependencies,清单由 CI 动态生成),Python 切 maturin 出平台 wheel(二进制以 `zhuye/bin/` 包数据单份携带);双 SDK 二进制解析链统一为 `options.bin → ZHUYE_BIN → 内嵌二进制 → PATH`,平台不匹配回退 PATH;安装冒烟与发布后 registry 验证升级为断言内嵌二进制 `--version` 可执行。
 - Python 3.10 兼容性:移除 Python 3.11 才提供的 `typing.NotRequired` 依赖,用 `TypedDict` 继承区分必填与可选字段,保持零运行时依赖。
 
 ### 实模型层观测到的上游限制(非 Zhuye 缺陷)

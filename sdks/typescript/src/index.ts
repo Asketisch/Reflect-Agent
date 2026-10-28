@@ -6,3 +6,7 @@ export {
   ToolHandler,
   ZhuyeAgentOptions,
 } from './agent.js';
+export {
+  platformPackageName,
+  resolveBundledBinary,
+} from './binary.js';

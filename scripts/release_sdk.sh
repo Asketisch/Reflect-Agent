@@ -82,6 +82,8 @@ cmd_check() {
   (cd "$ROOT/sdks/python" && "$venv/bin/python" -m build --outdir "$OUT_DIR/python")
   "$venv/bin/twine" check "$OUT_DIR/python"/*
   echo "产物:$OUT_DIR/python"
+  echo "注:本地产物不含内嵌二进制(平台 wheel 由 release-sdks.yml 的"
+  echo "    pypi matrix 内嵌 zhuye-cli 产物后产出);本地仅验证元数据。"
 
   # TS 侧:npm ci 保证与 lock 一致,pack --dry-run 预览发布文件清单(不写文件)
   echo

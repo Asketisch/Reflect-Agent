@@ -42,6 +42,8 @@ node_modules/
 *.egg-info/
 # npm pack 的发布包预览(release-sdks.yml 的 npm job 产物)
 packing/
+# CI 打平台 wheel 时拷入的内嵌二进制,禁止入库
+sdks/python/zhuye/bin/
 
 # ── CI 日志转储(诊断产物,非源码)──
 github-ci-error/

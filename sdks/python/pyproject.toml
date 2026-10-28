@@ -18,14 +18,19 @@ Issues = "https://github.com/Asketisch/ZhuYe/issues"
 dev = ["pytest>=7.0"]
 
 [build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
 
-[tool.setuptools.packages.find]
-include = ["zhuye*"]
-
-[tool.setuptools.package-data]
-zhuye = ["py.typed"]
+# 平台 wheel:bindings=bin 要求 manifest 有个 bin target,maturin 才肯
+# 构建 —— 用最小 stub 满足形式;真正的平台二进制由 CI 编译 zhuye-cli
+# 后拷入 zhuye/bin/(python-source 内,自动成为包数据,单份携带),
+# 运行时经 zhuye.agent._bundled_binary 解析。避免 manifest 直指
+# zhuye-cli:maturin 会把 cargo 产物再装一份到 venv scripts(双份携带,
+# 且默认 debug 构建)。
+[tool.maturin]
+bindings = "bin"
+manifest-path = "bindings-stub/Cargo.toml"
+python-source = "."
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
