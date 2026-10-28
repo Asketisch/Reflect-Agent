@@ -194,7 +194,9 @@ mod tests {
         let path = out.metadata["task"]["output_path"]
             .as_str()
             .expect("output_path present");
-        assert!(path.ends_with("/1.output.md"), "got: {path}");
+        // Windows 上 join 用反斜杠,in-memory 占位路径断言做分隔符容忍。
+        let normalized = path.replace('\\', "/");
+        assert!(normalized.ends_with("/1.output.md"), "got: {path}");
     }
 
     #[tokio::test]
