@@ -532,8 +532,17 @@ jobs:
           retention-days: 30
 
       - name: 发布到 npm(OIDC + provenance,无 token)
+        # 幂等:重跑失败 job 时该版本可能已发布(npm 传播验证曾超窗,
+        # 但包实际已上线)—— 此时跳过发布,避免误红。
         if: startsWith(github.ref, 'refs/tags/v') && inputs.dry_run != true
-        run: (cd sdks/typescript && npm publish --provenance --access public)
+        run: |
+          cd sdks/typescript
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "zhuye@$VERSION" version >/dev/null 2>&1; then
+            echo "zhuye@$VERSION 已在 registry,跳过发布"
+          else
+            npm publish --provenance --access public
+          fi
 
       # 消费者视角验证:发布成功后从 npm registry 真实安装(zhuye 主包
       # 连同平台子包),断言内嵌二进制解析与执行。registry 有传播延迟,
