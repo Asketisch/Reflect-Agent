@@ -343,14 +343,20 @@ jobs:
         run: twine check sdks/python/dist/*
 
       # 安装冒烟:干净 venv 装本平台 wheel,断言内嵌二进制可解析且可执行。
+      # venv 可执行文件布局跨平台:POSIX bin/、Windows Scripts/。
       - name: 安装冒烟(wheel 内嵌二进制)
         shell: bash   # windows runner 默认 pwsh
         run: |
           set -euo pipefail
           SMOKE="$(mktemp -d)"
           python3 -m venv "$SMOKE/venv"
-          "$SMOKE/venv/bin/pip" install --quiet --disable-pip-version-check sdks/python/dist/*.whl
-          "$SMOKE/venv/bin/python" -c "import subprocess, zhuye; from zhuye.agent import _bundled_binary; p = _bundled_binary(); assert p, '内嵌二进制解析失败'; r = subprocess.run([p, '--version'], capture_output=True, text=True); assert r.returncode == 0, r.stderr; print('wheel smoke ok:', r.stdout.strip())"
+          if [ -f "$SMOKE/venv/Scripts/python.exe" ]; then   # Windows
+            VPY="$SMOKE/venv/Scripts/python.exe"
+          else
+            VPY="$SMOKE/venv/bin/python"
+          fi
+          "$VPY" -m pip install --quiet --disable-pip-version-check sdks/python/dist/*.whl
+          "$VPY" -c "import subprocess, zhuye; from zhuye.agent import _bundled_binary; p = _bundled_binary(); assert p, '内嵌二进制解析失败'; r = subprocess.run([p, '--version'], capture_output=True, text=True); assert r.returncode == 0, r.stderr; print('wheel smoke ok:', r.stdout.strip())"
 
       - name: 上传 wheel 产物
         uses: actions/upload-artifact@v4
