@@ -232,6 +232,8 @@ jobs:
           PKG_DIR="sdks/npm-platform/zhuye-${{ matrix.slug }}"
           mkdir -p "$PKG_DIR/bin"
           cp "binary/zhuye${{ matrix.exe }}" "$PKG_DIR/bin/zhuye${{ matrix.exe }}"
+          # artifact 往返不保留可执行位,补齐(npm pack 会记录文件权限)
+          chmod +x "$PKG_DIR/bin/zhuye${{ matrix.exe }}"
           node -e '
             const fs = require("node:fs");
             const [slug, version, os, cpu] = process.argv.slice(1);
@@ -260,8 +262,9 @@ jobs:
           retention-days: 30
 
       - name: 发布到 npm(OIDC + provenance)
+        # 新包 + provenance 要求显式 access public,否则 EUSAGE 拒绝
         if: startsWith(github.ref, 'refs/tags/v') && inputs.dry_run != true
-        run: (cd "sdks/npm-platform/zhuye-${{ matrix.slug }}" && npm publish --provenance)
+        run: (cd "sdks/npm-platform/zhuye-${{ matrix.slug }}" && npm publish --provenance --access public)
 
   # ─────────────────────────────────────────────────────────────────────
   # PyPI 平台 wheel:把对应二进制拷入 zhuye/bin/(python-source 内,自动
@@ -325,10 +328,13 @@ jobs:
           path: binary
 
       - name: 内嵌二进制到包目录
+        shell: bash   # windows runner 默认 pwsh,跑不了 bash 语法
         run: |
           set -euo pipefail
           mkdir -p sdks/python/zhuye/bin
           cp "binary/zhuye${{ matrix.exe }}" "sdks/python/zhuye/bin/zhuye${{ matrix.exe }}"
+          # artifact 往返不保留可执行位,补齐(POSIX 内嵌二进制必须可执行)
+          chmod +x "sdks/python/zhuye/bin/zhuye${{ matrix.exe }}"
 
       - name: 构建平台 wheel(maturin)
         run: (cd sdks/python && maturin build ${{ matrix.target != '' && format('--target {0}', matrix.target) || '' }} -o dist)
@@ -338,6 +344,7 @@ jobs:
 
       # 安装冒烟:干净 venv 装本平台 wheel,断言内嵌二进制可解析且可执行。
       - name: 安装冒烟(wheel 内嵌二进制)
+        shell: bash   # windows runner 默认 pwsh
         run: |
           set -euo pipefail
           SMOKE="$(mktemp -d)"
@@ -487,7 +494,7 @@ jobs:
 
       - name: 发布到 npm(OIDC + provenance,无 token)
         if: startsWith(github.ref, 'refs/tags/v') && inputs.dry_run != true
-        run: (cd sdks/typescript && npm publish --provenance)
+        run: (cd sdks/typescript && npm publish --provenance --access public)
 
       # 消费者视角验证:发布成功后从 npm registry 真实安装(zhuye 主包
       # 连同平台子包),断言内嵌二进制解析与执行。registry 有传播延迟,
