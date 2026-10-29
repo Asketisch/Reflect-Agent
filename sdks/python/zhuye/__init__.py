@@ -50,4 +50,4 @@ __all__ = [
     "EVENT_ID_NONE",
 ]
 
-__version__ = "0.1.4"
+__version__ = "0.1.5"
