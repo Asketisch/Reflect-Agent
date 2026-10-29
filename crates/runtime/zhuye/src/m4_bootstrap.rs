@@ -126,6 +126,9 @@ pub fn build_default_m4_with_prompts(
             if p.is_empty() { model.to_string() } else { p }
         };
         if registry.next_for(&spec, &[]).is_some() {
+            // 库门面传 default policy(compact.primary 为空)。
+            // 上面已经把 Compact primary 拷进 spec,摘要器会退回这个 model_name。
+            // 不读 compact.fallbacks。
             Arc::new(LlmSummarizer::new(
                 registry.clone(),
                 Arc::new(RoutingPolicy::default()),

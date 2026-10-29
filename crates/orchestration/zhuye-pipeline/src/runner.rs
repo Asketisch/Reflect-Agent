@@ -40,7 +40,7 @@ impl NodeStatus {
         matches!(self, NodeStatus::Success)
     }
 
-    /// 是否阻断流水线(`Abort` 策略下遇到即停)。
+    /// 是否为失败状态。两种失败策略都据此跳过下游,循环本身不因此结束。
     pub fn is_failure(&self) -> bool {
         matches!(self, NodeStatus::Failed(_))
     }

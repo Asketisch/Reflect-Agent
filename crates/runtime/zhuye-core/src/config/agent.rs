@@ -116,7 +116,8 @@ pub struct AgentConfig {
     pub telemetry: Option<Arc<zhuye_telemetry::TelemetrySink>>,
     /// v1.2 P1:目标模式 controller(参考 zcode `/goal` 设计)。
     /// `None` = 目标模式未激活;`/goal <obj>` 时由 submission_loop 构造。
-    /// turn 结束后 `on_turn_end` 自校验,未完成则推 steering 续作。
+    /// turn 结束后 `on_turn_end` 自校验。未完成则把续作文本推进
+    /// steering 队列,等下一条 `UserInput` 合并,不自行提交新回合。
     ///
     /// **共享槽**(`Arc<RwLock<..>>`):`AgentConfig` 会被 clone 进 submission
     /// loop(`let cfg_c = cfg.clone()`),普通字段在 clone 上改**回不到**

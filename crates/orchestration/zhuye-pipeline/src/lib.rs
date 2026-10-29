@@ -25,8 +25,9 @@
 //! - **DAG 自实现,不引入 petgraph**:Phase 5 plan 评估时优先考虑 petgraph,
 //!   但本 crate 仅需 `add_node` / `add_edge` / `topo_sort` / `cycle_detect` 四件套,
 //!   自实现 ~120 行足够,且零外部依赖(`Cargo.lock` 不会多一个 crate)。
-//! - **失败策略由 `Pipeline.failure_policy` 决定**:`Abort`(任一节点 Failed 即终止)
-//!   / `ContinueCollect`(跑完所有可执行的节点,失败的留标记)。
+//! - **失败策略不提前停循环**:失败节点的下游在 `Abort` 与 `ContinueCollect`
+//!   下都标 `skipped`,没有依赖的旁支照跑。差别只在总状态:
+//!   `Abort` → `failed`,`ContinueCollect` → `partial`。
 //! - **`TeamNodeRunner` 走 `SubAgentFactory::spawn` + drain**:与
 //!   `zhuye-subagent` 的 `SpawnedChild::collect_result_with_usage` 同源,
 //!   不重复实现 LLM 集成层。

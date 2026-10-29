@@ -1,14 +1,15 @@
 //! 角色 → spec slot 路由策略。
 //!
-//! `RoutingPolicy` 是 v1.0 多 Provider 路由的 per-role 路由核心:每个
-//! `Role`(`Main` / `Compact` / `Subagent(name)`)对应一个 `SpecSlot`,
-//! `SpecSlot` 描述一个 primary + 多个 fallback + 对应权重。`model_call`
-//! 入口用 `policy.resolve(Role::Main)` 拿到 slot.primary 作为初始
-//! spec,失败时由 `ModelRegistry::next_for` 在 pool 内自动切下一个
-//! credential,跨 credential 全失败后由 `model_call` 走 slot.fallbacks。
+//! `RoutingPolicy` 按角色放 spec 槽。真正被消费的是 `Role::Main`:
+//! `model_call` 用它的 primary 做起点,凭据失败后 `next_for` 在池内
+//! cooldown 切换,池耗尽再走该槽的 `fallbacks`。
 //!
-//! 全局 cooldown 默认值给 `model_call` 的 `classify_retry` 决策用
-//! (Phase 2 接),`max_attempts` 限制单轮总尝试次数,默认 16。
+//! `Role::Compact` 的 primary 在构造 `LlmSummarizer` 时拷进 `model_name`。
+//! 摘要调用只对这一个 spec 做 `next_for`,不读 compact 槽的 `fallbacks`。
+//! `Role::Subagent` 只有 `resolve` 的匹配臂,没有任何调用方传入;
+//! 子代理用启动时的主模型,或 `[subagent_providers]` 的独立 registry。
+//!
+//! `max_attempts` 限制单轮总尝试次数,默认 16。
 //!
 //! v1.0 Phase 3:从 `ReflectConfig.routing` TOML 段构建;v1.0 Phase 1
 //! 暂用 `RoutingPolicy::default()`,`main.primary` 为空时由 caller
@@ -16,16 +17,17 @@
 
 use std::time::Duration;
 
-/// 跨角色共享的路由策略。`Clone` 便宜(单 String + 几个 `Vec`),用
-/// `Arc<RoutingPolicy>` 共享给 `AgentConfig` / `LlmSummarizer` /
-/// `SubAgentFactory`。
+/// 跨角色共享的路由策略。`Clone` 便宜(单 String + 几个 `Vec`)。
+/// `model_call` 读 `main`;摘要器构造时读 `compact.primary`。
+/// `subagent` 槽会被配置填上,运行路径不读它。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoutingPolicy {
     /// 主对话 turn 的 spec 槽位。
     pub main: SpecSlot,
-    /// 压缩阶段(`LlmSummarizer`)的 spec 槽位;通常用便宜模型。
+    /// 压缩模型槽。构造摘要器时只拷贝 `primary`;`fallbacks` 不被摘要器读取。
     pub compact: SpecSlot,
-    /// 子 agent(`SubAgentFactory::spawn`)的 spec 槽位。
+    /// 配置会写入此槽。没有任何调用方 `resolve(Role::Subagent)`。
+    /// 子代理模型来自启动时传入的主模型,或 `[subagent_providers]`。
     pub subagent: SpecSlot,
     /// 角色名前缀,留扩展用;`Role::Subagent("researcher")` 配合
     /// `subagent_prefix = "subagent"` 形成 `"subagent/researcher"`。
@@ -93,9 +95,8 @@ pub enum Role {
 }
 
 impl RoutingPolicy {
-    /// 给定角色返回对应 slot 引用。`Subagent(_)` 统一走 `self.subagent`,
-    /// 真正的 per-spec 选择留给 `SpecSlot` 内部权重(Phase 4 可扩展为
-    /// per-subagent 独立 slot)。
+    /// 给定角色返回对应 slot 引用。`Subagent(_)` 映射到 `self.subagent`,
+    /// 但当前没有任何调用方传入 `Role::Subagent`。
     pub fn resolve(&self, role: Role) -> &SpecSlot {
         match role {
             Role::Main => &self.main,

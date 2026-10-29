@@ -5,9 +5,11 @@
 //!
 //! # 失败策略
 //!
-//! - [`FailurePolicy::Abort`] — 任一节点 Failed 即停,后续节点标 Skipped。
-//! - [`FailurePolicy::ContinueCollect`] — 失败的节点留 Failed 标记,但所有
-//!   可执行节点(上游全 Success 的)继续跑;最后报告里能看到每个节点的结局。
+//! 两种策略都不提前结束循环。失败节点的下游一律 `skipped`;没有依赖关系的
+//! 旁支照跑。差别只在总状态:
+//!
+//! - [`FailurePolicy::Abort`] — 存在失败节点时总状态为 `failed`。
+//! - [`FailurePolicy::ContinueCollect`] — 存在失败节点时总状态为 `partial`。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -59,10 +61,10 @@ pub struct PipelineReport {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FailurePolicy {
-    /// 任一节点 Failed 即停;后续节点标 `Skipped`。
+    /// 存在失败节点时总状态为 `failed`。下游仍按依赖跳过,循环不提前结束。
     #[default]
     Abort,
-    /// 失败的节点留 Failed 标记,所有可执行节点继续跑。
+    /// 存在失败节点时总状态为 `partial`。下游跳过规则与 `Abort` 相同。
     ContinueCollect,
 }
 

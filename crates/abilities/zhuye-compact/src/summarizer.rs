@@ -110,13 +110,13 @@ pub trait Summarizer: Send + Sync {
 /// 由 LLM 驱动的 summarizer。流式读取模型响应,拼接
 /// `ContentDelta` 事件,并解析出 `<summary>...</summary>`。
 ///
-/// v1.0 多 Provider 路由:持 `SharedModelRegistry` + `Arc<RoutingPolicy>`,
-/// `call_summarizer` 内部走 `Role::Compact` slot,失败时由
-/// `ModelRegistry::next_for` 在 pool 内自动切下一个 credential。
+/// 持 `SharedModelRegistry` + `Arc<RoutingPolicy>`。选模型时:
+/// `Role::Compact` 的 primary 非空就用它,否则用构造时传入的 `model_name`。
+/// 失败只在这一个 spec 的凭据池里 `next_for`,不读 compact 槽的 `fallbacks`。
 pub struct LlmSummarizer {
     registry: SharedModelRegistry,
     policy: Arc<RoutingPolicy>,
-    /// 初始 spec 起点(由 `Role::Compact` slot primary 提供)。
+    /// 构造时写入的 spec。`Compact` primary 为空时,调用用这个值。
     model_name: String,
     timeout: Duration,
     /// v1.2 P1:可选 telemetry sink,注入后每次摘要调用落 model-io 记录
@@ -134,9 +134,8 @@ impl std::fmt::Debug for LlmSummarizer {
 }
 
 impl LlmSummarizer {
-    /// v1.0 多 Provider 路由:`registry` + `policy` 注入,初次调用按
-    /// `Role::Compact` slot primary 派位 client。失败时由 registry
-    /// 自动在 pool 内切换下一个 credential。
+    /// `policy.compact.primary` 非空时,调用用它;否则用 `model_name`。
+    /// 失败只在该 spec 的凭据池里切换,不走 `fallbacks`。
     pub fn new(
         registry: SharedModelRegistry,
         policy: Arc<RoutingPolicy>,
@@ -253,10 +252,9 @@ async fn call_summarizer(
     };
     let cancel = CancellationToken::new();
 
-    // v1.0 多 Provider 路由:从 `Role::Compact` slot 拿初始 spec,
-    // 失败时由 `next_for` 在 pool 内切下一个 credential。简化版的
-    // failover 循环:`max_attempts = candidates * 2` 之内反复试,
-    // 速率限制 / Auth / 5xx 直接 mark_cooldown 切下一个。
+    // primary 非空用 Compact 槽,否则用构造时的 model_name。
+    // 下面的循环只对这一个 spec 做 next_for,不读 slot.fallbacks。
+    // 速率限制 / Auth / 5xx 会 mark_cooldown 再换池内下一条凭据。
     let initial_spec = s.policy.resolve(Role::Compact).primary.clone();
     let spec = if initial_spec.is_empty() {
         s.model_name.clone()

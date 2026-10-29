@@ -285,7 +285,8 @@ async fn run_linear_chain_success() {
     }
 }
 
-/// Abort 策略下,plan 失败时 prd / exec 被 skip。
+/// plan 失败时 prd / exec 被 skip(两种策略都跳过下游)。
+/// 本用例用默认 Abort,断言总状态是 `failed`。
 #[tokio::test]
 async fn run_abort_stops_after_first_failure() {
     let mut p = Pipeline::empty();

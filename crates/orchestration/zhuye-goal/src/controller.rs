@@ -6,7 +6,8 @@
 //! 3. 应用 3-strike 规则:verdict=blocked 时 `consecutive_blocked_turns += 1`,
 //!    达 BLOCKED_THRESHOLD 才允许 status=Blocked。
 //! 4. verdict=met 且命令通过 → status=Complete,退出目标模式。
-//! 5. 仍 Active → 生成 continuation prompt,返回让引擎推 steering 续作。
+//! 5. 仍 Active → 生成 continuation prompt。引擎把它推进 steering 队列,
+//!    等下一条用户输入合并,不自行提交新回合。
 //!
 //! controller 持 `Arc<RwLock<Option<GoalState>>>` + verifier LLM client +
 //! telemetry sink(写 goal.turn.verified 等事件)。
@@ -22,7 +23,8 @@ use crate::verifier::{VerifyError, run_verify_command, verify};
 
 /// 引擎在 turn 结束后调用,返回是否需要续作 + 续作 prompt。
 pub struct TurnResult {
-    /// 续作时的注入文本(None = 不注入,引擎据此判断是否终止)。
+    /// 续作文本。`Some` 时引擎推进 steering 队列,等下一条用户输入合并;
+    /// `None` 表示本轮不再产生续作文本。
     pub continuation_prompt: Option<String>,
     /// 本轮状态变化后的快照(TUI / telemetry 用)。
     pub status: GoalStatus,

@@ -185,8 +185,9 @@ pub(crate) fn bootstrap_m4(
     let subagent_registry = zhuye_recovery::SubagentRegistry::shared();
 
     // Compactor:在有 LLM 客户端时接上 LLM 摘要器。
-    // v1.0 多 Provider 路由:用 registry + policy 注入,`LlmSummarizer` 内
-    // 部走 `Role::Compact` slot 并在失败时跨 credential failover。
+    // 先把 Compact primary 拷进 spec(空则用主模型),再把这份真实 policy
+    // 和 spec 一起交给 LlmSummarizer。摘要器不读 compact.fallbacks,
+    // 失败只在该 spec 的凭据池里切换。
     let summarizer: Arc<dyn Summarizer> = {
         let policy = cfg.routing_policy_with(model);
         // 选 compact slot 的 primary 作 spec 起点(向后兼容 model)

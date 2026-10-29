@@ -792,7 +792,9 @@ pub async fn submission_loop(
                             match goal.on_turn_end(&last_assistant_text, tokens).await {
                                 Ok(tr) => {
                                     if let Some(prompt) = tr.continuation_prompt {
-                                        // 推 steering 续作(下个 turn 自动开)。
+                                        // 推进 steering 队列。下一条 UserInput
+                                        // 在 turn 边界 drain_all 时合并,
+                                        // 这里不自行提交新回合。
                                         let items = zhuye_goal::continuation_to_items(&prompt);
                                         steering_queue_clone.lock().push(
                                             crate::steering_queue::SteeringPriority::Attachment,

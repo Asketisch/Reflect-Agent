@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 pub enum GoalStatus {
     /// 活跃,agent 正在朝目标工作。
     Active,
-    /// 用户暂停(`/goal pause`)。不自动续作。
+    /// 用户暂停(`/goal pause`)。不再产生续作文本。
     Paused,
     /// 同一 blocker 连续 ≥ 3 个 goal turn → 标 blocked(防无限循环)。
     Blocked,
@@ -39,7 +39,7 @@ impl GoalStatus {
         }
     }
 
-    /// 是否是终止态(不再自动续作)。
+    /// 是否是终止态(不再产生续作文本)。
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,

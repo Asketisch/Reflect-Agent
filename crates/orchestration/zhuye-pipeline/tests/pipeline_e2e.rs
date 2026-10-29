@@ -1,8 +1,8 @@
 //! `zhuye-pipeline` 端到端集成测试 —— mock 4 节点流水线,验证:
 //!   1. TOML 配置解析 + 拓扑排序产出确定性顺序(plan → prd → exec → verify)。
 //!   2. 节点 outputs 沿 `depends_on` 边传递给下游。
-//!   3. `FailurePolicy::Abort` 在第一处失败后停止后续节点(transitively blocked)。
-//!   4. `FailurePolicy::ContinueCollect` 把所有节点跑完,整体 status = "partial"。
+//!   3. 失败节点的下游在两种策略下都 skipped(transitively blocked)。
+//!   4. 总状态:`Abort` 为 `failed`,`ContinueCollect` 为 `partial`。
 //!
 //! LLM 调用由 `MockSubAgentFactory` 替代 —— 每个节点返回一个常量
 //! `serde_json::Value`,以 `elapsed_ms` 与确定性 `result` 字段为主。
@@ -171,7 +171,8 @@ async fn linear_chain_e2e_4_nodes_in_order() {
 
 #[tokio::test]
 async fn abort_policy_stops_after_first_failure() {
-    // 中间节点 exec 失败,verify 应当被 transitive blocked(skipped)。
+    // 中间节点 exec 失败。下游 verify 被跳过;两种策略都这样,
+    // 本用例断言 Abort 的总状态是 failed。
     let runners: Vec<Arc<dyn NodeRunner>> = vec![
         Arc::new(FixedRunner {
             name: "plan".into(),
@@ -198,7 +199,7 @@ async fn abort_policy_stops_after_first_failure() {
     let report = pipeline.run(ctx()).await.expect("run");
 
     assert_eq!(report.status, "failed");
-    // verify 是 exec 的下游,Abort 下应被跳过。
+    // verify 是 exec 的下游,两种策略下都应被跳过。
     let verify = report.nodes.iter().find(|n| n.name == "verify").unwrap();
     assert_eq!(verify.status, "skipped");
     let exec = report.nodes.iter().find(|n| n.name == "exec").unwrap();

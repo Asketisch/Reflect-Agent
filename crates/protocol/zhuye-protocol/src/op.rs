@@ -119,7 +119,8 @@ pub enum Op {
     /// v1.2 P1:目标模式。设定目标 + 可选命令
     /// 校验 + token 预算。submission_loop 收到后构造 `GoalController` 放入
     /// `NodeContext.goal`,后续每轮 turn 结束由 controller 自校验(LM judge)
-    /// + 可选命令,未完成则推 steering 续作,完成则退出。
+    /// + 可选命令。未完成则把续作文本推进 steering 队列,等下一条
+    /// `UserInput` 合并,不自行提交新回合。完成则退出。
     EnterGoalMode {
         goal: String,
         #[serde(default)]
@@ -129,7 +130,7 @@ pub enum Op {
     },
 
     /// v1.2 P1:退出目标模式(`/goal clear`)。submission_loop 收到后清空
-    /// `NodeContext.goal`,停止自动续作。
+    /// `NodeContext.goal`,不再产生续作文本。
     ExitGoalMode,
 
     /// v1.6.1:提示词层管理(`/prompt` slash,TUI/GUI 选择提示词)。
