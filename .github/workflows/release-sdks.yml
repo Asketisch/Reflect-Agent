@@ -357,7 +357,7 @@ jobs:
             # zip 内可执行位、Mach-O x86_64 魔数);执行层由原生平台
             # 冒烟与真实用户覆盖。
             WHEEL=$(ls sdks/python/dist/*.whl)
-            python3 -c "import sys,zipfile; z=zipfile.ZipFile(sys.argv[1]); assert 'zhuye/bin/zhuye' in z.namelist(), '内嵌二进制缺失'; info=z.getinfo('zhuye/bin/zhuye'); mode=(info.external_attr>>16)&0o777; assert mode&0o111, '可执行位缺失:'+oct(mode); magic=z.read('zhuye/bin/zhuye')[:8]; assert magic==b'\xcf\xfa\xed\xfe\x07\x00\x00\x00', 'Mach-O 魔数异常:'+repr(magic); print('cross wheel 结构冒烟 OK')" "$WHEEL"
+            python3 -c "import sys,zipfile; z=zipfile.ZipFile(sys.argv[1]); assert 'zhuye/bin/zhuye' in z.namelist(), '内嵌二进制缺失'; info=z.getinfo('zhuye/bin/zhuye'); mode=(info.external_attr>>16)&0o777; assert mode&0o111, '可执行位缺失:'+oct(mode); magic=z.read('zhuye/bin/zhuye')[:8]; assert magic==b'\xcf\xfa\xed\xfe\x07\x00\x00\x01', 'Mach-O 魔数异常:'+repr(magic); print('cross wheel 结构冒烟 OK')" "$WHEEL"
           else
             SMOKE="$(mktemp -d)"
             python3 -m venv "$SMOKE/venv"
@@ -514,10 +514,10 @@ jobs:
               const { execFileSync } = await import('node:child_process');
               const out = execFileSync(bundled, ['--version']).toString().trim();
               console.log('tgz smoke ok: 内嵌二进制 --version =', out);
-            } else if (strict) {
-              throw new Error('tag 发布场景平台子包应已可解析');
             } else {
-              console.log('tgz smoke ok(dry-run,平台子包未发布,仅 import)');
+              // 平台子包可能尚未在 registry 传播 —— 由本 job 的
+              // 「发布后验证」步骤(10×20s 重试窗口)把关,此处不阻断。
+              console.log('tgz smoke: 平台子包未传播,仅 import(发布后验证会把关)');
             }
           "
         env:
