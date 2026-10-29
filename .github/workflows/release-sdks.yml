@@ -276,7 +276,6 @@ jobs:
     name: PyPI(${{ matrix.slug }})
     needs: binaries
     runs-on: ${{ matrix.runner }}
-    environment: pypi    # 须与 PyPI 侧 Trusted Publisher 登记的 environment 一致
     strategy:
       fail-fast: false
       matrix:
@@ -344,19 +343,32 @@ jobs:
 
       # 安装冒烟:干净 venv 装本平台 wheel,断言内嵌二进制可解析且可执行。
       # venv 可执行文件布局跨平台:POSIX bin/、Windows Scripts/。
+      # 安装冒烟:干净 venv 装本平台 wheel,断言内嵌二进制可解析且可执行。
+      # 交叉编译(darwin-x64)宿主 pip 拒装异构 wheel → 改结构断言:
+      # 二进制存在、zip 内可执行位、Mach-O 魔数 + x86_64 cputype;
+      # 执行层由原生平台冒烟与真实用户覆盖。
       - name: 安装冒烟(wheel 内嵌二进制)
         shell: bash   # windows runner 默认 pwsh
         run: |
           set -euo pipefail
-          SMOKE="$(mktemp -d)"
-          python3 -m venv "$SMOKE/venv"
-          if [ -f "$SMOKE/venv/Scripts/python.exe" ]; then   # Windows
-            VPY="$SMOKE/venv/Scripts/python.exe"
+          WHEEL=$(ls sdks/python/dist/*.whl)
+          if [ -n "${{ matrix.target }}" ]; then
+            # 交叉编译:宿主 pip 拒装异构 wheel → 结构断言(二进制存在、
+            # zip 内可执行位、Mach-O x86_64 魔数);执行层由原生平台
+            # 冒烟与真实用户覆盖。
+            WHEEL=$(ls sdks/python/dist/*.whl)
+            python3 -c "import sys,zipfile; z=zipfile.ZipFile(sys.argv[1]); assert 'zhuye/bin/zhuye' in z.namelist(), '内嵌二进制缺失'; info=z.getinfo('zhuye/bin/zhuye'); mode=(info.external_attr>>16)&0o777; assert mode&0o111, '可执行位缺失:'+oct(mode); magic=z.read('zhuye/bin/zhuye')[:8]; assert magic==b'\xcf\xfa\xed\xfe\x07\x00\x00\x00', 'Mach-O 魔数异常:'+repr(magic); print('cross wheel 结构冒烟 OK')" "$WHEEL"
           else
-            VPY="$SMOKE/venv/bin/python"
+            SMOKE="$(mktemp -d)"
+            python3 -m venv "$SMOKE/venv"
+            if [ -f "$SMOKE/venv/Scripts/python.exe" ]; then   # Windows
+              VPY="$SMOKE/venv/Scripts/python.exe"
+            else
+              VPY="$SMOKE/venv/bin/python"
+            fi
+            "$VPY" -m pip install --quiet --disable-pip-version-check sdks/python/dist/*.whl
+            "$VPY" -c "import subprocess, zhuye; from zhuye.agent import _bundled_binary; p = _bundled_binary(); assert p, '内嵌二进制解析失败'; r = subprocess.run([p, '--version'], capture_output=True, text=True); assert r.returncode == 0, r.stderr; print('wheel smoke ok:', r.stdout.strip())"
           fi
-          "$VPY" -m pip install --quiet --disable-pip-version-check sdks/python/dist/*.whl
-          "$VPY" -c "import subprocess, zhuye; from zhuye.agent import _bundled_binary; p = _bundled_binary(); assert p, '内嵌二进制解析失败'; r = subprocess.run([p, '--version'], capture_output=True, text=True); assert r.returncode == 0, r.stderr; print('wheel smoke ok:', r.stdout.strip())"
 
       - name: 上传 wheel 产物
         uses: actions/upload-artifact@v4
@@ -365,12 +377,6 @@ jobs:
           path: sdks/python/dist/*
           if-no-files-found: error
           retention-days: 30
-
-      - name: 发布到 PyPI(OIDC,无 token)
-        if: startsWith(github.ref, 'refs/tags/v') && inputs.dry_run != true
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: sdks/python/dist
 
   # ─────────────────────────────────────────────────────────────────────
   # sdist(源码分发,平台无关):保留 PyPI 元数据连续性;不含二进制,
@@ -381,7 +387,6 @@ jobs:
     name: PyPI(sdist)
     needs: binaries
     runs-on: ubuntu-latest
-    environment: pypi
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -408,16 +413,44 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: 发布到 PyPI(OIDC,无 token)
-        if: startsWith(github.ref, 'refs/tags/v') && inputs.dry_run != true
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: sdks/python/dist
-
   # ─────────────────────────────────────────────────────────────────────
   # npm 主包:发布前动态注入 optionalDependencies(精确 pin 五个平台
   # 子包,版本随主包),源码 package.json 不维护该字段。needs
   # npm-platform 保证消费方安装时平台子包已可解析。
+  # ─────────────────────────────────────────────────────────────────────
+  # PyPI 统一发布:全部平台 wheel + sdist 由单一 x64 job 一次上传。
+  # gh-action-pypi-publish 是 docker action,linux-arm64 runner 上
+  # exec format error(v0.1.3 实证);集中发布也让一次 workflow 只做
+  # 一轮 PyPI 上传事务,失败重跑面最小。
+  # ─────────────────────────────────────────────────────────────────────
+  pypi-publish:
+    name: PyPI(统一发布)
+    needs: [pypi, pypi-sdist]
+    runs-on: ubuntu-latest
+    environment: pypi    # 须与 PyPI 侧 Trusted Publisher 登记的 environment 一致
+    steps:
+      - name: 下载全部 PyPI 产物
+        uses: actions/download-artifact@v4
+        with:
+          pattern: pypi-*
+          merge-multiple: true
+          path: dist
+
+      - name: 产物清单核对
+        run: |
+          set -euo pipefail
+          pip install --quiet twine
+          ls -la dist/
+          twine check dist/*
+          # 5 平台 wheel + 1 sdist
+          test "$(ls dist/* | wc -l)" -ge 6 || { echo "FAIL: wheel/sdist 数量不足"; exit 1; }
+
+      - name: 发布到 PyPI(OIDC,无 token)
+        if: startsWith(github.ref, 'refs/tags/v') && inputs.dry_run != true
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+
   # ─────────────────────────────────────────────────────────────────────
   npm:
     name: npm(主包)
