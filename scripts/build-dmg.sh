@@ -64,17 +64,26 @@ extract_version() {
 DO_REBUILD=false
 DO_OPEN=false
 CUSTOM_BINARY=""
+OVERRIDE_TRIPLE=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --rebuild)        DO_REBUILD=true;   shift ;;
         --open)           DO_OPEN=true;      shift ;;
         --binary)         CUSTOM_BINARY="${2:?--binary needs a path}"; shift 2 ;;
         --binary=*)       CUSTOM_BINARY="${1#*=}";                       shift ;;
+        --triple)         OVERRIDE_TRIPLE="${2:?--triple needs a value}"; shift 2 ;;
+        --triple=*)       OVERRIDE_TRIPLE="${1#*=}";                       shift ;;
         -h|--help)
             sed -n '2,42p' "$0"; exit 0 ;;
         *)  echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
+
+# 交叉编译命名:--triple 覆盖默认的 <uname -m>-apple-darwin,仅影响
+# DMG 包名(如 arm64 runner 上编 x86_64 产物)。
+if [[ -n "${OVERRIDE_TRIPLE}" ]]; then
+    TARGET_TRIPLE="${OVERRIDE_TRIPLE}"
+fi
 
 # 确定源二进制 ────────────────────────────────────────────────────────
 if [[ -n "${CUSTOM_BINARY}" ]]; then

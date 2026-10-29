@@ -128,24 +128,33 @@ jobs:
           - slug: darwin-arm64
             runner: macos-14
             exe: ''
+            target: ''
+          # macos-13(Intel)runner 已淘汰、无限排队 —— x64 改在 arm64
+          # runner 上交叉编译(macOS 双架构交叉是一等公民)。
           - slug: darwin-x64
-            runner: macos-13
+            runner: macos-14
             exe: ''
+            target: 'x86_64-apple-darwin'
           - slug: linux-x64
             runner: ubuntu-22.04
             exe: ''
+            target: ''
           - slug: linux-arm64
             runner: ubuntu-24.04-arm
             exe: ''
+            target: ''
           - slug: win32-x64
             runner: windows-latest
             exe: '.exe'
+            target: ''
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Cache cargo registry + target
         uses: Swatinem/rust-cache@v2
@@ -153,13 +162,13 @@ jobs:
           workspaces: '. -> target'
 
       - name: 编译 zhuye-cli(release)
-        run: cargo build --release -p ${{ env.ZHUYE_CLI_PACKAGE }}
+        run: cargo build --release -p ${{ env.ZHUYE_CLI_PACKAGE }} ${{ matrix.target != '' && format('--target {0}', matrix.target) || '' }}
 
       - name: 上传二进制产物
         uses: actions/upload-artifact@v4
         with:
           name: binary-${{ matrix.slug }}
-          path: target/release/zhuye${{ matrix.exe }}
+          path: target/${{ matrix.target }}${{ matrix.target != '' && '/' || '' }}release/zhuye${{ matrix.exe }}
           if-no-files-found: error
           retention-days: 30
 
@@ -272,18 +281,25 @@ jobs:
           - slug: darwin-arm64
             runner: macos-14
             exe: ''
+            target: ''
+          # 与 binaries 矩阵同理:macos-13 已淘汰,x64 交叉编译;
+          # maturin 按 --target 自动给出 macosx_10_12_x86_64 平台 tag。
           - slug: darwin-x64
-            runner: macos-13
+            runner: macos-14
             exe: ''
+            target: 'x86_64-apple-darwin'
           - slug: linux-x64
             runner: ubuntu-22.04
             exe: ''
+            target: ''
           - slug: linux-arm64
             runner: ubuntu-24.04-arm
             exe: ''
+            target: ''
           - slug: win32-x64
             runner: windows-latest
             exe: '.exe'
+            target: ''
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -296,6 +312,8 @@ jobs:
       # maturin 编译 bindings-stub 需要本机 cargo
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - name: 安装构建工具
         run: pip install --quiet maturin twine
@@ -313,7 +331,7 @@ jobs:
           cp "binary/zhuye${{ matrix.exe }}" "sdks/python/zhuye/bin/zhuye${{ matrix.exe }}"
 
       - name: 构建平台 wheel(maturin)
-        run: (cd sdks/python && maturin build -o dist)
+        run: (cd sdks/python && maturin build ${{ matrix.target != '' && format('--target {0}', matrix.target) || '' }} -o dist)
 
       - name: 元数据检查(twine check)
         run: twine check sdks/python/dist/*

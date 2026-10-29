@@ -42,8 +42,11 @@ jobs:
         include:
           - os: macos-arm64
             runner: macos-14
+          # macos-13(Intel)runner 已淘汰、无限排队 —— x64 改在 arm64
+          # runner 上交叉编译(build.sh --target,DMG 命名同步)。
           - os: macos-x86_64
-            runner: macos-13
+            runner: macos-14
+            cross-target: x86_64-apple-darwin
           - os: linux
             runner: ubuntu-22.04
           - os: windows
@@ -55,6 +58,8 @@ jobs:
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.cross-target }}
 
       - name: Cache cargo registry + target
         uses: Swatinem/rust-cache@v2
@@ -64,7 +69,7 @@ jobs:
       - name: Build + package (unix)
         if: runner.os != 'Windows'
         shell: bash
-        run: scripts/build.sh --dist
+        run: scripts/build.sh --dist ${{ matrix.cross-target != '' && format('--target={0}', matrix.cross-target) || '' }}
 
       - name: Build + package (windows)
         if: runner.os == 'Windows'

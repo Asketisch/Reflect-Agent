@@ -185,7 +185,10 @@ if $DO_DIST; then
     case "$PLATFORM" in
         macos)
             echo "→ 打包 DMG(macOS)..."
-            run "${REPO_ROOT}/scripts/build-dmg.sh --binary '${BIN_PATH}'"
+            DMG_ARGS=(--binary "'${BIN_PATH}'")
+            # 交叉编译时同步 DMG 命名(否则包名仍是宿主架构)。
+            [[ -n "${TARGET_OVERRIDE}" ]] && DMG_ARGS+=(--triple "${TARGET_OVERRIDE}")
+            run "${REPO_ROOT}/scripts/build-dmg.sh ${DMG_ARGS[*]}"
             ;;
         linux)
             echo "→ 打包 tar.gz(Linux)..."
