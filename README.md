@@ -147,6 +147,10 @@ provider = "openai"
 # 与 .zhuye/agents/*.md 的 tools / disallowed_tools 同语义：
 # tools = ["read", "grep"]
 # disallowed_tools = ["bash", "write", "web_search"]
+# 可选：开启内置技能包（默认关闭）。框架层不向会话注入 15 个编码向
+# 内置 skill（code-review / commit-helper 等）；workspace / home 的
+# .zhuye/skills/ 文件技能不受影响：
+# bundled_skills = true
 
 [openai]
 api_key = ""                                  # 免 key 端点可留空

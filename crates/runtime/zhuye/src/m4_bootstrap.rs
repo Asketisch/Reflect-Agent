@@ -97,12 +97,19 @@ pub fn build_default_m4_with_prompts(
     let active_def = Arc::new(active_def);
 
     // ── Skills ────────────────────────────────────────────────
+    // 配置加载上提到此处:skills 开关与 compactor 都读同一份 config。
+    let cfg = zhuye_config::load_default();
     let ws_skills = workspace.join(".zhuye").join("skills");
     let home_skills = home_path.join(".zhuye").join("skills");
     let skill_dirs: Vec<&std::path::Path> = vec![&ws_skills, &home_skills];
     let skills_catalog = SkillsCatalog::new();
     skills_catalog.scan(&skill_dirs);
-    zhuye_skills::merge_bundled(&skills_catalog);
+    // 内置 skill 包(15 项编码技能)**默认关闭**,`[active] bundled_skills
+    // = true` 显式开启 —— 与 exec bootstrap 路径语义一致,框架层不向会话
+    // 注入应用层偏好的目录死文本。
+    if cfg.active.bundled_skills {
+        zhuye_skills::merge_bundled(&skills_catalog);
+    }
     let skills_catalog = Arc::new(skills_catalog);
 
     // ── Memory:CompositeMemoryStore(Session 内存 + Project/User 文件) ──
@@ -116,7 +123,7 @@ pub fn build_default_m4_with_prompts(
     };
 
     // ── Compactor(LlmSummarizer 优先,无 provider 退化 Noop) ──
-    let cfg = zhuye_config::load_default();
+    // config 已在 Skills 段前加载,此处直接复用。
     // 用**已解析**的 model 构建 routing policy:`model = "free"` 这类动态值
     // 在调用方已解析成真实 id,同步的 `cfg.routing_policy()` 拿到的仍是占位串。
     let policy = cfg.routing_policy_with(model);

@@ -583,6 +583,22 @@ fn model_section_absent_by_default() {
     assert!(cfg.model.is_none());
 }
 
+/// `[active] bundled_skills` 缺省 → false:内置 skill 包默认关闭,
+/// 框架层不向会话注入编码向目录文本。
+#[test]
+fn bundled_skills_disabled_by_default() {
+    let cfg: ReflectConfig = toml::from_str("[active]\nprovider = \"anthropic\"\n").unwrap();
+    assert!(!cfg.active.bundled_skills);
+}
+
+/// `[active] bundled_skills = true` 显式开启 → 合入 15 项内置 skill。
+#[test]
+fn bundled_skills_opt_in_parses() {
+    let cfg: ReflectConfig =
+        toml::from_str("[active]\nprovider = \"anthropic\"\nbundled_skills = true\n").unwrap();
+    assert!(cfg.active.bundled_skills);
+}
+
 /// `[model]` 段解析 context_window + micro-USD 计价。
 #[test]
 fn model_section_parses_context_window_and_pricing() {

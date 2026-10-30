@@ -171,11 +171,13 @@ pub(crate) fn bootstrap_m4(
     let skill_dirs: Vec<&std::path::Path> = vec![&ws_skills, &home_skills];
     let skills_catalog = SkillsCatalog::new();
     skills_catalog.scan(&skill_dirs);
-    // v1.x:合并内置 skill 包(code-review / commit-helper 等,编译期嵌入)。
-    // 此前 `merge_bundled` 是孤儿 —— 实现完整但从未调用,导致 15+ 内置
-    // skill 对用户不可见。同名 skill 以文件目录扫描结果优先(`merge_bundled`
-    // 内部 `get().is_none()` 守卫),用户自定义覆盖内置。
-    zhuye_skills::merge_bundled(&skills_catalog);
+    // 内置 skill 包(15 项编码技能,编译期嵌入)**默认关闭**:框架层不向
+    // 会话注入应用层偏好的目录死文本,`[active] bundled_skills = true` 显式
+    // 开启。同名 skill 以文件目录扫描结果优先(`merge_bundled` 内部
+    // `get().is_none()` 守卫),用户自定义始终覆盖内置。
+    if cfg.active.bundled_skills {
+        zhuye_skills::merge_bundled(&skills_catalog);
+    }
     let skills_catalog = Arc::new(skills_catalog);
 
     // 注册 `load_skill` 工具。

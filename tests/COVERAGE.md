@@ -31,6 +31,7 @@
 | 基础通信(握手/单轮/多轮/事件流/终态/工具参数增量) | D1–D5、D9 | cli_core | K1–K2、K5 | ✅ | L1–L4 |
 | 并发与路由 | S1–S3 | — | — | — | — |
 | 内置工具调用与 OS 沙箱 | T1–T2、T8–T10 | tools_drive | — | ✅ | T1–T3 |
+| 技能面(内置包开关 / 文件 skill 激活) | SK1–SK3 | integrations | — | ✅ | — |
 | 远程工具(注册/往返/失败/超时) | T3–T4、X4 | serve_ops | K3、K8 | ✅ | — |
 | 审批交互(approve / deny / bubble / shell 规则) | T5–T7 | integrations | — | ✅ | — |
 | 会话状态 Op(19 Op) | A1–A12 | serve_ops | K4、K9 | ✅ | — |
@@ -85,6 +86,15 @@
 - **T8** OS 沙箱拒绝 workspace 外写入时,错误标记与非零退出码正确返回。
 - **T9** macOS Seatbelt 按真实 HOME 拦截假密钥读取,不把星号当成 subpath 通配符。
 - **T10** stdout/stderr 同时截断后,`tool_call_end` 仍返回失败、原始退出码与捕获字节数。
+
+### SK 组 技能面(`test_skills.py`)
+- **SK1** 默认配置(不写 `[active] bundled_skills`)→ 内置 skill 不在
+  catalog:`load_skill("code-review")` → `tool_call_end(is_error=true, 含
+  skill not found: code-review)`,turn 不死。
+- **SK2** `[active] bundled_skills = true` → 同一调用成功,`tool_call_end`
+  输出含正文标记(`thorough code reviewer`)。
+- **SK3** 默认配置下 workspace 文件 skill(`.zhuye/skills/file-skill/`)
+  依旧可加载(正文标记命中)—— 开关只作用于编译期内置包。
 
 ### A 组 会话状态 Op(`test_serve.py`)
 `user_input`+`thread_settings`(四字段) / `set_effort`(静默) / 权限模式切换
@@ -181,7 +191,9 @@ Result + rounds_completed)/ 任务与团队(create → ls)/ 流水线错误路�
   坏 server → `mcp_server_failed`)+ in-turn 调用(`mcp_tool_invoked` +
   `tool_call_end` 回传 echo 输出);能力层 T5/T6 另覆盖审批链路。
 - **skill**:工作区 `SKILL.md` 扫描 + `load_skill` 激活(正文 + 激活工具
-  列表);不存在的 skill 优雅报错。
+  列表);不存在的 skill 优雅报错。内置 skill 包默认关闭
+  (`[active] bundled_skills`,能力层 test_skills.py:SK1 默认拒载 / SK2 开启后
+  正文可激活 / SK3 文件 skill 不受开关影响)。
 - **notes**:`add_session_note` → `~/.zhuye/session-notes/<thread>.jsonl`
   落盘(内容 + JSON 合法性)。
 - **bubble 审批**:Bubble 模式下 Prompt 权限工具 → `permission_bubble`
@@ -294,12 +306,13 @@ Result + rounds_completed)/ 任务与团队(create → ls)/ 流水线错误路�
 |---|---|
 | `functional/test_serve.py` | 22 条(D6 + S3 + A13) |
 | `functional/test_tools.py` | 11 条(T1–T10) |
+| `functional/test_skills.py` | 3 条(SK1–SK3) |
 | `functional/test_recovery.py` | 11 条(R5 + X6) |
 | `functional/test_persistence.py` | 8 条(P1–P5) |
 | `functional/test_orchestration.py` | 5 条(O5) |
 | `functional/test_cli.py` | 6 条(C6) |
 | `functional/test_bugfixes.py` | 12 条(缺陷修复回归) |
-| **能力覆盖层合计** | **75 条** |
+| **能力覆盖层合计** | **78 条** |
 | `live/test_live_basic.py` | 4 条(L1–L4) |
 | `live/test_live_tools.py` | 3 条(T1–T3) |
 | `live/test_live_persistence.py` | 3 条(P1–P2、X1) |

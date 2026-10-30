@@ -215,6 +215,15 @@ pub struct ActiveSection {
     /// agent 定义层的同名列表**取并集**后过滤。空 = 无额外排除。
     #[serde(default)]
     pub disallowed_tools: Vec<String>,
+    /// 内置 skill 包开关(`[active] bundled_skills`)。**默认 false(关闭)**:
+    /// 框架层不为会话注入 15 个编码向内置 skill(code-review / commit-helper
+    /// 等),ephemeral 块因此不再每 turn 携带 ~1.4KB 的目录死文本 —— 本仓库
+    /// 定位纯框架层,内置技能属应用层偏好,交由使用者显式开启。写
+    /// `[active] bundled_skills = true` 恢复合入;workspace / home 的文件
+    /// skill(`.zhuye/skills/`)与插件 skill 不受此开关影响,同名时仍以
+    /// 文件目录扫描结果优先。
+    #[serde(default)]
+    pub bundled_skills: bool,
 }
 
 // ── 沙箱 / 提问 / 模型 / 特性开关 / 目标 ────
