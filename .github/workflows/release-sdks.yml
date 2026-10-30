@@ -251,7 +251,20 @@ jobs:
           ' "${{ matrix.slug }}" "$VERSION" "${{ matrix.os }}" "${{ matrix.cpu }}" "$PKG_DIR/package.json"
 
       - name: 发布包预览(publish --dry-run)
-        run: (cd "sdks/npm-platform/zhuye-${{ matrix.slug }}" && npm publish --dry-run)
+        # 幂等:重跑场景下版本可能已发布 —— publish --dry-run 会真实
+        # 校验 registry 并报「cannot publish over」,此时以 npm view 查到
+        # 该版本为准视为通过,让后续幂等发布步骤接手。
+        run: |
+          cd "sdks/npm-platform/zhuye-${{ matrix.slug }}"
+          VERSION=$(node -p "require('./package.json').version")
+          if ! npm publish --dry-run; then
+            if npm view "zhuye-${{ matrix.slug }}@$VERSION" version >/dev/null 2>&1; then
+              echo "zhuye-${{ matrix.slug }}@$VERSION 已在 registry,跳过 dry-run 校验(重跑场景)"
+            else
+              echo "FAIL: dry-run 校验失败且版本未在 registry" >&2
+              exit 1
+            fi
+          fi
 
       - name: 上传发布包预览
         uses: actions/upload-artifact@v4
@@ -262,9 +275,17 @@ jobs:
           retention-days: 30
 
       - name: 发布到 npm(OIDC + provenance)
-        # 新包 + provenance 要求显式 access public,否则 EUSAGE 拒绝
+        # 新包 + provenance 要求显式 access public,否则 EUSAGE 拒绝。
+        # 幂等:与主包同理,重跑时已发布版本跳过,避免误红。
         if: startsWith(github.ref, 'refs/tags/v') && inputs.dry_run != true
-        run: (cd "sdks/npm-platform/zhuye-${{ matrix.slug }}" && npm publish --provenance --access public)
+        run: |
+          cd "sdks/npm-platform/zhuye-${{ matrix.slug }}"
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "zhuye-${{ matrix.slug }}@$VERSION" version >/dev/null 2>&1; then
+            echo "zhuye-${{ matrix.slug }}@$VERSION 已在 registry,跳过发布"
+          else
+            npm publish --provenance --access public
+          fi
 
   # ─────────────────────────────────────────────────────────────────────
   # PyPI 平台 wheel:把对应二进制拷入 zhuye/bin/(python-source 内,自动
@@ -492,7 +513,20 @@ jobs:
         run: (cd sdks/typescript && mkdir -p packing && npm pack --pack-destination packing)
 
       - name: 发布清单校验(publish --dry-run)
-        run: (cd sdks/typescript && npm publish --dry-run)
+        # 幂等:重跑场景下版本可能已发布 —— publish --dry-run 会真实
+        # 校验 registry 并报「cannot publish over」,此时以 npm view 查到
+        # 该版本为准视为通过,让后续幂等发布步骤接手。
+        run: |
+          cd sdks/typescript
+          VERSION=$(node -p "require('./package.json').version")
+          if ! npm publish --dry-run; then
+            if npm view "zhuye@$VERSION" version >/dev/null 2>&1; then
+              echo "zhuye@$VERSION 已在 registry,跳过 dry-run 校验(重跑场景)"
+            else
+              echo "FAIL: dry-run 校验失败且版本未在 registry" >&2
+              exit 1
+            fi
+          fi
 
       # 安装冒烟:dry-run 时平台子包在 registry 上尚不存在此版本,
       # optional 安装被静默容忍 → 只断言 SDK import;tag 正式发布时
@@ -546,7 +580,8 @@ jobs:
 
       # 消费者视角验证:发布成功后从 npm registry 真实安装(zhuye 主包
       # 连同平台子包),断言内嵌二进制解析与执行。registry 有传播延迟,
-      # 带重试;npm 新版本传播可超过 90s(v0.1.1 实证),窗口 10×20s。
+      # 带重试;npm CDN 的 packument 传播实测可超过 200s(v0.1.1 实证
+      # >90s、v0.1.6 实证 >200s 仍未可见),窗口扩到 30×20s(10 分钟)。
       - name: 发布后验证(从 registry 安装)
         if: startsWith(github.ref, 'refs/tags/v') && inputs.dry_run != true
         run: |
@@ -556,12 +591,17 @@ jobs:
           cd "$SMOKE"
           npm init -y >/dev/null
           ok=""
-          for i in 1 2 3 4 5 6 7 8 9 10; do
+          for i in $(seq 1 30); do
             if npm install "zhuye@$TS_VER" --no-fund --no-audit; then ok=1; break; fi
-            echo "registry 尚未可见,20s 后重试($i/10)…"
+            echo "registry 尚未可见,20s 后重试($i/30)…"
             sleep 20
           done
-          if [ -z "$ok" ]; then echo "FAIL: zhuye@$TS_VER 未在 registry 可见"; exit 1; fi
+          if [ -z "$ok" ]; then
+            echo "FAIL: zhuye@$TS_VER 在重试窗口内未在 registry 可见。"
+            echo "注意:发布步骤是幂等的,包很可能已实际上线(CDN 传播滞后)——"
+            echo "确认 npmjs.com 包页后,直接重跑本 job 即可,tag 不必重打。"
+            exit 1
+          fi
           node --input-type=module -e "
             const m = await import('zhuye');
             if (typeof m.ZhuyeAgent !== 'function') throw new Error('ZhuyeAgent 导出缺失');
