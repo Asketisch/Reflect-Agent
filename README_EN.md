@@ -1,391 +1,224 @@
 # ZhuYe
 
-**English** | [简体中文](README.md)
+ZhuYe is an agent harness you embed in your own product. One Rust engine can be linked in-process, driven for a single turn with `zhuye exec`, or kept alive as a stdio JSONL session with `zhuye serve` and the [Python](sdks/python/zhuye/agent.py) / [TypeScript](sdks/typescript/src/agent.ts) SDKs. The `zhuye` binary in this repository has no TUI subcommand. A comment in the workspace [Cargo.toml](Cargo.toml) points the interactive UI at [Reflect-TUI](https://cnb.cool/Demon1019/Reflect-CLI). That comment is not a runtime dispatch.
 
-> An AI agent runtime **framework** written in Rust: a 33-crate workspace
-> (6-layer architecture), a 4-node StateGraph engine, 23 built-in tools,
-> 10 hook events, multiple LLM providers, MCP / LSP integration, and JSONL
-> rollout persistence.
->
-> This repository is a **pure framework layer**: the primary interfaces are
-> the `zhuye` library facade (Builder + 60+ re-exports) and the Rust /
-> Python / TypeScript integration entry points; `zhuye-cli` is just a thin
-> headless entry produced alongside it (a single `zhuye` binary, including
-> the `serve` subcommand used by the SDKs).
->
-> Script ecosystems (Python / TS) can embed the framework directly via
-> `zhuye serve` + the official SDKs: spawn the binary, speak the JSONL
-> stdio protocol, and **register local functions as custom tools the LLM
-> can call** — the Rust engine handles inference and orchestration while
-> business logic stays in the host language.
+Use Claude Code, Codex, OpenCode, or Pi when you want to sit in a terminal and write code. Use ZhuYe when you want that engine inside your own service, script, or interface.
 
-**0.0.1** · 33 crates · **2200+ tests** · Apache-2.0
+中文：[README.md](README.md).
 
-## Differentiators
+## Where it differs from the four
 
-Most agent tools in this space ship as a **black-box CLI**: a single
-executable with an opaque internal loop that users can only drive as a
-terminal consumer. ZhuYe takes the opposite stance — an **embeddable,
-auditable, extensible agent runtime framework**:
+The loop is the same shape everywhere: read context, call a model, run tools, decide whether to stop. The difference is what you are buying.
 
-| Dimension | Typical agent CLI | ZhuYe |
-|-----------|-------------------|---------|
-| Product form | Single black-box executable, only "usable" | **Pure framework + multilingual entry points**: the `zhuye` Rust lib facade (Builder + 60+ re-exports), PyO3 bindings, `zhuye serve` + official Python / TS SDKs; the CLI is a thin add-on entry you can embed in your own product |
-| Control flow | Opaque internal loop, no intervention points | **Explicit 4-node StateGraph** (PreLoop → ModelCall → ToolExec → CheckStop): hand-written transitions, auditable; a Stop hook can veto completion and force the turn to continue |
-| Client protocol | Interaction logic locked inside the process | **Frozen Submission / Op / EventMsg wire protocol (v0)**: any client in any language drives the agent over the same protocol; adding variants never breaks existing SDKs |
-| Custom tools | Tools must live inside the CLI process or behind a separate MCP server | **Host-language functions registered directly as LLM tools**: the core dispatches execution requests; Python / TS handlers run locally and reply — tool code never enters the Rust process |
-| Tool-surface trimming | Fixed toolset, take it or leave it | **Config-driven tool trimming**: agent-definition frontmatter (`tools` allowlist / `disallowed_tools` denylist / `readonly`), `allowed_tools` per `[[subagents]]` in config.toml, or ToolRegistry add/remove in code; trimmed tools' schemas are never sent to the LLM — smaller tool surface, fewer misfires, fewer tokens |
-| Resident sessions | Cold start per invocation | **`zhuye serve` resident session service**: one process = one resident AgentThread, in-memory state shared across turns + resume; SDKs embed it as a subprocess |
-| Multi-agent | Ad-hoc scripting | **First-class orchestration layer**: subagents (Tool-per-Agent), sequential / concurrent discussion, tasks / teams, DAG pipelines, goal mode |
-| Context management | Truncation or a single summarization pass | **4-tier compaction escalation**: microcompact → smart_prune → LLM summarize, upgraded stepwise by token threshold |
-| Extension surface | Scattered flags and config files | **hooks (8 events × 7 decisions) + Tool trait + MCP + LSP + plugins + skills** — layered, independent extension mechanisms |
-| Session auditing | Scattered logs, hard to replay | **JSONL rollout persistence** + resume + session index + full LLM call traces on disk |
-| Security boundary | Per-action human confirmation | **Permissions rule engine + multi-level sandbox + Plan mode** (write tools blocked until research completes and `ExitPlanMode` is called) |
-| Automation / CI | Parsing natural-language output | **JSONL stdout + stderr logs** are pipe-friendly (`zhuye exec \| jq`); built-in mock provider keeps examples / e2e / SDK tests **fully offline** |
-| Runtime dependency | Depends on a host language runtime | **Single Rust binary** (MSRV 1.85), no external runtime |
+| Choice | Claude Code | Codex | OpenCode | Pi | ZhuYe |
+| --- | --- | --- | --- | --- | --- |
+| Shape | A coding assistant you sit inside. The prompt is written for Claude | A coding assistant you sit inside. Commands go into an OS sandbox by default, and the models lean OpenAI | An open terminal product. Swap providers. The client and the resident server are separate | A tiny loop with four built-in tools. Anything else is a TypeScript extension you add | An engine. Link the library, or speak stdio JSONL to `zhuye serve`. This binary has no TUI subcommand |
+| Changing models | A different model still gets the Claude prompt | A different model still gets the OpenAI prompt | A different endpoint, still one agent prompt | One very short prompt for every model | Built-in prompts stack as `default`, then vendor, then exact model name. The main turn has a fallback chain. Compaction uses the compact primary only |
+| Multi-agent | Open another child session | Open another child session | Open another child session | Open another child session from an extension | Discussion, a DAG pipeline, and goal mode are engine primitives. The main loop stays as it is |
+| Long context | Compact once the session grows | Compact once the session grows | Compact once the session grows | Almost no scaffolding around the loop | Truncate locally first, and call a summarizer only if that is still over budget. Re-read active files after a non-noop compact. Inject the subagent registry and session notes every turn |
+| Isolation | A kernel sandbox, with network allowed per domain | A kernel sandbox. Network is off by default while the workspace is writable | Permissions are confirmation prompts. Isolation means you bring a container | No approval prompts and no sandbox unless you add them | `bash` enters an OS sandbox by default. If the backend is missing, the call fails instead of falling back to a raw shell. macOS denies network by default. Linux restricts writes |
 
-In one sentence: a typical agent CLI is a tool you *use*; ZhuYe is a
-runtime you *build agent products on* — the frozen protocol, the explicit
-StateGraph, cross-language tools, and the resident serve mode all serve
-that goal: inference and orchestration run in the Rust engine while your
-business logic stays in your own language and process.
+The next sections are the evidence for the ZhuYe column.
 
-## Architecture Overview
+### Swap the prompt with the model, then the model with the role
 
-Clients (TUI / exec / serve / lib) drive the same engine over one frozen
-Submission / Event protocol; the six workspace layers depend strictly
-top-down, with protocol as the common contract for all layers:
+The prompt library stacks three layers of built-in copy: `default`, then a vendor (claude, gpt, gemini, deepseek, kimi, qwen, grok, glm, minimax), then the exact model name. `.zhuye/prompts/` in the workspace overrides `~/.zhuye/prompts/`. A file only needs the sections you want to change; missing sections fall back to the embedded default. See [`library.rs`](crates/abilities/zhuye-prompt/src/library.rs).
 
-```mermaid
-flowchart TB
-    subgraph clients["Client entry points"]
-        direction LR
-        EXEC["zhuye exec / CLI (17 subcommands)"]
-        SERVE["zhuye serve + Python / TS SDKs"]
-        LIB["Rust lib facade / PyO3"]
-    end
+Only the main turn walks `Role::Main`: primary, then `fallbacks`, with credential cooldown in between. Compaction copies the `Role::Compact` primary into the summarizer at construction and then fails over only inside that spec's credential pool. It does not read the compact slot's `fallbacks`. Nothing calls `Role::Subagent`. A subagent uses the parent model from startup, or a separate registry from `[subagent_providers]`. See [`RoutingPolicy`](crates/abilities/zhuye-llm/src/policy.rs).
 
-    subgraph layers["Workspace layers (deps flow top-down)"]
-        direction TB
-        RT["runtime — core / exec / cli / zhuye / py<br/>AgentThread + StateGraph + entry points"]
-        IG["integrations — mcp / lsp / stream"]
-        ORCH["orchestration — subagent / discussion / task / pipeline / goal"]
-        RES["resources — config / permissions / rollout / telemetry / sandbox / plugin / ast"]
-        AB["abilities — llm / tools / hooks / skills / memory / agent-def / prompt / compact / recovery / notes / sanitize"]
-        PR["protocol — Submission / Op / EventMsg / RolloutRecorder (v0 frozen)"]
-        RT --> IG
-        IG --> ORCH
-        ORCH --> RES
-        RES --> AB
-        AB --> PR
-    end
+### Discussion, pipeline, goal
 
-    subgraph external["External systems"]
-        direction LR
-        LLM["LLM providers<br/>OpenAI / Anthropic / Ollama"]
-        MCP["MCP servers"]
-        LSP["LSP servers"]
-    end
-
-    clients -->|"Submission / Event protocol"| RT
-    RT --> LLM
-    IG --> MCP
-    IG --> LSP
-```
-
-Each turn is driven by `submission_loop` through the 4-node StateGraph,
-with hand-written, auditable transitions:
-
-```mermaid
-flowchart LR
-    SUB(["Submission enqueued"]) --> PRE
-    PRE["PreLoop<br/>compaction escalation / pre-hooks"]
-    PRE --> MC["ModelCall<br/>SSE streaming LLM call"]
-    MC -->|"tool calls issued"| TE["ToolExec<br/>approval gate → run tools"]
-    TE -->|"results appended"| PRE
-    MC -->|"no tool calls"| CS["CheckStop"]
-    CS -->|"Stop hook veto"| PRE
-    CS -->|"pass"| DONE(["TurnComplete"])
-```
-
-### Workspace layers (dependencies flow top-down)
-
-| Layer | Crates | Responsibility |
-|-------|--------|----------------|
-| `protocol/` | zhuye-protocol | Submission / Op / EventMsg / Item + RolloutRecorder trait. The common contract for all layers |
-| `abilities/` | llm, tools, hooks, skills, memory, agent-def, prompt, compact, recovery, notes, sanitize | Capability primitives: ModelClient trait + providers, Tool trait + built-in tools, HookEngine, compaction escalation, etc. |
-| `resources/` | config, permissions, plugin, rollout, telemetry, sandbox, ast | Config hot-reload, permission rules, plugin lifecycle, JSONL persistence, tree-sitter code search |
-| `orchestration/` | subagent, discussion, task, pipeline, goal | Multi-agent orchestration: subagent factory (in-flight ≤ 16), discussion orchestration, tasks/teams, DAG pipelines, goal mode |
-| `integrations/` | mcp, lsp, integration, stream | MCP client (stdio/streamable-http), LSP, streaming session backend |
-| `runtime/` | core, exec, cli, zhuye, py | AgentThread + StateGraph, headless, CLI entry, lib facade (60+ re-exports + Builder), PyO3 bindings |
-
-### Core data flow
-
-- `AgentThread` (zhuye-core) consumes `Submission`s (mpsc channel);
-  `submission_loop` drives the 4-node `StateGraph`:
-  **PreLoop → ModelCall → (ToolExec → PreLoop)\* → CheckStop**.
-  When the model stops issuing tool calls, CheckStop ends the turn
-  (a Stop hook may veto and force the turn to continue).
-- `NodeContext` carries per-turn dependencies: model registry, RoutingPolicy,
-  HookEngine, ToolExecutionQueue, event channel, CancellationToken,
-  approval gates.
-- Clients (TUI / exec / serve / lib) all communicate through the same
-  Submission/Event protocol; in headless mode Events stream to stdout as
-  JSONL while tracing logs go to stderr (`zhuye exec | jq` stays clean);
-  `zhuye serve` reuses the same protocol as a resident service that the
-  SDKs wrap (remote tool requests/responses, approvals, etc. are all
-  protocol-level Op / EventMsg variants).
-
-### Key design decisions
-
-- **Protocol v0 is frozen**: adding Op/EventMsg variants is non-breaking; existing variants never change
-- **JSONL to stdout, logs to stderr**: `zhuye exec | jq` is never corrupted
-- **ToolError lives in zhuye-protocol**: breaks the tools ↔ hooks dependency cycle
-- **StateGraph via enum + match**: fixed 4-node structure, no petgraph
-- **Error handling**: `thiserror` for library crates, `anyhow` for application layers (exec/cli)
-- **serve is an embedding entry, not a dev assistant**: built-in hooks are disabled by default (exec / TUI keep "unconfigured = all enabled"), so Stop hooks like `verification` never run tests in the host's cwd
-
-See [docs/architecture.md](docs/architecture.md) (Chinese) for the full
-33-crate directory tree and per-node StateGraph responsibilities.
-
-## Features
-
-| Capability | Implementation |
-|------------|----------------|
-| 4-node StateGraph | PreLoop → ModelCall → ToolExec → CheckStop self-loop |
-| OpenAI + Anthropic + Ollama | SSE streaming, prompt caching, extended thinking, local NDJSON |
-| 26 built-in tools | bash / read / write / edit / delete_file / grep / glob / web_fetch / web_search / notebook_edit / image_view / task tools + Plan-mode control plane, etc. |
-| Trimmable tool surface | Three layers: agent-definition frontmatter (`tools` / `disallowed_tools` / `readonly`, activated via `--agent`) → `allowed_tools` per `[[subagents]]` in config.toml → code-level `unregister` / `register_except`; trimmed tools' schemas never reach the prompt (see [docs/architecture.md](docs/architecture.md), Chinese) |
-| Cross-language custom tools | Clients (Python / TS) register local functions as LLM tools; the core dispatches execution requests and receives results back |
-| 12 hook events × 7 decisions | PreToolUse / PostToolUse / PostToolUseFailure / Stop / SessionStart / UserPromptSubmit / PreCompact / PostCompact / SessionEnd + 3 task-lifecycle events |
-| 4-tier context compaction | microcompact → smart_prune → LLM summarize (escalation) |
-| Subagents | Tool-per-Agent, concurrent in-flight ≤ 16 (shared parent/child counter) |
-| Multi-agent orchestration | discussion (sequential/concurrent), task / team, DAG pipelines, goal mode |
-| Python / TypeScript SDKs | Pure stdlib / zero native dependencies; spawn `zhuye serve` over the JSONL stdio protocol |
-| Persistence | JSONL rollout + resume + session index + LLM trace recording |
-| MCP | stdio / streamable-http transports + tool prefix + reload diff |
-| LSP | LSP server configuration management and integration |
-| Plugins | install / enable / disable / uninstall + marketplace |
-| Permissions & sandbox | permissions rule engine + multi-level sandbox |
-| Plan mode | `zhuye exec --plan-mode` + `EnterPlanMode` / `ExitPlanMode` tools |
-| Configuration | unified TOML + notify hot-reload + CLI subcommands |
-| CLI | single `zhuye` binary + 17 subcommands (incl. `serve`) |
-| Built-in mock provider | `ZHUYE_MODEL=mock` + scripted replies; examples / e2e / SDK tests run fully offline |
-| Testing | 2200+ tests · wiremock · insta snapshots · cross-platform CI |
-
-## Quick Start
+A discussion runs the roles in a TOML file, either sequentially or concurrently. `consensus_window` is how many rounds must contain a consensus report from every participant. `max_rounds` is a hard stop. With `judge` on, an independent model issues a structured verdict each round, and only `agreed` counts; a participant's own Consensus message is just a signal. `judge` defaults to off, which keeps the self-report behavior. See [`DiscussionConfig`](crates/orchestration/zhuye-discussion/src/models.rs).
 
 ```bash
-# 1. Build (requires Rust 1.85+, pinned by rust-toolchain.toml)
-git clone https://github.com/Asketisch/ZhuYe && cd ZhuYe
-cargo build --release            # whole workspace (libs + binary); `make build` builds only the CLI
-
-# 2. Set an API key (pick one of three)
-export OPENAI_API_KEY=sk-...
-# or
-export ANTHROPIC_API_KEY=sk-ant-...
-# or persist it to the config file
-./target/release/zhuye login --provider anthropic --api-key sk-ant-...
-
-# 3. Rust library integration — the framework's primary interface (one-line Builder start)
-cargo run -p zhuye --example headless_run -- "say hi"
-# More examples: custom_tool / multi_turn / custom_provider / hook_listener / discussion_demo
-
-# 4. Headless one-shot conversation (thin CLI entry; JSONL Event stream to stdout, logs to stderr)
-./target/release/zhuye exec "what is 2+2?" | jq -c '.msg.type'
-
-# 5. Python / TypeScript embedding — spawn `zhuye serve` over the JSONL stdio protocol
-export ZHUYE_BIN=./target/release/zhuye     # how the SDK locates the binary (or install it on PATH)
-python3 - <<'EOF'
-import sys; sys.path.insert(0, "sdks/python")
-from zhuye import ZhuyeAgent
-agent = ZhuyeAgent.spawn()          # returns once the handshake (session_configured) completes
-print(agent.prompt("hello"))          # aggregates deltas into the final text
-agent.close()
-EOF
-
-# 6. Continue the previous session
-./target/release/zhuye exec -c
-
-# 7. Plan mode — read-only research mode
-./target/release/zhuye exec --plan-mode "summarize the auth module"
+zhuye discussion run -c crates/orchestration/zhuye-discussion/examples/discussion.toml
 ```
 
-Offline development: examples and e2e scripts use `ZHUYE_MODEL=mock` to skip
-real LLM network calls.
+With no provider configured, the discussion state machine still finishes and returns an empty transcript, which is enough to check the command. Real turns need a provider.
 
-## Multilingual SDKs (Python / TypeScript)
+A pipeline is a declared DAG. Downstream of a failed node is `skipped` under both `abort` and `continue_collect`. Branches with no dependency on the failure still run. Neither policy breaks the loop early. The report status is `failed` or `partial`. The example in the repo is plan → prd → exec → verify, and each node names a team that already exists. See [`zhuye-pipeline`](crates/orchestration/zhuye-pipeline/src/lib.rs) and [`config.example.toml`](crates/orchestration/zhuye-pipeline/examples/config.example.toml).
 
-Script projects embed the framework via `zhuye serve` (a resident stdio
-JSONL session: one process = one resident AgentThread, in-memory state
-shared across turns) plus the official SDKs. The standout capability:
-**register host-language functions as LLM-callable custom tools**:
+```bash
+zhuye pipeline run \
+  -c crates/orchestration/zhuye-pipeline/examples/config.example.toml \
+  --topic "build a CLI todo app"
+```
+
+Goal mode checks at the end of a turn. It does not add a node to the state graph. After the client submits `EnterGoalMode`, every turn ends with an LLM self-check, plus an optional command. Both have to pass. The same blocker has to show up 3 times in a row before the goal is marked blocked. The token budget defaults to 500000 and stops the run when it is spent. If the goal is still open, the continuation text is pushed onto the steering queue and merged into the next user input. The engine does not start another turn by itself. See [`GoalController::on_turn_end`](crates/orchestration/zhuye-goal/src/controller.rs); the merge is in [`submission_loop.rs`](crates/runtime/zhuye-core/src/submission_loop.rs). One line into `zhuye serve`:
+
+```json
+{"id":"1","op":{"type":"enter_goal_mode","goal":"tests pass","verify_command":"cargo test -p zhuye-core --lib","token_budget":500000}}
+```
+
+### Compact locally, then restore by trigger
+
+The compactor estimates tokens and does nothing under the threshold. Past it, `microcompact` keeps the system message and the first user message, replaces old tool results with placeholders, and strips thinking. If that is not enough, `smart_prune` truncates by tool type and drops the oldest non-kept messages. Only then does it call a summarizer. That call uses the compact primary copied at construction, so it can be a different model from the main turn. See [`Compactor`](crates/abilities/zhuye-compact/src/strategy.rs).
+
+Active files are re-read only after a non-noop compaction. The finished-subagent registry and session notes are injected on every `pre_loop`, then appended to the request in `model_call`. Notes are a FIFO of at most 30 entries. Appending one does not call a model, and the file is JSONL, separate from the long-form `MEMORY.md`. See [`zhuye-recovery`](crates/abilities/zhuye-recovery/src/lib.rs) and [`zhuye-notes`](crates/abilities/zhuye-notes/src/lib.rs).
+
+### Sandbox, per platform
+
+`bash` runs in an OS sandbox by default, with `strict` on. macOS uses Seatbelt, denies network by default, and can write the workspace. Linux uses Landlock and restricts writes. If the kernel cannot apply it, the command fails instead of falling back to a raw `sh -c`. There is no kernel rule that turns "network off" into a real deny on Linux, and the status line does not claim one. See [`os_sandbox.rs`](crates/resources/zhuye-sandbox/src/os_sandbox.rs).
+
+## Three ways to try it
+
+The engine requires Rust 1.85. The binary:
+
+```bash
+cargo build -p zhuye-cli
+ZHUYE_MODEL=mock ./target/debug/zhuye exec "hello"
+```
+
+`ZHUYE_MODEL=mock` is an explicit offline model. A missing API key does not silently switch you onto it. For a real model, set `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`, or configure a provider in `~/.zhuye/config.toml`. Events go to stdout. Logs go to stderr.
+
+In-process (`mock` needs no key here either):
+
+```rust
+use zhuye::{Submission, Zhuye};
+
+let agent = Zhuye::builder("mock").workspace(".").build()?;
+let mut stream = agent.submit(Submission::user_input("hello")).await;
+while let Some(event) = stream.next().await {
+    let _ = event;
+}
+```
+
+`build()` installs compaction, memory, skills, and session recording. See [`Zhuye::builder`](crates/runtime/zhuye/src/lib.rs).
+
+Tools written in the host language stay in the host process. The SDK starts `zhuye serve` (`ZHUYE_BIN` selects the binary). `register_tool` hands the engine a name and a JSON Schema. When the model calls it, the engine emits `tool_execution_request`, the function runs in Python or TypeScript, and the result is sent back.
 
 ```python
 from zhuye import ZhuyeAgent, ToolOutput, ContentBlock
 
 agent = ZhuyeAgent.spawn()
-
-def get_weather(args):
-    return ToolOutput(
-        content=[ContentBlock(type="text", text=f"{args['city']}: sunny")],
-        is_error=False, metadata={}, elapsed_ms=0,
-    )
-
-agent.register_tool("get_weather", "Get weather for a city",
-                    {"type": "object",
-                     "properties": {"city": {"type": "string"}},
-                     "required": ["city"]},
-                    get_weather)          # local function -> LLM tool
-print(agent.prompt("What's the weather in Beijing?"))   # aggregates deltas
+agent.register_tool(
+    "get_weather",
+    "查询城市天气",
+    {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
+    lambda args: ToolOutput(
+        content=[ContentBlock(type="text", text=f"{args['city']} 晴")],
+        is_error=False,
+    ),
+)
+for ev in agent.submit("北京天气如何?"):
+    if ev["msg"]["type"] == "turn_complete":
+        break
 agent.close()
 ```
 
-The TypeScript API is isomorphic (`ZhuyeAgent.spawn()` / `registerTool` /
-`prompt`). See **[docs/sdk.md](docs/sdk.md)** (Chinese) for the full
-integration guide (both languages, the remote-tool execution flow, the
-`submit` / `interrupt` / `approve` advanced surface, offline debugging);
-the wire protocol spec is [`sdks/PROTOCOL.md`](sdks/PROTOCOL.md).
+The Python package is [`sdks/python`](sdks/python) (stdlib only). The TypeScript package is [`sdks/typescript`](sdks/typescript).
 
-## CLI Subcommands
+## CLI at a glance
 
-| Subcommand | Purpose |
-|------------|---------|
-| `zhuye exec` | One-shot headless run, JSONL Event stream to stdout (supports `-c` / `-r N` / `--resume <uuid>` / `--agent <name>` / `--plan-mode`) |
-| `zhuye serve` | Resident stdio JSONL session service (protocol entry for the Python / TS SDKs; one Submission per stdin line, one Event per stdout line; supports the same resume flags) |
-| `zhuye discussion` | Multi-agent discussion orchestration (`run -c <toml>` / `ls`) |
-| `zhuye login` | Write provider credentials to `~/.zhuye/config.toml` |
-| `zhuye mcp` | MCP server configuration (`ls` / `add` / `remove` / `test` / `show`) |
-| `zhuye config` | Config read/write (`show` / `set` / `unset` / `edit` / `ls`) |
-| `zhuye session` | Persistent session management (`ls` / `show` / `rm` / `fork` / `rename` / `export`) |
-| `zhuye traces` | Browse local LLM call records (`ls` / `show`; data in `~/.zhuye/traces/model-io/`) |
-| `zhuye doctor` | Best-effort environment self-check (supports `--check-network`) |
-| `zhuye plugin` | Plugin install / list / enable / disable / uninstall + marketplace |
-| `zhuye lsp` | LSP server configuration management |
-| `zhuye task` | Structured tasks + teams (TaskCreate / TaskList / TeamCreate, etc.) |
-| `zhuye pipeline` | DAG pipelines (team-plan → team-prd → team-exec → team-verify) |
-| `zhuye security` | Security scan (cargo audit) |
-| `zhuye workspace` | git clone / sync for workspaces |
-| `zhuye update` | Print upgrade notes (currently offline) |
-| `zhuye version` | Print the version |
+The `zhuye` binary has 19 subcommands, grouped by purpose:
 
-### Resume flags
+| Command | Purpose |
+|---------|---------|
+| `exec` | One-shot headless turn; events stream to stdout as JSONL |
+| `serve` | Long-lived stdio JSONL session service; the SDK protocol entry |
+| `discussion` | Run a multi-agent discussion from a TOML config |
+| `pipeline` | Run a declarative DAG pipeline |
+| `task` | Structured tasks and teams |
+| `login` | Write provider credentials into `~/.zhuye/config.toml` |
+| `models` | List / pick models currently available from the provider; fetched live from the API |
+| `mcp` | Add, remove, and test MCP server configs |
+| `lsp` | Inspect LSP server configs |
+| `plugin` | Install / enable / disable / uninstall plugins |
+| `config` | Inspect / edit `~/.zhuye/config.toml`; hot-reloaded on write |
+| `session` | List / show / delete / fork persisted sessions; search across sessions |
+| `traces` | Local model-io call records |
+| `security` | `cargo audit` scan |
+| `workspace` | git clone / sync of workspaces |
+| `doctor` | Best-effort environment check (config / rollout / mcp / rustc) |
+| `init` | Generate an AGENTS.md project brief |
+| `update` | Print upgrade instructions (no network) |
+| `version` | Print the version |
 
-`-c` / `-r N` / `--resume <uuid>` are mutually exclusive (a clap group):
+For flags, see `zhuye <command> --help`. To resume a session, use `zhuye exec --resume`, by ordinal (`-r 2`) or full UUID.
 
-```bash
-zhuye exec -c "continue the previous work"    # resume the most recent session
-zhuye exec -r 2 "follow up on the second one" # by index
-zhuye exec --resume <uuid>                    # by UUID
+## Configuration notes
+
+Configuration lives in `~/.zhuye/config.toml` (move it entirely with `ZHUYE_HOME`):
+
+```toml
+[active]
+provider = "openai"
+# Optional: trim the main agent's tool face at the config layer,
+# allowlist ∩ / denylist −, same semantics as tools / disallowed_tools
+# in .zhuye/agents/*.md:
+# tools = ["read", "grep"]
+# disallowed_tools = ["bash", "write", "web_search"]
+
+[openai]
+api_key = ""                                  # leave empty for keyless endpoints
+base_url = "https://api.kilo.ai/api/gateway"  # already contains a version segment (/v1, /v4): /v1 is not appended again
+model = "free"                                # free model: picked from the live catalog at runtime
+temperature = 0.3                             # optional: default sampling temperature (explicit per-request values win)
+max_tokens = 4096                             # optional: default output cap
 ```
 
-### Typical workflows
+`model = "free"` pairs with model discovery: `zhuye models list --free-only` shows the currently free models, `zhuye models pick --free-only` picks one. The catalog is fetched live from the provider API; model ids are not hardcoded. For live-model drills, see [`FREE_MODEL_PRACTICE.md`](docs/FREE_MODEL_PRACTICE.md).
 
-```bash
-# First-time setup
-zhuye login --provider anthropic --api-key sk-ant-...
-zhuye exec "hello"
+`zhuye config set` writes are hot-reloaded by ConfigWatcher; no process restart is needed.
 
-# Attach an MCP filesystem server
-zhuye mcp add filesystem --command npx \
-                          --args "-y" \
-                          --args "@modelcontextprotocol/server-filesystem" \
-                          --args "$HOME"
-zhuye mcp test filesystem
+## Environment variables
 
-# Switch models
-zhuye config set anthropic.model claude-3-haiku-20240307
-# ConfigWatcher hot-reloads automatically
-
-# Troubleshooting
-zhuye doctor --check-network
-RUST_LOG=debug zhuye exec "hello" 2>debug.log
-
-# Continue a session
-zhuye session ls
-zhuye exec -c "continue where we left off"
-```
-
-## Plan Mode
-
-Plan mode produces a complete plan before the agent runs write tools
-(`bash` / `write` / `edit`): the `PlanModeGate` hook blanket-denies write
-tools (read-only tools like read / grep / glob remain available), and after
-finishing research the agent calls `ExitPlanMode` to present the plan and
-leave Plan mode.
-
-```bash
-zhuye exec --plan-mode "refactor X"   # headless research (read-only)
-```
-
-## Examples
-
-| Example | Demonstrates | Command |
-|---------|--------------|---------|
-| `headless_run` | Minimal one-shot prompt | `cargo run -p zhuye --example headless_run -- "..."` |
-| `custom_tool` | Custom Tool implementation | `cargo run -p zhuye --example custom_tool` |
-| `multi_turn` | Multiple turns on one agent with history | `cargo run -p zhuye --example multi_turn` |
-| `custom_provider` | Offline MockLlmClient | `cargo run -p zhuye --example custom_provider` |
-| `hook_listener` | TokenUsage + DangerousCommand hooks | `cargo run -p zhuye --example hook_listener` |
-| `discussion_demo` | 3-agent discussion demo | `cargo run -p zhuye --example discussion_demo` |
-
-## Environment Variables
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `OPENAI_API_KEY` | one of | OpenAI provider |
-| `ANTHROPIC_API_KEY` | one of | Anthropic provider |
-| `OLLAMA_HOST` | no | Ollama `base_url` (full URL incl. scheme) |
-| `OLLAMA_API_KEY` | no | Ollama Cloud / reverse-proxy Bearer |
-| `ZHUYE_PROVIDER` | no | Force a provider (overrides TOML `[active]`) |
-| `ZHUYE_MODEL` | no | Override the default model spec; `=mock` runs examples / e2e / SDKs offline |
-| `ZHUYE_MOCK_SCRIPT` | no | Mock provider script (JSONL, one line per model call: text / tool_call) |
-| `ZHUYE_REMOTE_TOOL_TIMEOUT_SECS` | no | serve-mode timeout waiting for remote tool replies (default 120s) |
-| `ZHUYE_BIN` | no | Where SDKs locate the `zhuye` binary (default: PATH) |
-| `ZHUYE_HOME` | no | Data directory override (default `~/.zhuye`) |
-| `ZHUYE_AUTO_COMPACT_INPUT_TOKENS` | no | Compaction threshold (default 10,000) |
-| `ZHUYE_MAX_ITERATIONS` | no | Graph execution safety valve (max iterations) |
-| `ZHUYE_SANDBOX_*` | no | Sandbox policy (`STRICT` / `OS_LEVEL` / `WRITABLE`) |
-| `RUST_LOG` | no | tracing filter (default `warn,zhuye=info`) |
+| Variable | Purpose |
+|----------|---------|
+| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | Credentials for the matching provider; one is enough to start |
+| `OLLAMA_HOST` / `OLLAMA_API_KEY` | Ollama base_url (full URL with scheme) / Bearer |
+| `ZHUYE_PROVIDER` / `ZHUYE_MODEL` | Force the provider / override the model spec; `ZHUYE_MODEL` strips a known provider prefix (e.g. `openai/m1`), `=mock` runs offline |
+| `ZHUYE_MOCK_SCRIPT` | Mock script: path to a JSONL file, one model call per line (text / tool_call / tool_call_delta) |
+| `ZHUYE_HOME` | Data directory (default `~/.zhuye`); config, prompts, session notes — all state follows it |
+| `ZHUYE_BIN` | Where the SDK looks for the `zhuye` binary (default: PATH) |
+| `ZHUYE_REMOTE_TOOL_TIMEOUT_SECS` | serve remote-tool receipt timeout (default 120s) |
+| `ZHUYE_AUTO_COMPACT_INPUT_TOKENS` | Compaction trigger threshold (default 10,000) |
+| `ZHUYE_MAX_ITERATIONS` | Graph execution iteration cap |
+| `ZHUYE_SANDBOX_STRICT` etc. | Sandbox level switches (`STRICT` / `OS_LEVEL` / `WRITABLE`) |
+| `RUST_LOG` | tracing filter (default `warn,zhuye=info`) |
 
 ## Documentation
 
-| Document | Contents |
-|----------|----------|
-| [`docs/architecture.md`](docs/architecture.md) | Architecture deep dive (Chinese): full directory tree, core data flow, per-node duties, design decisions |
-| [`docs/sdk.md`](docs/sdk.md) | SDK integration guide (Chinese): serve mode, Python / TS examples, remote-tool flow, offline debugging |
-| [`docs/plugins.md`](docs/plugins.md) | Plugin development guide (Chinese): manifest, five capability types, slash-command expansion, marketplaces, security model |
-| [`AGENTS.md`](AGENTS.md) | Development guide: commands, architecture layers, project conventions |
-| [`sdks/PROTOCOL.md`](sdks/PROTOCOL.md) | serve wire protocol spec (shared implementation basis for the SDKs) |
-| [`sdks/python/README.md`](sdks/python/README.md) | Python SDK usage and installation |
-| [`sdks/typescript/README.md`](sdks/typescript/README.md) | TypeScript SDK usage and installation |
+| Doc | Contents |
+|-----|----------|
+| [`docs/architecture.md`](docs/architecture.md) | Architecture: layer responsibilities, directory layout, core data flow, design decisions |
+| [`docs/sdk.md`](docs/sdk.md) | SDK guide: serve mode, remote tool flow, offline testing |
+| [`sdks/PROTOCOL.md`](sdks/PROTOCOL.md) | serve wire protocol spec |
+| [`docs/prompts.md`](docs/prompts.md) | Prompt library and layered overrides |
+| [`docs/tools-and-hooks.md`](docs/tools-and-hooks.md) | Built-in tools and hooks |
+| [`docs/plugins.md`](docs/plugins.md) | Plugins: manifest, capabilities, marketplace |
+| [`docs/PLAN_MODE.md`](docs/PLAN_MODE.md) | Plan mode |
+| [`docs/sanitize.md`](docs/sanitize.md) | Output sanitization |
+| [`docs/FREE_MODEL_PRACTICE.md`](docs/FREE_MODEL_PRACTICE.md) | Free-model live practice |
+| [`docs/release.md`](docs/release.md) | SDK releases (PyPI / npm) |
+| [`AGENTS.md`](AGENTS.md) | Development guide and project conventions |
 
 ## Development
 
 ```bash
-make check                                # cargo check --workspace
-make check-fast C=zhuye-core            # fast check for a single crate
-cargo test --workspace                    # 2200+ tests
-make test-fast                            # cargo nextest (must be installed)
-make test-changed                         # run only tests affected by changes since HEAD
-cargo clippy --workspace --all-targets -- -D warnings   # strict lint
-cargo fmt --all                           # formatting
-./scripts/e2e.sh                          # 15-step e2e smoke (build + examples + headless + serve + SDK + test + clippy)
-./scripts/sdk_smoke.sh                    # offline smoke of both SDKs against the real binary (build release first)
-./scripts/bench.sh                        # performance baselines (cold start / first event / RSS)
-./scripts/discussion_smoke.sh             # discussion orchestration smoke
-(cd sdks/typescript && npm test)          # TS SDK tests (Node mock serve, offline)
-(cd sdks/python && python3 -m pytest)     # Python SDK tests (Node mock serve, offline)
-make dist                                 # package DMG / tar.gz / zip into dist/
-make gc                                   # clean intermediate artifacts cargo won't GC from target/
+make check                                            # cargo check --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+./tests/run_all.sh functional                         # capability coverage layer (Python against the real binary)
+./scripts/e2e.sh                                      # end-to-end smoke
 ```
 
-## Roadmap
+Examples and e2e run offline via `ZHUYE_MODEL=mock`; no API key needed.
 
-Future plans include MCP OAuth, PostgreSQL session storage, IDE plugins,
-npm per-platform binary packages and PyPI publishing (the SDKs are
-currently used directly from the `sdks/` source directory), and more.
+## Limits
+
+The interactive UI is not in this repository. Terminal polish is Claude Code's tradeoff. Four tools and a very short prompt are Pi's. ZhuYe does not ship a product surface for either.
+
+The Linux sandbox restricts writes. It does not cut the network. Only macOS Seatbelt denies network when `allow_network = false`, which is the default.
+
+A parent session can have at most 16 subagents in flight at once. The constant is named `MAX_DEPTH`. It counts in-flight work: a finished child frees a slot. It is not a nesting depth and not a lifetime spawn count. See [`zhuye-subagent`](crates/orchestration/zhuye-subagent/src/lib.rs).
+
+This page does not compare token use or task pass rates. The public harness benchmarks do not include ZhuYe.
+
+## Also in the engine
+
+MCP, LSP, hooks, permission modes, resuming a session by thread id (`zhuye exec --resume`), rewinding a conversation to a turn (`Op::Rewind`), and a local model-io record of each model call (`zhuye traces`) all have counterparts in the other four. The implementations are [`zhuye-mcp`](crates/integrations/zhuye-mcp), [`zhuye-lsp`](crates/integrations/zhuye-lsp), [`zhuye-hooks`](crates/abilities/zhuye-hooks), [`zhuye-permissions`](crates/resources/zhuye-permissions), [`zhuye-exec`](crates/runtime/zhuye-exec), [`Op`](crates/protocol/zhuye-protocol/src/op.rs), and [`zhuye-telemetry`](crates/resources/zhuye-telemetry).
 
 ## License
 
-Apache-2.0
+The engine and CLI are [Apache-2.0](LICENSE). The Python SDK and the TypeScript SDK declare MIT in their own package manifests. Repository: <https://github.com/Asketisch/ZhuYe>.

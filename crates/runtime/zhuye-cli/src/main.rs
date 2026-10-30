@@ -35,7 +35,7 @@ mod test_home;
 #[command(
     name = "zhuye",
     version,
-    about = "ZhuYe — Rust agent runtime CLI (subcommands: exec, serve, discussion, login, init, mcp, config, session, traces, doctor, plugin, lsp, task, pipeline, security, workspace, update, version). 交互式 TUI 见独立仓库 Zhuye-TUI.",
+    about = "ZhuYe — Rust agent runtime CLI (subcommands: exec, serve, discussion, login, init, mcp, config, session, traces, doctor, models, plugin, lsp, task, pipeline, security, workspace, update, version). 交互式 TUI 见独立仓库 Reflect-TUI.",
     propagate_version = true
 )]
 struct Cli {
@@ -56,7 +56,7 @@ enum Command {
         #[command(flatten)]
         args: ExecArgs,
     },
-    /// v1.3 SDK:常驻 stdio JSONL 会话服务(Python / TS SDK 的协议入口)。
+    /// 常驻 stdio JSONL 会话服务(Python / TS SDK 的协议入口)。
     /// stdin 逐行读 Submission,stdout 逐行写 Event;多轮共享同一 session。
     Serve {
         #[command(flatten)]
@@ -68,7 +68,7 @@ enum Command {
         action: DiscussionAction,
     },
     /// 配置 provider 凭据(OpenAI / Anthropic / Ollama):将 API key 写入
-    /// `~/.zhuye/config.toml`。v0.4 替换 v0.3 的 stub。
+    /// `~/.zhuye/config.toml`。
     Login {
         /// Provider 名,默认 `anthropic`。可取值:anthropic | openai
         /// | ollama(`local` 为 `ollama` 的别名)。
@@ -97,7 +97,7 @@ enum Command {
         #[command(subcommand)]
         action: SessionAction,
     },
-    /// v1.2 P1:列出 / 查看本地 LLM 调用记录(`~/.zhuye/traces/model-io/`)。
+    /// 列出 / 查看本地 LLM 调用记录(`~/.zhuye/traces/model-io/`)。
     Traces {
         #[command(subcommand)]
         action: TracesAction,
@@ -114,22 +114,21 @@ enum Command {
         action: ModelsAction,
     },
     /// 安装 / 列出 / 启用 / 禁用 / 卸载插件。
-    /// v1.0.0-rc2:plugin 主体 7 条 + marketplace stub 3 条。
     Plugin {
         #[command(subcommand)]
         action: PluginAction,
     },
-    /// v0.5:列出 / 查看 LSP server 配置。
+    /// 列出 / 查看 LSP server 配置。
     Lsp {
         #[command(subcommand)]
         action: LspAction,
     },
-    /// v1.1.0:结构化任务 + 团队管理(TaskCreate / TaskList / TeamCreate 等)。
+    /// 结构化任务 + 团队管理(TaskCreate / TaskList / TeamCreate 等)。
     Task {
         #[command(subcommand)]
         action: TaskAction,
     },
-    /// v1.1.0:运行 DAG 流水线(team-plan → team-prd → team-exec → team-verify)。
+    /// 运行 DAG 流水线(team-plan → team-prd → team-exec → team-verify)。
     Pipeline {
         #[command(subcommand)]
         action: PipelineAction,
@@ -144,13 +143,13 @@ enum Command {
         #[command(subcommand)]
         action: WorkspaceAction,
     },
-    /// 打印升级说明(v0.4:不联网;v0.5 会查 GitHub)。
+    /// 打印升级说明(不联网)。
     Update {
-        /// 预留给 v0.5 的 GitHub release API 检查。
+        /// 仅打印检查说明,不联网。
         #[arg(long)]
         check_only: bool,
     },
-    /// v1.6:在当前目录生成 AGENTS.md 项目说明(agent 上下文锚点)。
+    /// 在当前目录生成 AGENTS.md 项目说明(agent 上下文锚点)。
     Init {
         /// 已存在时覆盖(默认跳过,保护手工维护的内容)。
         #[arg(long)]
@@ -364,7 +363,7 @@ enum SessionAction {
     },
 }
 
-/// `zhuye traces ...` —— 列 / 看本地 LLM 调用记录(v1.2 P1)。
+/// `zhuye traces ...` —— 列 / 看本地 LLM 调用记录。
 ///
 /// 数据来自 `zhuye-telemetry` 的 model-io JSONL(每次 LLM 调用一条记录)。
 /// 与 `zhuye session`(rollout 会话记录)正交 —— 一个会话可能产生多次

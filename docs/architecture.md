@@ -1,18 +1,18 @@
 # 架构详解
 
-> 本文承接 [README](../README.md)「架构总览」的深入版本:workspace 六层职责、
-> 完整目录结构、核心数据流与关键设计决策。日常使用看 README 即可,
-> 需要理解内部实现或二次开发时读本文。
+> 本文是烛夜的架构参考:workspace 六层职责、完整目录结构、核心数据流
+> 与关键设计决策。README 讲差异定位与用法,本文面向需要理解内部实现
+> 或二次开发的读者。
 
 ## Workspace 分层(依赖方向自上而下)
 
-33 个 crate 按 6 层分组于 `crates/<layer>/<crate>/`,依赖只能自上而下
+34 个 crate 按 6 层分组于 `crates/<layer>/<crate>/`,依赖只能自上而下
 (上层依赖下层,protocol 是所有层的公共契约):
 
 | 层 | Crate | 职责 |
 |----|-------|------|
 | `protocol/` | zhuye-protocol | Submission / Op / EventMsg / Item + RolloutRecorder trait。所有层的公共契约 |
-| `abilities/` | llm, tools, hooks, skills, memory, agent-def, prompt, compact, recovery, notes, sanitize | 能力原语:ModelClient trait + providers、Tool trait + 内置工具、HookEngine、压缩 escalation 等 |
+| `abilities/` | llm, tools, hooks, skills, memory, agent-def, prompt, compact, recovery, notes, sanitize, bm25 | 能力原语:ModelClient trait + providers、Tool trait + 内置工具、HookEngine、压缩 escalation、BM25 相关性排序等 |
 | `resources/` | config, permissions, plugin, rollout, telemetry, sandbox, ast | 配置热重载、权限规则、插件 lifecycle、JSONL 持久化、tree-sitter 代码搜索 |
 | `orchestration/` | subagent, discussion, task, pipeline, goal | 多 agent 编排:子代理工厂(并发在途≤16)、讨论编排、任务/团队、DAG 流水线、目标模式 |
 | `integrations/` | mcp, lsp, integration, stream | MCP 客户端(stdio/streamable-http)、LSP、流式会话后端 |
@@ -25,17 +25,18 @@ crates/
 ├── protocol/               公共契约
 │   └── zhuye-protocol        Submission / Op / EventMsg + RolloutRecorder
 ├── abilities/              能力原语
-│   ├── zhuye-llm             ModelClient trait + OpenAI/Anthropic/Ollama + pricing
-│   ├── zhuye-tools           Tool trait + 23 内置工具 + ToolExecutionQueue
-│   ├── zhuye-hooks           HookEngine + 8 事件 + 7 决策
+│   ├── zhuye-llm             ModelClient trait + OpenAI(含 Responses)/Anthropic/Ollama/mock + pricing
+│   ├── zhuye-tools           Tool trait + 24 内建工具 + ToolExecutionQueue(lib 门面默认注册 17 个,其余由 exec / 交互客户端装配)
+│   ├── zhuye-hooks           HookEngine + 12 事件 + 7 决策
 │   ├── zhuye-skills          SKILL.md 扫描 + 加载
 │   ├── zhuye-memory          3 scope 记忆(Project/User/Session)
 │   ├── zhuye-agent-def       Markdown frontmatter Agent 定义
 │   ├── zhuye-prompt          分层 prompt + cache_control 注入
-│   ├── zhuye-compact         4 层压缩策略 escalation
-│   ├── zhuye-recovery        故障恢复
+│   ├── zhuye-compact         本地截断后再 LLM 摘要
+│   ├── zhuye-recovery        上下文恢复(压缩后重读文件;登记与笔记每轮注入)
 │   ├── zhuye-notes           笔记
-│   └── zhuye-sanitize        输出净化
+│   ├── zhuye-sanitize        输出净化
+│   └── zhuye-bm25            BM25 相关性排序(供 grep 工具的 rank=bm25 模式)
 ├── resources/              配置 / 权限 / 持久化
 │   ├── zhuye-config          统一 TOML 配置 + 热重载
 │   ├── zhuye-permissions     权限规则引擎
@@ -48,8 +49,8 @@ crates/
 │   ├── zhuye-subagent        Tool-per-Agent 子代理工厂(并发在途 ≤ 16)
 │   ├── zhuye-discussion      多 Agent 讨论编排
 │   ├── zhuye-task            结构化任务 / 团队
-│   ├── zhuye-pipeline        DAG 流水线
-│   └── zhuye-goal            目标模式
+│   ├── zhuye-pipeline        DAG 流水线(两种失败策略都不提前停)
+│   └── zhuye-goal            目标模式(续作等下一条用户输入)
 ├── integrations/           外部协议集成
 │   ├── zhuye-mcp             MCP 客户端(stdio / streamable-http)
 │   ├── zhuye-lsp             LSP 集成
@@ -68,7 +69,15 @@ sdks/                          多语言 SDK
 ```
 
 `zhuye` 二进制由 `zhuye-cli` crate 产出,是本仓库的**薄 headless 入口**;
-框架消费方的主接口是 `zhuye` 库门面(Builder / re-exports)。
+框架消费方的主接口是 `zhuye` 库门面(Builder / re-exports)。本二进制的子命令
+枚举里没有 TUI。
+
+### 编排、路由、恢复的实际消费点
+
+- **目标续作。** `EnterGoalMode` 之后,每轮 `TurnComplete` 调用 `GoalController::on_turn_end`。未完成时续作文本推进 `steering_queue`。下一条 `UserInput` 在 `submission_loop` 里 `drain_all`,并进那条用户消息。引擎不会自己再提交一轮。
+- **流水线失败策略。** `Abort` 与 `ContinueCollect` 都不提前结束循环。失败节点的下游一律 `skipped`,没有依赖的旁支照跑。总状态分别是 `failed` 和 `partial`。
+- **路由。** `model_call` 消费 `Role::Main` 的 primary、`fallbacks` 和凭据 cooldown。构造摘要器时把 `Role::Compact` 的 primary 拷进 `model_name`;摘要调用只对这一个 spec 做 `next_for`,不读 compact 的 `fallbacks`。CLI 把真实 policy 交给摘要器,库门面 `Zhuye::build` 传 `RoutingPolicy::default()`,两边都已经先拷过 primary。`Role::Subagent` 没有调用方。子代理用启动时的主模型,或 `[subagent_providers]` 的独立 registry。
+- **上下文恢复。** 活跃文件只在 `compact_triggered`(任意非 Noop 压缩)时重读。子代理登记和会话笔记每个 `pre_loop` 都注入,再由 `model_call` 追加进消息。
 
 ## 核心数据流
 
@@ -77,7 +86,8 @@ sdks/                          多语言 SDK
   模型不再发工具调用时经 CheckStop 结束 turn(Stop hook 可否决强制续跑)。
 - `NodeContext` 携带回合级依赖:model registry、RoutingPolicy、HookEngine、
   ToolExecutionQueue、event 通道、CancellationToken、approval gates。
-- 客户端(TUI / exec / serve / lib)统一通过 Submission/Event 协议通信;headless
+- 客户端(exec / serve / lib,以及独立仓库 [Reflect-TUI](https://cnb.cool/Demon1019/Reflect-CLI)
+  的交互界面)统一通过 Submission/Event 协议通信;headless
   模式 Event 以 JSONL 流写 stdout、tracing 日志走 stderr(`zhuye exec | jq`
   不被破坏);`zhuye serve` 复用同一协议常驻服务,SDK 在其上封装
   (远程工具请求 / 回执、审批等交互均为协议内 Op / EventMsg)。
@@ -153,7 +163,7 @@ spawn 时为子代理构造**仅含白名单工具**的过滤后 registry(coordi
 `custom_tool` 示例(`cargo run -p zhuye --example custom_tool`)演示
 了注册自定义工具的标准写法。
 
-
+## 设计决策
 
 - **Protocol v0 已冻结**:新增 Op/EventMsg 变体 = non-breaking,不可改动既有变体。
   wire 协议的稳定性是所有客户端(TUI / exec / serve / SDK)共同的前提。
