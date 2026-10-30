@@ -28,6 +28,8 @@ lcov.info
 # graphify 工具产物（不入仓）
 graphify-out/
 crates/graphify-out/
+# archify 架构图技能的本地产物(交互 HTML + 校验 JSON,不入仓)
+.archify/
 # AI 规划会话
 .zcode/
 # opencode 工具配置
