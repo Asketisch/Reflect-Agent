@@ -16,11 +16,11 @@ use tokio_util::sync::CancellationToken;
 use zhuye_hooks::{HookContext, HookEngine, HookEvent};
 use zhuye_llm::{ChatMessage, SharedModelRegistry, SharedQuotaTracker};
 use zhuye_protocol::{
-    AbortReason, ContextCompactedEvent, ContextCompactedStrategy, Event, EventMsg, MessageRole,
-    PermissionMode, PermissionModeChangedEvent, PlanApprovedEvent, PlanId, PlanReadyEvent,
-    PlanRejectedEvent, PlanRequestEvent, ReasoningEffortMirror, RolloutRecord, RolloutRecorder,
-    SessionConfiguredEvent, Submission, TokenCountEvent, TurnAbortedEvent, TurnCompleteEvent,
-    TurnId, TurnStartedEvent, TurnStatus, UserInputItem,
+    AbortReason, ContextCompactedEvent, ContextCompactedStrategy, ErrorEvent, Event, EventMsg,
+    MessageRole, PermissionMode, PermissionModeChangedEvent, PlanApprovedEvent, PlanId,
+    PlanReadyEvent, PlanRejectedEvent, PlanRequestEvent, ReasoningEffortMirror, RolloutRecord,
+    RolloutRecorder, SessionConfiguredEvent, Submission, TokenCountEvent, TurnAbortedEvent,
+    TurnCompleteEvent, TurnId, TurnStartedEvent, TurnStatus, UserInputItem,
 };
 use zhuye_tools::{
     ApprovalGate, ApprovalWaiters, AskUserInputWaiters, AskUserQuestionWaiters, PlanApprovalGate,
@@ -769,6 +769,50 @@ pub async fn submission_loop(
                                         MessageRole::Assistant,
                                         serde_json::to_value(&all_content)
                                             .unwrap_or(serde_json::Value::Null),
+                                    ))
+                                    .await;
+                            }
+                        }
+
+                        // 预算耗尽且**零文本产出**时,在
+                        // TurnComplete 之前显式发一条带 code 的 Error 事件。
+                        // 此前这两种故障与「模型正常空回复」不可区分 ——
+                        // turn 以 success 形态收尾、`prompt()` 返回空串,
+                        // 上层管线把空文本当报告处理或静默丢结果。SDK 侧
+                        // 对 Error 事件统一升为异常,可衔接 failover。
+                        // 注意:预算耗尽但模型给出了最终答案(文本非空)时
+                        // **不**发错误 —— 强制收口成功是合法完成。
+                        if last_assistant_text.is_empty() {
+                            if final_state.hit_max_iterations {
+                                let _ = turn_tx_clone
+                                    .send(Event::new(
+                                        sub_id_clone.clone(),
+                                        EventMsg::Error(ErrorEvent {
+                                            code: "iteration_budget_exhausted".into(),
+                                            message: format!(
+                                                "迭代预算耗尽(max_iterations={},且模型未产出\
+                                                 任何文本回复);请提高预算或检查工具回路",
+                                                final_state.iteration
+                                            ),
+                                            details: Some(serde_json::json!({
+                                                "iterations": final_state.iteration,
+                                            })),
+                                        }),
+                                    ))
+                                    .await;
+                            } else if final_state.budget_exceeded {
+                                let _ = turn_tx_clone
+                                    .send(Event::new(
+                                        sub_id_clone.clone(),
+                                        EventMsg::Error(ErrorEvent {
+                                            code: "token_budget_exhausted".into(),
+                                            message: format!(
+                                                "token 预算耗尽(total_tokens={},且模型未产出\
+                                                 任何文本回复)",
+                                                final_state.total_usage.total_tokens
+                                            ),
+                                            details: None,
+                                        }),
                                     ))
                                     .await;
                             }

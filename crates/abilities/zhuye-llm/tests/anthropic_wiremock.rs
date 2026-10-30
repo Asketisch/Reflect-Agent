@@ -55,11 +55,7 @@ async fn anthropic_happy_path_parses_sse() {
         // 自定义 base_url 使用 Authorization: Bearer
         .and(header("Authorization", "Bearer test-key"))
         .and(header("anthropic-version", "2023-06-01"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_string(sse),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream"))
         .mount(&server)
         .await;
 
@@ -67,6 +63,8 @@ async fn anthropic_happy_path_parses_sse() {
         api_key: "test-key".into(),
         base_url: Some(server.uri()),
         timeout: Duration::from_secs(5),
+        temperature: None,
+        max_tokens: None,
     })
     .unwrap();
     let mut stream = client
@@ -109,6 +107,8 @@ async fn anthropic_401_maps_to_auth_error() {
         api_key: "k".into(),
         base_url: Some(server.uri()),
         timeout: Duration::from_secs(5),
+        temperature: None,
+        max_tokens: None,
     })
     .unwrap();
     let err = match client
@@ -129,11 +129,7 @@ async fn anthropic_custom_base_url_uses_bearer_auth() {
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
         .and(header("Authorization", "Bearer custom-key"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_string(sse),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream"))
         .mount(&server)
         .await;
 
@@ -141,6 +137,8 @@ async fn anthropic_custom_base_url_uses_bearer_auth() {
         api_key: "custom-key".into(),
         base_url: Some(server.uri()),
         timeout: Duration::from_secs(5),
+        temperature: None,
+        max_tokens: None,
     })
     .unwrap();
     let mut stream = client
@@ -165,6 +163,8 @@ async fn anthropic_529_maps_to_overloaded() {
         api_key: "k".into(),
         base_url: Some(server.uri()),
         timeout: Duration::from_secs(5),
+        temperature: None,
+        max_tokens: None,
     })
     .unwrap();
     let err = match client
@@ -186,8 +186,7 @@ async fn anthropic_request_body_has_cache_control() {
         .and(path("/v1/messages"))
         .respond_with(
             ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_string("event: message_stop\ndata: {}\n\n"),
+                .set_body_raw("event: message_stop\ndata: {}\n\n", "text/event-stream"),
         )
         .mount(&server)
         .await;
@@ -203,6 +202,8 @@ async fn anthropic_request_body_has_cache_control() {
         api_key: "k".into(),
         base_url: Some(server.uri()),
         timeout: Duration::from_secs(5),
+        temperature: None,
+        max_tokens: None,
     })
     .unwrap();
     let mut stream = client.stream(req, CancellationToken::new()).await.unwrap();
@@ -240,8 +241,7 @@ async fn anthropic_system_block_ttl_1h_on_wire() {
         .and(path("/v1/messages"))
         .respond_with(
             ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_string("event: message_stop\ndata: {}\n\n"),
+                .set_body_raw("event: message_stop\ndata: {}\n\n", "text/event-stream"),
         )
         .mount(&server)
         .await;
@@ -260,6 +260,8 @@ async fn anthropic_system_block_ttl_1h_on_wire() {
         api_key: "k".into(),
         base_url: Some(server.uri()),
         timeout: Duration::from_secs(5),
+        temperature: None,
+        max_tokens: None,
     })
     .unwrap();
     let mut stream = client.stream(req, CancellationToken::new()).await.unwrap();
@@ -287,11 +289,7 @@ async fn anthropic_parses_cache_creation_input_tokens() {
     ]);
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_string(sse),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream"))
         .mount(&server)
         .await;
 
@@ -299,6 +297,8 @@ async fn anthropic_parses_cache_creation_input_tokens() {
         api_key: "k".into(),
         base_url: Some(server.uri()),
         timeout: Duration::from_secs(5),
+        temperature: None,
+        max_tokens: None,
     })
     .unwrap();
     let mut stream = client
@@ -342,11 +342,7 @@ async fn anthropic_max_tokens_stop_reason_emits_truncated() {
     ]);
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_string(sse),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream"))
         .mount(&server)
         .await;
 
@@ -354,6 +350,8 @@ async fn anthropic_max_tokens_stop_reason_emits_truncated() {
         api_key: "k".into(),
         base_url: Some(server.uri()),
         timeout: Duration::from_secs(5),
+        temperature: None,
+        max_tokens: None,
     })
     .unwrap();
     let mut stream = client
@@ -390,11 +388,7 @@ async fn anthropic_end_turn_emits_plain_message_stop() {
     ]);
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_string(sse),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream"))
         .mount(&server)
         .await;
 
@@ -402,6 +396,8 @@ async fn anthropic_end_turn_emits_plain_message_stop() {
         api_key: "k".into(),
         base_url: Some(server.uri()),
         timeout: Duration::from_secs(5),
+        temperature: None,
+        max_tokens: None,
     })
     .unwrap();
     let mut stream = client
@@ -431,8 +427,7 @@ async fn anthropic_request_attaches_cache_control_to_last_tools() {
         .and(path("/v1/messages"))
         .respond_with(
             ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_string("event: message_stop\ndata: {}\n\n"),
+                .set_body_raw("event: message_stop\ndata: {}\n\n", "text/event-stream"),
         )
         .mount(&server)
         .await;
@@ -464,6 +459,8 @@ async fn anthropic_request_attaches_cache_control_to_last_tools() {
         api_key: "k".into(),
         base_url: Some(server.uri()),
         timeout: Duration::from_secs(5),
+        temperature: None,
+        max_tokens: None,
     })
     .unwrap();
     let mut stream = client.stream(req, CancellationToken::new()).await.unwrap();
@@ -500,8 +497,7 @@ async fn anthropic_request_attaches_cache_control_to_prefix_anchor_message() {
         .and(path("/v1/messages"))
         .respond_with(
             ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_string("event: message_stop\ndata: {}\n\n"),
+                .set_body_raw("event: message_stop\ndata: {}\n\n", "text/event-stream"),
         )
         .mount(&server)
         .await;
@@ -530,6 +526,8 @@ async fn anthropic_request_attaches_cache_control_to_prefix_anchor_message() {
         api_key: "k".into(),
         base_url: Some(server.uri()),
         timeout: Duration::from_secs(5),
+        temperature: None,
+        max_tokens: None,
     })
     .unwrap();
     let mut stream = client.stream(req, CancellationToken::new()).await.unwrap();
@@ -570,8 +568,7 @@ async fn anthropic_tool_result_image_emits_base64_block() {
         .and(path("/v1/messages"))
         .respond_with(
             ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_string("event: message_stop\ndata: {}\n\n"),
+                .set_body_raw("event: message_stop\ndata: {}\n\n", "text/event-stream"),
         )
         .mount(&server)
         .await;
@@ -592,6 +589,8 @@ async fn anthropic_tool_result_image_emits_base64_block() {
         api_key: "k".into(),
         base_url: Some(server.uri()),
         timeout: Duration::from_secs(5),
+        temperature: None,
+        max_tokens: None,
     })
     .unwrap();
     let mut stream = client.stream(req, CancellationToken::new()).await.unwrap();
@@ -634,8 +633,7 @@ async fn anthropic_tool_result_text_emits_text_block() {
         .and(path("/v1/messages"))
         .respond_with(
             ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_string("event: message_stop\ndata: {}\n\n"),
+                .set_body_raw("event: message_stop\ndata: {}\n\n", "text/event-stream"),
         )
         .mount(&server)
         .await;
@@ -651,6 +649,8 @@ async fn anthropic_tool_result_text_emits_text_block() {
         api_key: "k".into(),
         base_url: Some(server.uri()),
         timeout: Duration::from_secs(5),
+        temperature: None,
+        max_tokens: None,
     })
     .unwrap();
     let mut stream = client.stream(req, CancellationToken::new()).await.unwrap();
@@ -685,8 +685,7 @@ async fn request_timeout_maps_to_retryable_http_error() {
         .and(path("/v1/messages"))
         .respond_with(
             ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_string("event: message_stop\ndata: {}\n\n")
+                .set_body_raw("event: message_stop\ndata: {}\n\n", "text/event-stream")
                 .set_delay(Duration::from_secs(2)),
         )
         .mount(&server)
@@ -696,6 +695,8 @@ async fn request_timeout_maps_to_retryable_http_error() {
         api_key: "k".into(),
         base_url: Some(server.uri()),
         timeout: Duration::from_millis(300),
+        temperature: None,
+        max_tokens: None,
     })
     .unwrap();
 

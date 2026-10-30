@@ -208,7 +208,13 @@ impl ReflectConfig {
             return Some(zhuye_llm::DEFAULT_MOCK_MODEL.to_string());
         }
         if let Some(m) = env_model.map(str::trim).filter(|m| !m.is_empty()) {
-            return Some(m.to_string());
+            // env 值带已知 provider 前缀(`openai/m1`、
+            // `anthropic/claude-x`)时剥掉前缀,只把 model 段发给网关。
+            // 此前整串透传,多数网关对带前缀的 model 名 404/400。
+            // 只剥**已知 provider 名**(mock/openai/anthropic/ollama):
+            // OpenRouter 式 `vendor/model` 命名(如 `cohere/x:free`)的
+            // 前缀不在名单里,原样保留。
+            return Some(strip_known_provider_prefix(m).to_string());
         }
         // 被钉住的凭证条目自带 model 时优先取用:它比段级覆盖更具体
         // (描述的就是当前 plan 本身);钉住只对 active provider 生效。
@@ -400,6 +406,9 @@ fn build_anthropic_pool(section: &AnthropicSection) -> Result<Option<CredentialP
             api_key: cfg.api_key.clone(),
             base_url: cfg.base_url.clone().or_else(|| section.base_url.clone()),
             timeout: default_timeout,
+            // 段级采样参数默认值(请求侧显式值优先)。
+            temperature: section.temperature,
+            max_tokens: section.max_tokens,
         };
         let client =
             AnthropicClient::new(client_cfg).map_err(|e| ConfigError::Build(e.to_string()))?;
@@ -466,6 +475,9 @@ fn build_openai_pool(section: &OpenAISection) -> Result<Option<CredentialPool>, 
                 base_url: base,
                 timeout_secs: default_timeout.as_secs(),
                 model: default_model.clone(),
+                // 段级采样参数默认值(请求侧显式值优先)。
+                temperature: section.temperature,
+                max_tokens: section.max_tokens,
             };
             Arc::new(
                 OpenAIResponsesClient::new(client_cfg)
@@ -476,6 +488,9 @@ fn build_openai_pool(section: &OpenAISection) -> Result<Option<CredentialPool>, 
                 api_key: cfg.api_key.clone(),
                 base_url: base,
                 timeout: default_timeout,
+                // 段级采样参数默认值(请求侧显式值优先)。
+                temperature: section.temperature,
+                max_tokens: section.max_tokens,
             };
             Arc::new(OpenAIClient::new(client_cfg).map_err(|e| ConfigError::Build(e.to_string()))?)
         };
@@ -543,6 +558,9 @@ fn build_ollama_pool(
             num_gpu: section.num_gpu,
             timeout: merged_timeout,
             model: merged_model.clone(),
+            // 段级采样参数默认值(请求侧显式值优先)。
+            temperature: section.temperature,
+            max_tokens: section.max_tokens,
         };
         let client =
             OllamaClient::new(client_cfg).map_err(|e| ConfigError::Build(e.to_string()))?;
@@ -595,6 +613,22 @@ fn canonical_provider(raw: &str) -> Option<&'static str> {
     }
 }
 
+/// 剥掉 model 值上的**已知 provider 前缀**。
+///
+/// `ZHUYE_MODEL=openai/m1` 这类完整 spec 形态,拼进请求体的应是
+/// `m1` 而非 `openai/m1`(多数网关不认带前缀的 model 名)。只剥
+/// `canonical_provider` 认识的名字(mock/openai/anthropic/ollama 及其
+/// 别名);其余(OpenRouter 式 `cohere/x:free`)原样返回。大小写不敏感
+/// (与 `canonical_provider` 口径一致)。
+fn strip_known_provider_prefix(model: &str) -> &str {
+    if let Some((prefix, rest)) = model.split_once('/') {
+        if canonical_provider(prefix).is_some() && !rest.is_empty() {
+            return rest;
+        }
+    }
+    model
+}
+
 // ── Subagent Providers:子代理独立凭证构建 ────────────────────────
 
 /// 把 `[subagent_providers.anthropic]` 段展开为 `CredentialPool`,语义与
@@ -626,6 +660,9 @@ fn build_subagent_anthropic_pool(
             api_key: cfg.api_key.clone(),
             base_url: cfg.base_url.clone().or_else(|| section.base_url.clone()),
             timeout: default_timeout,
+            // subagent 段无采样配置,显式 None(不走默认推导)。
+            temperature: None,
+            max_tokens: None,
         };
         let client =
             AnthropicClient::new(client_cfg).map_err(|e| ConfigError::Build(e.to_string()))?;
@@ -679,6 +716,9 @@ fn build_subagent_openai_pool(
             api_key: cfg.api_key.clone(),
             base_url: cfg.base_url.clone().or_else(|| section.base_url.clone()),
             timeout: default_timeout,
+            // subagent 段无采样配置,显式 None(不走默认推导)。
+            temperature: None,
+            max_tokens: None,
         };
         let client =
             OpenAIClient::new(client_cfg).map_err(|e| ConfigError::Build(e.to_string()))?;
@@ -736,6 +776,9 @@ fn build_subagent_ollama_pool(
             num_gpu: section.num_gpu,
             timeout: merged_timeout,
             model: section.model.clone(),
+            // subagent 段无采样配置,显式 None(不走默认推导)。
+            temperature: None,
+            max_tokens: None,
         };
         let client =
             OllamaClient::new(client_cfg).map_err(|e| ConfigError::Build(e.to_string()))?;

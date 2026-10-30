@@ -28,6 +28,7 @@ stdout 行缓冲到内存队列,按 submission id 路由到迭代器。
 
 from __future__ import annotations
 
+import collections
 import json
 import os
 import queue
@@ -69,6 +70,12 @@ class ZhuyeAgentOptions:
     cwd: Optional[Path] = None
     env: Optional[dict[str, str]] = None
     handshake_timeout_secs: float = DEFAULT_HANDSHAKE_TIMEOUT
+    # 子进程 stderr 转发开关。None(默认)= 维持旧行为(透传宿主
+    # stderr);设为 Callable[[bytes], None] 时每个原始块交给回调
+    # (落文件 / 送日志系统 / 过滤降噪);设为 "" 或 False 时完全静默,
+    # 不再硬编码直通宿主进程 stderr。
+    on_stderr: Optional[Callable[[bytes], None]] = None
+    forward_stderr: bool = True
 
 
 @dataclass
@@ -127,9 +134,12 @@ class ZhuyeAgent:
         self,
         proc: subprocess.Popen[bytes],
         options: ZhuyeAgentOptions,
+        stderr_tail: Optional["collections.deque[bytes]"] = None,
     ) -> None:
         self._proc = proc
         self._closed = False
+        # stderr 尾部 ring buffer(spawn 路径注入;from_popen 为 None)。
+        self._stderr_tail = stderr_tail if stderr_tail is not None else collections.deque(maxlen=32)
         self._tools: dict[str, _RegisteredTool] = {}
         self._global_queue: queue.Queue[dict[str, Any]] = queue.Queue()
         # sub.id → 订阅该 submission 事件的回调
@@ -178,13 +188,30 @@ class ZhuyeAgent:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        # stderr 透传到当前 stderr(让 tracing 日志可见)。
-        threading.Thread(
-            target=_forward_stream,
-            args=(proc.stderr, 2),
-            daemon=True,
-        ).start()
-        return cls(proc, options)
+        # stderr 转发:默认透传宿主 stderr;`on_stderr` 回调或
+        # `forward_stderr=False` 可接管 / 静默。无论哪种模式,尾部若干
+        # 行都保留在 ring buffer 里 —— 握手期子进程死亡时把真实
+        # 原因带进异常(此前只报泛化的 handshake timed out)。
+        stderr_tail: collections.deque[bytes] = collections.deque(maxlen=32)
+        if options.on_stderr is not None:
+            threading.Thread(
+                target=_forward_stream,
+                args=(proc.stderr, None, options.on_stderr, stderr_tail),
+                daemon=True,
+            ).start()
+        elif options.forward_stderr:
+            threading.Thread(
+                target=_forward_stream,
+                args=(proc.stderr, 2, None, stderr_tail),
+                daemon=True,
+            ).start()
+        else:
+            threading.Thread(
+                target=_forward_stream,
+                args=(proc.stderr, None, None, stderr_tail),
+                daemon=True,
+            ).start()
+        return cls(proc, options, stderr_tail=stderr_tail)
 
     @classmethod
     def from_popen(
@@ -239,6 +266,10 @@ class ZhuyeAgent:
 
         聚合 `agent_message_delta` / `agent_message`,遇到 `turn_complete`
         结束;`turn_aborted` / `error` 抛错。
+
+        全量 `agent_message` 到达时**清空**已累计的 delta 缓冲 ——
+        协议允许同一轮 delta 与全量混合下发,不去重会产生重复文本
+        (当前引擎两种形态互斥,本规则为防御性语义)。
         """
         out: list[str] = []
         for ev in self.submit(text):
@@ -247,7 +278,8 @@ class ZhuyeAgent:
             if t == "agent_message_delta":
                 out.append(msg["delta"])
             elif t == "agent_message":
-                out.append(msg["text"])
+                # 全量消息覆盖 delta 缓冲:全量是权威快照。
+                out = [msg["text"]]
             elif t == "turn_complete":
                 break
             elif t == "turn_aborted":
@@ -314,11 +346,36 @@ class ZhuyeAgent:
     # ── 内部 ──────────────────────────────────────────────────────────
 
     def _wait_handshake(self, timeout_secs: float) -> None:
-        if not self._handshake_event.wait(timeout=timeout_secs):
-            self.close()
-            raise RuntimeError(
-                f"zhuye serve handshake timed out after {timeout_secs}s"
-            )
+        """等待 `session_configured` 握手。
+
+        等待期间轮询子进程存活状态 —— serve 因配置错误等
+        原因启动即死时,立刻抛出携带退出码与 **stderr 尾部**(真实错误
+        原因)的异常;不再傻等满超时后报泛化的 timed out。
+        """
+        deadline = time.monotonic() + timeout_secs
+        while not self._handshake_event.wait(timeout=0.1):
+            rc = self._proc.poll()
+            if rc is not None:
+                self.close()
+                raise RuntimeError(
+                    f"zhuye serve exited during handshake (code={rc}): "
+                    f"{self._stderr_tail_text()}"
+                )
+            if time.monotonic() >= deadline:
+                self.close()
+                tail = self._stderr_tail_text()
+                suffix = f" stderr tail: {tail}" if tail else ""
+                raise RuntimeError(
+                    f"zhuye serve handshake timed out after {timeout_secs}s{suffix}"
+                )
+
+    def _stderr_tail_text(self) -> str:
+        """拼出 stderr 尾部文本(诊断用;解码失败容错)。"""
+        return " | ".join(
+            chunk.decode("utf-8", errors="replace").strip()
+            for chunk in self._stderr_tail
+            if chunk.strip()
+        )
 
     def _reader_loop(self) -> None:
         """消费 stdout,逐行解析 Event;分发到全局 / 按 submission id 的队列。
@@ -521,20 +578,37 @@ def _build_submission(op: dict[str, Any], sub_id: Optional[str] = None) -> dict[
     return {"id": sub_id or str(uuid.uuid4()), "op": op}
 
 
-def _forward_stream(src: Any, dst_fd: int) -> None:
-    """把 src 流逐块写到 dst_fd(1=stdout / 2=stderr)。
+def _forward_stream(
+    src: Any,
+    dst_fd: Optional[int],
+    callback: Optional[Callable[[bytes], None]],
+    tail: "collections.deque[bytes]",
+) -> None:
+    """把 src 流逐块分发。
 
-    简单方案:写到 sys.stdout / sys.stderr 的 .buffer。失败时静默退出,
+    分发优先级:`callback`(SDK 接管)→ `dst_fd`(透传宿主
+    stdout/stderr)→ 两者皆无(静默丢弃)。无论哪种模式,最近若干块
+    都追加进 `tail` ring buffer —— 子进程握手期死亡时,
+    `_wait_handshake` 用它把真实错误带进异常。失败时静默退出,
     子进程关闭路径不应该让主进程崩。
     """
     import sys
-    target = sys.stdout if dst_fd == 1 else sys.stderr if dst_fd == 2 else None
-    if target is None:
-        return
+    target = None
+    if callback is None and dst_fd is not None:
+        target = sys.stdout if dst_fd == 1 else sys.stderr if dst_fd == 2 else None
+    # read1 只存在于缓冲流(BufferedReader);裸 FileIO 回退 read()。
+    read_chunk = getattr(src, "read1", None) or src.read
     try:
-        for chunk in iter(src.read1, b""):
-            target.buffer.write(chunk)
-            target.flush()
+        for chunk in iter(read_chunk, b""):
+            tail.append(chunk)
+            if callback is not None:
+                try:
+                    callback(chunk)
+                except Exception:
+                    return
+            elif target is not None:
+                target.buffer.write(chunk)
+                target.flush()
     except Exception:
         return
     finally:

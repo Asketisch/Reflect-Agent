@@ -71,6 +71,42 @@ fn build_note_store(
     }
 }
 
+/// `[active] tools` / `[active] disallowed_tools` → 主 agent 定义
+/// 的工具过滤字段。规则:
+/// - cfg `tools` 非空:def.tools 为空 → 直接采用;否则求交(两边都列
+///   才保留,取更严格者);
+/// - cfg `disallowed_tools` 非空:并集(排除是叠加语义);
+/// - cfg 两项皆空:原样返回(零行为变化)。
+fn apply_active_tool_filter(
+    mut def: AgentDefinition,
+    cfg: &zhuye_config::ReflectConfig,
+) -> AgentDefinition {
+    let allow = &cfg.active.tools;
+    let deny = &cfg.active.disallowed_tools;
+    if !allow.is_empty() {
+        if def.tools.is_empty() {
+            def.tools = allow.clone();
+        } else {
+            def.tools.retain(|t| allow.iter().any(|x| x == t));
+        }
+    }
+    if !deny.is_empty() {
+        for t in deny {
+            if !def.disallowed_tools.iter().any(|x| x == t) {
+                def.disallowed_tools.push(t.clone());
+            }
+        }
+    }
+    if !allow.is_empty() || !deny.is_empty() {
+        tracing::info!(
+            allow = ?allow,
+            deny = ?deny,
+            "[active] 工具裁切已应用(白名单 ∩ / 黑名单 ∪)"
+        );
+    }
+    def
+}
+
 /// 为当前 session 构造 M4 依赖项:agent 定义、记忆、技能、压缩器、
 /// prompt 构建器。
 #[allow(clippy::too_many_arguments)]
@@ -120,6 +156,13 @@ pub(crate) fn bootstrap_m4(
             d
         }
     });
+    // 把 config 层 `[active] tools` / `[active] disallowed_tools`
+    // 应用到主 agent 定义(serve / SDK 接入方由此裁掉内置工具,无需写
+    // `.zhuye/agents/*.md`)。语义与 agent 定义层一致:
+    // - `tools` 非空:与定义层白名单**求交**(定义层为空时直接采用);
+    // - `disallowed_tools` 非空:与定义层黑名单**取并集**。
+    // 两项都为空时不动 agent 定义(向后兼容)。
+    let active_def = apply_active_tool_filter(active_def, cfg);
     let active_def = Arc::new(active_def);
 
     // Skills:扫描 workspace + home skill 目录。
@@ -675,6 +718,55 @@ impl Summarizer for NoopSummarizer {
 mod tests {
     use super::*;
     use zhuye_protocol::{ContentBlock, MessageRole, RolloutRecord, ThreadId, TurnId};
+
+    /// `apply_active_tool_filter` 的三种组合语义。
+    #[test]
+    fn active_tool_filter_intersect_union_and_noop() {
+        // 全空 → 原样返回(向后兼容)。
+        let cfg = zhuye_config::ReflectConfig::default();
+        let def = AgentDefinition::default();
+        let out = apply_active_tool_filter(def.clone(), &cfg);
+        assert!(out.tools.is_empty() && out.disallowed_tools.is_empty());
+
+        // 白名单:定义层为空 → 直接采用。
+        let mut cfg = zhuye_config::ReflectConfig::default();
+        cfg.active.tools = vec!["get_weather".into(), "read".into()];
+        let out = apply_active_tool_filter(AgentDefinition::default(), &cfg);
+        assert_eq!(
+            out.tools,
+            vec!["get_weather".to_string(), "read".to_string()]
+        );
+
+        // 白名单:定义层已有 → 求交(取更严格者)。
+        let def = AgentDefinition {
+            tools: vec!["read".into(), "bash".into()],
+            ..Default::default()
+        };
+        let out = apply_active_tool_filter(def, &cfg);
+        assert_eq!(out.tools, vec!["read".to_string()]);
+
+        // 黑名单:并集叠加,不重复。
+        let cfg2 = zhuye_config::ReflectConfig {
+            active: zhuye_config::ActiveSection {
+                disallowed_tools: vec!["bash".into(), "write".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let def2 = AgentDefinition {
+            disallowed_tools: vec!["bash".into(), "web_search".into()],
+            ..Default::default()
+        };
+        let out = apply_active_tool_filter(def2, &cfg2);
+        assert_eq!(
+            out.disallowed_tools,
+            vec![
+                "bash".to_string(),
+                "web_search".to_string(),
+                "write".to_string()
+            ]
+        );
+    }
 
     /// 构造一个临时 HOME,在其下 `.zhuye/sessions/<今天>/<tid>.jsonl` 写入
     /// 给定 records,返回 tid 字符串。`bootstrap_resume` 通过 `default_base()`

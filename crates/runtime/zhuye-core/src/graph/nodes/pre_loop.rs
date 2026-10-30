@@ -322,7 +322,20 @@ pub async fn pre_loop(state: &mut AgentState, ctx: &NodeContext) -> Option<Graph
             "你是一名编码助手。",
         ),
     };
-    let mut core = zhuye_prompt::LayeredPrompt::compose_core(agent_prompt, &memory_text);
+    // `## Plan Mode` 段可关闭 —— 用户在 `.zhuye/prompts/*.md`
+    // 把 `## system.plan-mode` 覆盖为 `off`(或 none/disabled/false)时,
+    // core prompt 不再追加 Plan Mode 规则段。非编码场景(自定义分析师
+    // persona 等)由此摘掉编码代理人格,不再每请求背 ~2.3KB 无关指引。
+    // 判定用同一份 `prompt_set`(已含用户 default 层 + 按模型层)。
+    let include_plan_mode = zhuye_prompt::plan_mode_enabled_for(&model_spec);
+    let mut core = zhuye_prompt::LayeredPrompt::compose_core_with_plan_mode(
+        agent_prompt,
+        &memory_text,
+        include_plan_mode,
+    );
+    if !include_plan_mode {
+        tracing::debug!("system.plan-mode=off: core prompt 未注入 Plan Mode 规则段");
+    }
     let current_mode = ctx.cfg.permission_mode();
     zhuye_prompt::append_active_mode_section(&mut core, current_mode);
     // 清单回灌:把**最近一次** `TodoWrite` 的清单注入 core prompt ——

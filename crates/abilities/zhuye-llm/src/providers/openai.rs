@@ -30,6 +30,12 @@ pub struct OpenAIConfig {
     pub api_key: String,
     pub base_url: Option<String>,
     pub timeout: Duration,
+    /// `[openai] temperature` 段配置的默认采样温度。请求侧显式值
+    /// 优先;`None` 不发送该字段(provider 默认)。
+    pub temperature: Option<f32>,
+    /// `[openai] max_tokens` 段配置的默认输出上限。请求侧显式值
+    /// 优先;`None` 不发送该字段(provider 默认)。
+    pub max_tokens: Option<u32>,
 }
 
 impl Default for OpenAIConfig {
@@ -38,6 +44,8 @@ impl Default for OpenAIConfig {
             api_key: String::new(),
             base_url: None,
             timeout: Duration::from_secs(60),
+            temperature: None,
+            max_tokens: None,
         }
     }
 }
@@ -88,6 +96,14 @@ impl ModelClient for OpenAIClient {
         request: ChatRequest,
         cancel: CancellationToken,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError> {
+        // provider 段配置的 temperature / max_tokens 作为默认值回填
+        // (请求侧显式值优先)。
+        let mut request = request;
+        crate::providers::apply_request_param_defaults(
+            &mut request,
+            self.config.temperature,
+            self.config.max_tokens,
+        );
         let body: Value = serde_json::to_value(OpenAIRequest::from(request))
             .map_err(|e| LlmError::Internal(e.to_string()))?;
 
@@ -97,7 +113,8 @@ impl ModelClient for OpenAIClient {
             .as_deref()
             .unwrap_or(DEFAULT_BASE_URL)
             .trim_end_matches('/');
-        let url = format!("{base}/v1/chat/completions");
+        // base 已含版本段(/v1、/v4)时不再追加 /v1。
+        let url = crate::providers::join_versioned_endpoint(base, "/chat/completions");
 
         let mut req = self
             .http
@@ -127,6 +144,9 @@ impl ModelClient for OpenAIClient {
             return Err(classify_status(status_code, &text, &headers));
         }
 
+        // 非 SSE 响应(网关把普通 JSON 当 200 返回)显式报错,
+        // 不再让流以「成功但零内容」静默收场。
+        let response = crate::providers::ensure_sse_response(response, "chat/completions").await?;
         Ok(Box::pin(stream_sse(response, cancel)))
     }
 
@@ -141,7 +161,8 @@ impl ModelClient for OpenAIClient {
             .as_deref()
             .unwrap_or(DEFAULT_BASE_URL)
             .trim_end_matches('/');
-        let url = format!("{base}/v1/models");
+        // 与 chat 端点同一套版本段拼接规则。
+        let url = crate::providers::join_versioned_endpoint(base, "/models");
 
         let mut req = self.http.get(&url).header("Accept", "application/json");
         // 清单端点同样尊重「空 key 不发头」的约定(免 Key 端点)。
@@ -681,6 +702,37 @@ fn base64_encode(input: &[u8]) -> String {
 mod tests {
     use super::*;
     use crate::request::{SystemBlocks, UserContent};
+
+    /// 版本段拼接规则 —— 无版本段补 /v1;已有版本段(/v1、/v4)
+    /// 不重复追加;尾斜杠归一。
+    #[test]
+    fn join_endpoint_respects_version_segment() {
+        let j = crate::providers::join_versioned_endpoint;
+        assert_eq!(
+            j("https://api.openai.com", "/chat/completions"),
+            "https://api.openai.com/v1/chat/completions"
+        );
+        // OpenAI SDK 风格(带 /v1):不再拼出 /v1/v1/...。
+        assert_eq!(
+            j("https://gw.example.com/v1", "/chat/completions"),
+            "https://gw.example.com/v1/chat/completions"
+        );
+        // 智谱式版本段(/api/paas/v4):正确落到 v4 下。
+        assert_eq!(
+            j("https://open.bigmodel.cn/api/paas/v4", "/chat/completions"),
+            "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+        );
+        // 尾斜杠归一。
+        assert_eq!(
+            j("https://gw.example.com/v1/", "/models"),
+            "https://gw.example.com/v1/models"
+        );
+        // 非数字版本段不算版本段(仍补 /v1)。
+        assert_eq!(
+            j("https://gw.example.com/api", "/models"),
+            "https://gw.example.com/api/v1/models"
+        );
+    }
 
     #[test]
     fn 清单解析_取id与上下文窗口() {

@@ -89,8 +89,8 @@ TUI/GUI(`/prompt` 命令,协议级 `Op::PromptCommand`)可在会话运行中
 |------|-----|------|
 | 主 agent | `system.main` | 默认 agent system prompt(exec 入口) |
 | 主 agent | `system.facade-main` | 库门面(Builder)默认 agent prompt |
-| 模式 | `system.plan-mode` | Plan mode 规则手册(compose_core 注入) |
-| 模式 | `runtime.active-mode` | Plan mode「当前状态」告知段 |
+| 模式 | `system.plan-mode` | Plan mode 规则手册(compose_core 注入;覆盖为 `off` 可整段关闭,见下) |
+| 模式 | `runtime.active-mode` | Plan mode「当前状态」告知段(覆盖为 `off` 可关闭) |
 | 工具 | `tool.<name>` | 内置工具 description,如 `tool.read` / `tool.bash`(共 23 个) |
 | 运行时 | `runtime.nudge-loop` | 重复调用工具时的 loop 提醒 |
 | 运行时 | `runtime.nudge-final` | 迭代预算耗尽的收口提醒 |
@@ -110,6 +110,33 @@ TUI/GUI(`/prompt` 命令,协议级 `Op::PromptCommand`)可在会话运行中
 带 `{{ var }}` 的 key 经 minijinja 渲染(见 `zhuye_prompt::template`)。
 `FINAL ANSWER: <answer>` 收口模板是**格式契约**(测试与展示层剥标记依赖),
 保留在常量 `zhuye_prompt::FINAL_ANSWER_TEMPLATE`,nudge 文案经变量注入。
+
+## 关闭模式段(P-08)
+
+非编码场景(金融分析师、写作助手等自定义 persona)不需要 Plan Mode
+规则手册与工具诱导。把对应 section 覆盖为保留字 **`off`**(也接受
+`none` / `disabled` / `false`,大小写不敏感)即可整段关闭:
+
+```markdown
+<!-- ~/.zhuye/prompts/default.md -->
+## system.main
+你是一名金融预测分析师……
+
+## system.plan-mode
+off
+
+## runtime.active-mode
+off
+```
+
+- `system.plan-mode` = `off` → core system prompt 不再追加
+  `## Plan Mode` 规则段(每请求省 ~2.3KB 编码代理人格);
+- `runtime.active-mode` = `off` → Plan mode 下不再注入
+  `## Active Mode`「当前状态」段(正常执行模式本就不注入);
+- 覆盖为**空无效**:`## key` 分节的空正文会被解析器丢弃,必须写
+  `off` 等关键字;
+- 其余 key(`system.main` / `tool.*` 等)语义不变,这只是给「模式」
+  类 section 增加了显式关闭通道。
 
 ## 按模型覆盖示例
 

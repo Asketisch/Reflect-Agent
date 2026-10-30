@@ -11,6 +11,7 @@ fn cfg_with_anthropic(key: &str) -> ReflectConfig {
             model: Some("claude-test".into()),
             timeout_secs: Some(30),
             credentials: vec![],
+            ..Default::default()
         }),
         ..Default::default()
     }
@@ -25,6 +26,7 @@ fn cfg_with_openai(key: &str) -> ReflectConfig {
             timeout_secs: None,
             credentials: vec![],
             responses_api: false,
+            ..Default::default()
         }),
         ..Default::default()
     }
@@ -129,6 +131,54 @@ fn resolve_model_ollama_returns_section_override() {
     assert_eq!(cfg.resolve_model("ollama"), Some("qwen2.5:7b".to_string()));
 }
 
+/// 已知 provider 前缀(mock/openai/anthropic/ollama 及别名)
+/// 从 model 值上剥掉;未知前缀(OpenRouter 式 vendor/model)原样保留。
+#[test]
+fn strip_known_provider_prefix_strips_only_known_names() {
+    assert_eq!(super::strip_known_provider_prefix("openai/m1"), "m1");
+    assert_eq!(
+        super::strip_known_provider_prefix("anthropic/claude-x"),
+        "claude-x"
+    );
+    assert_eq!(
+        super::strip_known_provider_prefix("OpenAI/m1"),
+        "m1",
+        "大小写不敏感"
+    );
+    assert_eq!(super::strip_known_provider_prefix("mock/mock-1"), "mock-1");
+    // 未知前缀:整串保留(OpenRouter 式命名)。
+    assert_eq!(
+        super::strip_known_provider_prefix("cohere/north-mini-code:free"),
+        "cohere/north-mini-code:free"
+    );
+    // 无前缀:原样返回。
+    assert_eq!(super::strip_known_provider_prefix("gpt-4o"), "gpt-4o");
+    // 前缀后为空:视为异常形态,原样返回。
+    assert_eq!(super::strip_known_provider_prefix("openai/"), "openai/");
+}
+
+/// env 注入组合回归:`ZHUYE_MODEL=openai/m1` 的值经
+/// `resolve_model_inner` 解析后,请求体拿到的是 `m1` 而非整串 spec。
+#[test]
+fn resolve_model_env_with_provider_prefix_is_stripped() {
+    let cfg = cfg_with_openai("sk-o");
+    assert_eq!(
+        cfg.resolve_model_inner("openai", Some("openai/m1")),
+        Some("m1".to_string()),
+        "已知 provider 前缀必须剥掉"
+    );
+    // 未知前缀(OpenRouter 式)原样透传。
+    assert_eq!(
+        cfg.resolve_model_inner("openai", Some("cohere/north-mini-code:free")),
+        Some("cohere/north-mini-code:free".to_string())
+    );
+    // mock 的 spec 形态走专属分支(既有语义不变)。
+    assert_eq!(
+        cfg.resolve_model_inner("mock", Some("mock/mock-1")),
+        Some("mock-1".to_string())
+    );
+}
+
 /// v1.5 诚实化:未显式配置任何 model → `None`(不再编造内置默认)。
 #[test]
 fn resolve_model_returns_none_when_nothing_configured() {
@@ -204,6 +254,7 @@ fn legacy_api_key_wraps_to_default_credential() {
             model: None,
             timeout_secs: None,
             credentials: vec![],
+            ..Default::default()
         }),
         ..Default::default()
     };
@@ -231,6 +282,7 @@ fn credentials_array_takes_precedence_over_legacy_api_key() {
                 cooldown_override_secs: None,
                 quota: None,
             }],
+            ..Default::default()
         }),
         ..Default::default()
     };
@@ -293,6 +345,7 @@ fn keyless_openai_with_base_url_registers_pool() {
             timeout_secs: Some(300),
             credentials: vec![],
             responses_api: false,
+            ..Default::default()
         }),
         ..Default::default()
     };

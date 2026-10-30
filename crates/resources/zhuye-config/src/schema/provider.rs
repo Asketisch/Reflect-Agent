@@ -85,7 +85,7 @@ impl CredentialConfig {
 // ── Provider Sections ──────────────────────────────────────────
 
 /// Anthropic provider 配置 —— `[anthropic]` 段。
-#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
 pub struct AnthropicSection {
     #[serde(default)]
     pub api_key: Option<String>,
@@ -94,10 +94,16 @@ pub struct AnthropicSection {
     pub timeout_secs: Option<u64>,
     #[serde(default)]
     pub credentials: Vec<CredentialConfig>,
+    /// 默认采样温度(请求侧显式值优先;缺省不发送该字段)。
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    /// 默认输出上限(请求侧显式值优先;缺省走 provider 默认)。
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
 }
 
 /// OpenAI provider 配置 —— `[openai]` 段。
-#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
 pub struct OpenAISection {
     #[serde(default)]
     pub api_key: Option<String>,
@@ -110,10 +116,16 @@ pub struct OpenAISection {
     /// (`/v1/responses`)替代 `OpenAIClient`(`/v1/chat/completions`)。
     #[serde(default)]
     pub responses_api: bool,
+    /// 默认采样温度(请求侧显式值优先;缺省不发送该字段)。
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    /// 默认输出上限(请求侧显式值优先;缺省走 provider 默认)。
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
 }
 
 /// Ollama 本地 provider 配置 —— `[ollama]` 段。
-#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
 pub struct OllamaSection {
     pub base_url: Option<String>,
     pub api_key: Option<String>,
@@ -124,4 +136,10 @@ pub struct OllamaSection {
     pub timeout_secs: Option<u64>,
     #[serde(default)]
     pub credentials: Vec<CredentialConfig>,
+    /// 默认采样温度(请求侧显式值优先;缺省不发送该字段)。
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    /// 默认输出上限(映射为 `options.num_predict`;请求侧显式值优先)。
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
 }

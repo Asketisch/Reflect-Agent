@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from zhuye import ZhuyeAgent, ToolOutput, ContentBlock
+from zhuye import ZhuyeAgent, ZhuyeAgentOptions, ToolOutput, ContentBlock
 
 
 MOCK_SERVE_JS = r"""
@@ -303,3 +303,126 @@ def test_wire_type_annotations() -> None:
     assert set(get_args(get_type_hints(protocol.PlanApprovalOp)["choice"])) == {"auto_mode", "manual_approve", "revise"}
     assert get_type_hints(protocol.TurnAborted)["reason"] == protocol.AbortReason
     assert protocol.ReviewDecisionDeny.__required_keys__ == {"deny"}
+
+
+# ── 修复回归:prompt 去重 / 握手失败定位 / stderr 分发 ───────────────────
+
+
+def test_prompt_dedups_delta_then_full_message() -> None:
+    """同一轮先 delta 后全量 message 时,全量覆盖 delta 缓冲,
+    prompt() 不得返回重复拼接文本。"""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not available for mock serve")
+    js = r"""
+console.log(JSON.stringify({
+  id: '',
+  msg: { type: 'session_configured', session_id: 's', model: 'mock/mock-1',
+         provider: 'mock', approval_policy: 'auto', sandbox_policy: 'workspace_only' },
+}));
+const readline = require('node:readline');
+const rl = readline.createInterface({ input: process.stdin });
+rl.on('line', (line) => {
+  let sub;
+  try { sub = JSON.parse(line); } catch { return; }
+  if (sub.op && sub.op.type === 'shutdown') {
+    console.log(JSON.stringify({ id: sub.id, msg: { type: 'shutdown_complete' } }));
+    process.exit(0);
+  }
+  if (sub.op && sub.op.type === 'user_input') {
+    console.log(JSON.stringify({ id: sub.id, msg: { type: 'agent_message_delta', delta: 'delta-' } }));
+    console.log(JSON.stringify({ id: sub.id, msg: { type: 'agent_message_delta', delta: 'part' } }));
+    // 全量消息与 delta 同轮混发(协议允许):全量是权威快照。
+    console.log(JSON.stringify({ id: sub.id, msg: { type: 'agent_message', text: 'final-text' } }));
+    console.log(JSON.stringify({
+      id: sub.id, msg: { type: 'turn_complete', turn_id: 't', status: 'success',
+        usage: { input_tokens: 0, output_tokens: 1 } },
+    }));
+  }
+});
+"""
+    proc = subprocess.Popen(
+        [node, "-e", js],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        ag = ZhuyeAgent.from_popen(proc, handshake_timeout_secs=30.0)
+    except Exception:
+        proc.kill()
+        raise
+    try:
+        # 修复前:'delta-partfinal-text'(重复计数);修复后:全量覆盖 delta。
+        assert ag.prompt("hi") == "final-text"
+    finally:
+        ag.close()
+
+
+def test_handshake_death_raises_with_stderr_tail(tmp_path) -> None:
+    """子进程握手期死亡 → 立刻抛错,异常含退出码与 stderr 尾部
+    (真实原因),不再傻等满握手超时报泛化的 timed out。
+
+    走真实 `spawn()` 路径(bin 指向临时假脚本):死亡检测 + stderr
+    tail 都挂在 spawn 的转发线程上,from_popen 不具备该语义。
+    """
+    fake_bin = tmp_path / "fake-zhuye"
+    fake_bin.write_text(
+        "#!/bin/sh\n"
+        "echo 'config file corrupted: invalid [openai] section' >&2\n"
+        "exit 7\n"
+    )
+    fake_bin.chmod(0o755)
+    start = time.monotonic()
+    with pytest.raises(RuntimeError) as excinfo:
+        ZhuyeAgent.spawn(
+            ZhuyeAgentOptions(bin=str(fake_bin), handshake_timeout_secs=30.0)
+        )
+    elapsed = time.monotonic() - start
+    message = str(excinfo.value)
+    assert "exited during handshake (code=7)" in message, message
+    assert "config file corrupted" in message, "异常应携带 stderr 尾部"
+    # 死亡后立刻抛出(远小于 30s 握手超时),不是等满超时。
+    assert elapsed < 10, f"应在死亡后立刻抛错,实际耗时 {elapsed:.1f}s"
+
+
+def test_stderr_forward_stream_dispatch_semantics() -> None:
+    """`_forward_stream` 三种分发模式 —— 回调接管 / 静默丢弃 /
+    tail ring buffer 始终保留(握手死亡时携带真实原因)。"""
+    import collections
+    import io
+    import os as _os
+    import threading as _t
+
+    import zhuye.agent as _agent_mod
+
+    # 回调接管:chunk 进回调 + tail。
+    r1, w1 = _os.pipe()
+    src1 = io.open(r1, "rb", buffering=0)
+    tail1 = collections.deque(maxlen=32)
+    cb: list[bytes] = []
+    t1 = _t.Thread(
+        target=_agent_mod._forward_stream,
+        args=(src1, None, lambda chunk: cb.append(chunk), tail1),
+        daemon=True,
+    )
+    t1.start()
+    _os.write(w1, b"chunk-one\n")
+    _os.close(w1)
+    t1.join(timeout=5)
+    assert b"chunk-one" in cb[0], "回调应收到原始块"
+    assert any(b"chunk-one" in c for c in tail1), "tail ring buffer 应保留块"
+
+    # 静默模式:无回调无 dst → 不透传,但 tail 仍保留。
+    r2, w2 = _os.pipe()
+    src2 = io.open(r2, "rb", buffering=0)
+    tail2 = collections.deque(maxlen=32)
+    t2 = _t.Thread(
+        target=_agent_mod._forward_stream, args=(src2, None, None, tail2),
+        daemon=True,
+    )
+    t2.start()
+    _os.write(w2, b"quiet\n")
+    _os.close(w2)
+    t2.join(timeout=5)
+    assert any(b"quiet" in c for c in tail2), "静默模式 tail 仍应保留"

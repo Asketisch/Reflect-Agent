@@ -302,3 +302,103 @@ describe('ZhuyeAgent 协议回路(mock serve 驱动)', () => {
     }
   }, 10_000);
 });
+// ── 修复回归:prompt 去重 / 握手失败定位 / stderr 接管 ───────────────────
+
+describe('修复回归:prompt 去重 / 握手失败定位 / stderr 接管', () => {
+  it('prompt:同轮 delta 后接全量 message 时全量覆盖(去重)', async () => {
+    const script = `
+      process.stdout.write(JSON.stringify({
+        id: '', msg: { type: 'session_configured', session_id: 's', model: 'mock/mock-1',
+        provider: 'mock', approval_policy: 'auto', sandbox_policy: 'workspace_only' },
+      }) + '\\n');
+      const readline = require('node:readline');
+      const rl = readline.createInterface({ input: process.stdin });
+      rl.on('line', (line) => {
+        let sub; try { sub = JSON.parse(line); } catch { return; }
+        if (sub.op?.type === 'shutdown') {
+          process.stdout.write(JSON.stringify({ id: sub.id, msg: { type: 'shutdown_complete' } }) + '\\n');
+          process.exit(0);
+        }
+        if (sub.op?.type === 'user_input') {
+          process.stdout.write(JSON.stringify({ id: sub.id, msg: { type: 'agent_message_delta', delta: 'delta-part' } }) + '\\n');
+          // 全量消息与 delta 同轮混发(协议允许):全量是权威快照。
+          process.stdout.write(JSON.stringify({ id: sub.id, msg: { type: 'agent_message', text: 'final-text' } }) + '\\n');
+          process.stdout.write(JSON.stringify({ id: sub.id, msg: { type: 'turn_complete', turn_id: 't', status: 'success',
+            usage: { input_tokens: 0, output_tokens: 1 } } }) + '\\n');
+        }
+      });
+    `;
+    const child = spawn(process.execPath, ['-e', script], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const agent = await ZhuyeAgent.fromStdio(child.stdin, child.stdout);
+    try {
+      // 修复前:'delta-partfinal-text'(重复计数);修复后:全量覆盖 delta 缓冲。
+      expect(await agent.prompt('hi')).toBe('final-text');
+    } finally {
+      await agent.close();
+    }
+  }, 15_000);
+
+  it('spawn 握手期子进程死亡 → 首次使用立刻抛错并携带 stderr 尾部', async () => {
+    // 假二进制:忽略 serve 参数,打印真实错误到 stderr 后 exit 7
+    // (模拟 serve 配置错误启动即死)。TS 的 spawn() 不等握手即返回
+    // (与 Python 不同),死亡错误在首次 submit() 时经内部 ready
+    // promise 冒出 —— 不再傻等满握手超时。
+    const { mkdtempSync, writeFileSync, chmodSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'zhuye-fake-bin-'));
+    const bin = join(dir, 'fake-zhuye');
+    writeFileSync(bin, [
+      '#!/bin/sh',
+      'printf %s\\n "config file corrupted: invalid [openai] section" >&2',
+      'exit 7',
+    ].join('\n'));
+    chmodSync(bin, 0o755);
+    const start = Date.now();
+    const agent = await ZhuyeAgent.spawn({ bin });
+    const message = await agent.submit('hi').then(
+      () => '',
+      (err: Error) => err.message,
+    );
+    expect(message).toContain('exited during handshake (code=7');
+    expect(message).toContain('config file corrupted');
+    // 死亡后立刻抛错,远小于默认 30s 握手超时。
+    expect(Date.now() - start).toBeLessThan(15_000);
+    await agent.close().catch(() => {});
+  }, 20_000);
+
+  it('onStderr 回调接管子进程 stderr', async () => {
+    // 假二进制:往 stderr 打一行负载,发握手后驻留(等 close 收杀)。
+    // onStderr 回调应收到该负载 —— 即 stderr 被宿主接管而非硬编码
+    // 直通宿主进程。
+    const { mkdtempSync, writeFileSync, chmodSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'zhuye-fake-bin2-'));
+    const bin = join(dir, 'fake-zhuye-ok');
+    writeFileSync(bin, [
+      '#!/bin/sh',
+      'printf %s\\n "stderr-payload-captured" >&2',
+      "printf %s\\n '{\"id\":\"\",\"msg\":{\"type\":\"session_configured\",\"session_id\":\"s\",\"model\":\"m\",\"provider\":\"p\",\"approval_policy\":\"auto\",\"sandbox_policy\":\"w\"}}'",
+      'sleep 30',
+    ].join('\n'));
+    chmodSync(bin, 0o755);
+    const captured: Buffer[] = [];
+    const agent2 = await ZhuyeAgent.spawn({ bin, onStderr: (c) => captured.push(c) });
+    try {
+      // stderr chunk 异步到达:轮询等待,至多 5s。
+      const deadline = Date.now() + 5_000;
+      while (
+        !captured.some((c) => c.toString('utf-8').includes('stderr-payload-captured'))
+        && Date.now() < deadline
+      ) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(
+        captured.some((c) => c.toString('utf-8').includes('stderr-payload-captured')),
+      ).toBe(true);
+    } finally {
+      await agent2.close();
+    }
+  }, 20_000);
+});

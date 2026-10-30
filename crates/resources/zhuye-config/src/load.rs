@@ -6,8 +6,21 @@ use crate::error::ConfigError;
 use crate::schema::{CURRENT_CONFIG_VERSION, ReflectConfig};
 use crate::{DEFAULT_CONFIG_DIR, DEFAULT_CONFIG_FILE};
 
-/// `$HOME/.zhuye/config.toml` 的绝对路径。
+/// config.toml 的绝对路径。
+///
+/// 优先级:`$ZHUYE_HOME/config.toml` > `$HOME/.zhuye/config.toml`。
+///
+/// 此前本函数只读 `$HOME`,而 session-notes / prompts 等
+/// 数据目录跟随 `ZHUYE_HOME` —— 同一变量两套语义,多实例(测试 /
+/// 多端点并行)拿不到配置隔离。现在配置读取与数据目录一致:
+/// `ZHUYE_HOME` 指向的目录**就是** `.zhuye` 目录本身(其下直接放
+/// `config.toml`),未设置时回落 `$HOME/.zhuye`。
 pub fn default_config_path() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("ZHUYE_HOME") {
+        if !home.is_empty() {
+            return Some(PathBuf::from(home).join(DEFAULT_CONFIG_FILE));
+        }
+    }
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .map(|h| h.join(DEFAULT_CONFIG_DIR).join(DEFAULT_CONFIG_FILE))
@@ -197,8 +210,45 @@ test_command = "cargo test --quiet"
         // 都断言它可反序列化且结构良好。
         let _: ActiveSection = cfg.active;
         let _: Option<AnthropicSection> = cfg.anthropic;
+        let _: Option<crate::schema::OpenAISection> = cfg.openai;
         let _: CompactSection = cfg.compact;
         let _: HooksSection = cfg.hooks;
+    }
+
+    /// `ZHUYE_HOME` 指向的目录放有合法 config.toml 时,
+    /// `load_default` 必须读到它(配置与 session-notes 等数据目录同一
+    /// 套 `ZHUYE_HOME` 语义)。env 改写用互斥锁串行化,避免并行测试互踩。
+    #[test]
+    fn zhuye_home_redirects_config_load() {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let toml = r#"
+[active]
+provider = "anthropic"
+
+[anthropic]
+api_key = "zhuye-home-isolated"
+"#;
+        std::fs::write(dir.path().join(DEFAULT_CONFIG_FILE), toml).unwrap();
+        let orig = std::env::var_os("ZHUYE_HOME");
+        // SAFETY:已持互斥锁;单线程测试进程内无并发读者。
+        unsafe {
+            std::env::set_var("ZHUYE_HOME", dir.path());
+        }
+        let cfg = load_default();
+        // SAFETY:同上,仍持锁。
+        unsafe {
+            match orig {
+                Some(v) => std::env::set_var("ZHUYE_HOME", v),
+                None => std::env::remove_var("ZHUYE_HOME"),
+            }
+        }
+        assert_eq!(cfg.active.provider.as_deref(), Some("anthropic"));
+        assert_eq!(
+            cfg.anthropic.unwrap().api_key.as_deref(),
+            Some("zhuye-home-isolated")
+        );
     }
 
     #[test]

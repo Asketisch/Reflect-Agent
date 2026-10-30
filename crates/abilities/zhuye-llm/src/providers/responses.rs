@@ -43,6 +43,13 @@ pub struct OpenAIResponsesConfig {
     /// 模型 id,如 `gpt-4o`。
     #[serde(default = "default_model")]
     pub model: String,
+    /// 段配置的默认采样温度。请求侧显式值优先。
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    /// 段配置的默认输出上限(映射为 `max_output_tokens`)。
+    /// 请求侧显式值优先。
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
 }
 
 fn default_timeout_secs() -> u64 {
@@ -60,6 +67,8 @@ impl Default for OpenAIResponsesConfig {
             base_url: None,
             timeout_secs: default_timeout_secs(),
             model: default_model(),
+            temperature: None,
+            max_tokens: None,
         }
     }
 }
@@ -108,8 +117,19 @@ impl ModelClient for OpenAIResponsesClient {
         request: ChatRequest,
         cancel: CancellationToken,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatEvent, LlmError>> + Send>>, LlmError> {
-        let body: Value = serde_json::to_value(ResponsesRequest::from(request))
-            .map_err(|e| LlmError::Internal(e.to_string()))?;
+        let body: Value = {
+            // provider 段配置的 temperature / max_tokens 作为默认值
+            // 回填(请求侧显式值优先)。Responses 的输出上限字段名是
+            // `max_output_tokens`,由 `ResponsesRequest::from` 映射。
+            let mut request = request;
+            crate::providers::apply_request_param_defaults(
+                &mut request,
+                self.config.temperature,
+                self.config.max_tokens,
+            );
+            serde_json::to_value(ResponsesRequest::from(request))
+                .map_err(|e| LlmError::Internal(e.to_string()))?
+        };
 
         let base = self
             .config
@@ -117,7 +137,8 @@ impl ModelClient for OpenAIResponsesClient {
             .as_deref()
             .unwrap_or(DEFAULT_BASE_URL)
             .trim_end_matches('/');
-        let url = format!("{base}{}", self.endpoint_path());
+        // base 已含版本段(/v1、/v4)时不再追加 /v1。
+        let url = crate::providers::join_versioned_endpoint(base, "/responses");
 
         let mut req = self
             .http
@@ -146,6 +167,8 @@ impl ModelClient for OpenAIResponsesClient {
             return Err(classify_status(status_code, &text, &headers));
         }
 
+        // 非 SSE 响应显式报错(同 openai.rs,不再静默零内容收场)。
+        let response = crate::providers::ensure_sse_response(response, "v1/responses").await?;
         Ok(Box::pin(stream_sse(response, cancel)))
     }
 
@@ -160,7 +183,8 @@ impl ModelClient for OpenAIResponsesClient {
             .as_deref()
             .unwrap_or(DEFAULT_BASE_URL)
             .trim_end_matches('/');
-        let url = format!("{base}/v1/models");
+        // 与 responses 端点同一套版本段拼接规则。
+        let url = crate::providers::join_versioned_endpoint(base, "/models");
 
         let mut req = self.http.get(&url).header("Accept", "application/json");
         if !self.config.api_key.is_empty() {

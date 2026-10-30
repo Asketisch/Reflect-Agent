@@ -46,6 +46,35 @@ pub fn plan_mode_guidance() -> &'static str {
     crate::copy("system.plan-mode")
 }
 
+/// 提示词 section 的「关闭」判定。
+///
+/// `.zhuye/prompts/*.md` 把对应 section 覆盖为这些保留字之一
+/// (大小写不敏感)即视为**显式关闭**该段:`off` / `none` /
+/// `disabled` / `false`。注意 `parse_sections` 会丢弃空 body 的
+/// section,所以「覆盖为空」到不了这里 —— 必须写 `off` 等关键字。
+pub fn is_section_off(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "off" | "none" | "disabled" | "false"
+    )
+}
+
+/// 按提示词库判定 `## Plan Mode` 段是否注入。
+///
+/// 解析顺序与 `compose_core` 的文案来源一致:内嵌 default 层 → 旧版
+/// `prompts.md` → 用户层(`.zhuye/prompts/default.md` 等)。用户把
+/// `## system.plan-mode` 覆盖为 `off`(或 none/disabled/false)时,
+/// core prompt 不再追加 Plan Mode 规则段 —— 非编码场景(如金融分析
+/// 师)由此摘掉 ~2.3KB 的编码代理人格,不再被 PlanWrite/ExitPlanMode
+/// 的使用说明污染上下文。
+pub fn plan_mode_enabled_for(spec: &str) -> bool {
+    match crate::library().resolve(spec).get("system.plan-mode") {
+        Some(value) => !is_section_off(value),
+        // section 缺失 = 内嵌默认仍生效(`copy()` 的既有语义)。
+        None => true,
+    }
+}
+
 /// v1.x Plan mode:agent 当前处于 `PermissionMode::Plan` 时追加到
 /// `core` 的"当前模式"段落。
 ///
@@ -70,10 +99,14 @@ pub fn append_active_mode_section(core: &mut String, mode: zhuye_protocol::Permi
     // v1.6:段文案外置为 `runtime.active-mode` section(含 `## Active Mode`
     // 标题),可经 `.zhuye/prompts/*.md` 按模型覆盖;缺失时回落编译期
     // 内嵌默认(provider-independent 措辞,避免各 provider 措辞漂移)。
-    let section = crate::library()
-        .resolve("")
-        .get_or("runtime.active-mode", "## Active Mode\nYou are currently in Plan mode (read-only — `write` / `edit` are hidden from your tool list). Research the codebase, then use the `PlanWrite` tool to write your complete plan as full Markdown to the plan file (path shown in the per-turn reminder below). Once the plan file is written, call `ExitPlanMode` to request user approval — it reads the plan from the file. Do not call `ExitPlanMode` before writing the plan file. Do not keep researching once you can articulate the plan. Do NOT call `EnterPlanMode` — you are already in Plan mode; calling it again will trigger a redundant confirmation popup and a tool-denied error.\n")
-        .to_string();
+    // 覆盖为 `off` / `none` / `disabled` / `false` 时视为显式关闭,
+    // 不注入该段(与 `system.plan-mode` 的关闭语义一致)。
+    let resolved = crate::library().resolve("");
+    let overridden = resolved.get("runtime.active-mode");
+    if overridden.is_some_and(is_section_off) {
+        return;
+    }
+    let section = overridden.unwrap_or("## Active Mode\nYou are currently in Plan mode (read-only — `write` / `edit` are hidden from your tool list). Research the codebase, then use the `PlanWrite` tool to write your complete plan as full Markdown to the plan file (path shown in the per-turn reminder below). Once the plan file is written, call `ExitPlanMode` to request user approval — it reads the plan from the file. Do not call `ExitPlanMode` before writing the plan file. Do not keep researching once you can articulate the plan. Do NOT call `EnterPlanMode` — you are already in Plan mode; calling it again will trigger a redundant confirmation popup and a tool-denied error.\n").to_string();
     let plan_start = core
         .find(PLAN_MODE_HEADER)
         .expect("compose_core 一定先注入 PLAN_MODE_HEADER,这里不应缺失");
@@ -146,9 +179,21 @@ impl LayeredPrompt {
     /// 出与 provider 无关的 core 层。内存追加在 `MEMORY_HEADER` 之下;
     /// 若 `memory` 为空,则整个 header 一并省略。
     pub fn compose_core(agent_system_prompt: &str, memory: &str) -> String {
-        let guidance = plan_mode_guidance();
-        let mut out =
-            String::with_capacity(agent_system_prompt.len() + memory.len() + guidance.len() + 96);
+        Self::compose_core_with_plan_mode(agent_system_prompt, memory, true)
+    }
+
+    /// [`compose_core`](Self::compose_core) 的可关版本:
+    /// `include_plan_mode = false` 时**不追加** `## Plan Mode` 规则段,
+    /// 其余组合逻辑完全一致。调用方(pre_loop)按提示词库的
+    /// `system.plan-mode` 覆盖值判定([`plan_mode_enabled_for`])。
+    pub fn compose_core_with_plan_mode(
+        agent_system_prompt: &str,
+        memory: &str,
+        include_plan_mode: bool,
+    ) -> String {
+        let mut out = String::with_capacity(
+            agent_system_prompt.len() + memory.len() + plan_mode_guidance().len() + 96,
+        );
         out.push_str(agent_system_prompt);
         if !out.is_empty() && !out.ends_with('\n') {
             out.push('\n');
@@ -156,10 +201,12 @@ impl LayeredPrompt {
         if !out.is_empty() {
             out.push('\n');
         }
-        out.push_str(PLAN_MODE_HEADER);
-        out.push('\n');
-        out.push_str(guidance);
-        out.push('\n');
+        if include_plan_mode {
+            out.push_str(PLAN_MODE_HEADER);
+            out.push('\n');
+            out.push_str(plan_mode_guidance());
+            out.push('\n');
+        }
         if !memory.trim().is_empty() {
             out.push('\n');
             out.push_str(MEMORY_HEADER);
@@ -463,6 +510,53 @@ mod tests {
         assert!(out.contains("you are a reviewer"));
         assert!(out.contains(MEMORY_HEADER));
         assert!(out.contains("- foo"));
+    }
+
+    // ── Plan Mode 段可关闭 ──────────────────────────────────────────
+
+    /// `compose_core_with_plan_mode(false)` 不注入 Plan Mode 段,其余
+    /// (agent 文本 / memory)与 `compose_core` 完全一致。
+    #[test]
+    fn compose_core_with_plan_mode_off_skips_plan_section() {
+        let with = LayeredPrompt::compose_core("分析师 persona", "记住这点");
+        let without =
+            LayeredPrompt::compose_core_with_plan_mode("分析师 persona", "记住这点", false);
+        assert!(with.contains(PLAN_MODE_HEADER));
+        assert!(
+            !without.contains(PLAN_MODE_HEADER),
+            "关闭后不得残留 Plan Mode 段: {without}"
+        );
+        assert!(without.contains("分析师 persona"));
+        assert!(without.contains(MEMORY_HEADER));
+        assert!(without.contains("记住这点"));
+    }
+
+    /// `compose_core_with_plan_mode(true)` 与旧 `compose_core` 等价。
+    #[test]
+    fn compose_core_with_plan_mode_on_matches_legacy() {
+        let legacy = LayeredPrompt::compose_core("base", "mem");
+        let explicit = LayeredPrompt::compose_core_with_plan_mode("base", "mem", true);
+        assert_eq!(legacy, explicit);
+    }
+
+    /// `is_section_off` 关闭字判定(大小写不敏感,空串不算)。
+    #[test]
+    fn is_section_off_recognizes_off_keywords() {
+        for kw in ["off", "OFF", "none", "Disabled", "false", " false "] {
+            assert!(is_section_off(kw), "{kw} 应判为关闭");
+        }
+        for keep in ["", "true", "on", "## Plan Mode 规则正文"] {
+            assert!(!is_section_off(keep), "`{keep}` 不应判为关闭");
+        }
+    }
+
+    /// `plan_mode_enabled_for`:默认(无用户覆盖)恒开。
+    /// 用户层覆盖为 off 时才关 —— 这里只测默认路径(不污染全局库)。
+    #[test]
+    fn plan_mode_enabled_for_defaults_on() {
+        // 全局库在测试进程里可能被其他测试 init;无论哪种状态,内嵌
+        // default 层都没有把 system.plan-mode 写成 off,应判为开启。
+        assert!(plan_mode_enabled_for("mock/mock-1"));
     }
 
     #[test]

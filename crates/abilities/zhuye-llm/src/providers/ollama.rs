@@ -49,6 +49,12 @@ pub struct OllamaConfig {
     pub timeout: Duration,
     /// 默认 model 覆盖。builder 一般已带;这里是兜底。
     pub model: Option<String>,
+    /// `[ollama] temperature` 段配置的默认采样温度。请求侧显式值
+    /// 优先;`None` 不发送该字段。
+    pub temperature: Option<f32>,
+    /// `[ollama] max_tokens` 段配置的默认输出上限(映射为
+    /// `options.num_predict`)。请求侧显式值优先。
+    pub max_tokens: Option<u32>,
 }
 
 impl Default for OllamaConfig {
@@ -61,6 +67,8 @@ impl Default for OllamaConfig {
             num_gpu: None,
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             model: None,
+            temperature: None,
+            max_tokens: None,
         }
     }
 }
@@ -134,6 +142,14 @@ impl ModelClient for OllamaClient {
         } else {
             request.model.clone()
         };
+        // provider 段配置的 temperature / max_tokens 作为默认值回填
+        // (请求侧显式值优先)。
+        let mut request = request;
+        crate::providers::apply_request_param_defaults(
+            &mut request,
+            self.config.temperature,
+            self.config.max_tokens,
+        );
         let req = build_request(&request, &model, &self.config);
 
         let url = format!("{}/api/chat", self.resolved_base_url());

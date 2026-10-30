@@ -31,7 +31,7 @@ pub mod template;
 
 pub use builder::{
     CORE_PREFIX, EPHEMERAL_PREFIX, LayeredPrompt, MEMORY_HEADER, PLAN_MODE_HEADER, PromptBuilder,
-    append_active_mode_section, plan_mode_guidance,
+    append_active_mode_section, is_section_off, plan_mode_enabled_for, plan_mode_guidance,
 };
 pub use caching::{
     CacheBreakDetector, CacheBreakError, CacheMonitorStats, DEFAULT_PREFIX_ANCHOR_OFFSET,

@@ -37,6 +37,12 @@ pub struct AnthropicConfig {
     pub api_key: String,
     pub base_url: Option<String>,
     pub timeout: Duration,
+    /// `[anthropic] temperature` 段配置的默认采样温度。请求侧
+    /// 显式值优先;`None` 不发送该字段(provider 默认)。
+    pub temperature: Option<f32>,
+    /// `[anthropic] max_tokens` 段配置的默认输出上限。请求侧
+    /// 显式值优先;`None` 回落 provider 默认(4096)。
+    pub max_tokens: Option<u32>,
 }
 
 impl Default for AnthropicConfig {
@@ -45,6 +51,8 @@ impl Default for AnthropicConfig {
             api_key: String::new(),
             base_url: None,
             timeout: Duration::from_secs(60),
+            temperature: None,
+            max_tokens: None,
         }
     }
 }
@@ -96,6 +104,14 @@ impl ModelClient for AnthropicClient {
         // 还原为 ContentDelta 文本,上层无感知(声明 json_mode 的既有
         // 注释 "via tool-forced JSON" 由此真正落地)。
         let structured = request.response_format.is_some();
+        // provider 段配置的 temperature / max_tokens 作为默认值回填
+        // (请求侧显式值优先)。
+        let mut request = request;
+        crate::providers::apply_request_param_defaults(
+            &mut request,
+            self.config.temperature,
+            self.config.max_tokens,
+        );
         let body: Value = serde_json::to_value(AnthropicRequest::from(request))
             .map_err(|e| LlmError::Internal(e.to_string()))?;
 
@@ -105,7 +121,8 @@ impl ModelClient for AnthropicClient {
             .as_deref()
             .unwrap_or(DEFAULT_BASE_URL)
             .trim_end_matches('/');
-        let url = format!("{base}/v1/messages");
+        // base 已含版本段(/v1、/v4)时不再追加 /v1。
+        let url = crate::providers::join_versioned_endpoint(base, "/messages");
 
         if cancel.is_cancelled() {
             return Err(LlmError::Cancelled);
@@ -140,6 +157,9 @@ impl ModelClient for AnthropicClient {
             let text = response.text().await.unwrap_or_default();
             return Err(classify_status(status_code, &text, &headers));
         }
+
+        // 非 SSE 响应显式报错(同 openai.rs,不再静默零内容收场)。
+        let response = crate::providers::ensure_sse_response(response, "v1/messages").await?;
 
         if structured {
             Ok(Box::pin(unwrap_structured_output(stream_sse(

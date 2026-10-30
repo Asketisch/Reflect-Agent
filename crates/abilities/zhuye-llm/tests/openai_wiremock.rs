@@ -37,7 +37,7 @@ async fn openai_happy_path_parses_sse() {
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
         .and(header("Authorization", "Bearer test-key"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
         .mount(&server)
         .await;
 
@@ -45,6 +45,8 @@ async fn openai_happy_path_parses_sse() {
         api_key: "test-key".into(),
         base_url: Some(server.uri()),
         timeout: Duration::from_secs(5),
+        temperature: None,
+        max_tokens: None,
     })
     .unwrap();
     let mut stream = client
@@ -76,6 +78,8 @@ async fn openai_401_maps_to_auth_error() {
         api_key: "k".into(),
         base_url: Some(server.uri()),
         timeout: Duration::from_secs(5),
+        temperature: None,
+        max_tokens: None,
     })
     .unwrap();
     let err = match client
@@ -105,6 +109,8 @@ async fn openai_429_honors_retry_after() {
         api_key: "k".into(),
         base_url: Some(server.uri()),
         timeout: Duration::from_secs(5),
+        temperature: None,
+        max_tokens: None,
     })
     .unwrap();
     let err = match client
@@ -126,7 +132,7 @@ async fn openai_stream_with_tool_calls_and_usage() {
     let body = "data: {\"id\":\"chatcmpl-2\",\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"bash\",\"arguments\":\"\"}}]}}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"cmd\\\":\\\"ls\\\"}\"}}]}}]}\n\ndata: {\"choices\":[{\"finish_reason\":\"tool_calls\"}]}\n\ndata: {\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12,\"prompt_tokens_details\":{\"cached_tokens\":3}}}\n\ndata: [DONE]\n\n";
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
         .mount(&server)
         .await;
 
@@ -134,6 +140,8 @@ async fn openai_stream_with_tool_calls_and_usage() {
         api_key: "k".into(),
         base_url: Some(server.uri()),
         timeout: Duration::from_secs(5),
+        temperature: None,
+        max_tokens: None,
     })
     .unwrap();
     let mut stream = client
@@ -174,6 +182,8 @@ async fn openai_500_maps_to_provider_error() {
         api_key: "k".into(),
         base_url: Some(server.uri()),
         timeout: Duration::from_secs(5),
+        temperature: None,
+        max_tokens: None,
     })
     .unwrap();
     let err = match client
@@ -199,8 +209,9 @@ async fn openai_request_body_has_model_and_stream() {
     let captured_c = captured.clone();
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
             "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+            "text/event-stream",
         ))
         .mount(&server)
         .await;
@@ -210,6 +221,8 @@ async fn openai_request_body_has_model_and_stream() {
         api_key: "k".into(),
         base_url: Some(server.uri()),
         timeout: Duration::from_secs(5),
+        temperature: None,
+        max_tokens: None,
     })
     .unwrap();
     let _ = client
@@ -246,8 +259,9 @@ async fn openai_empty_api_key_omits_authorization_header() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
             "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+            "text/event-stream",
         ))
         .mount(&server)
         .await;
@@ -256,6 +270,8 @@ async fn openai_empty_api_key_omits_authorization_header() {
         api_key: String::new(),
         base_url: Some(server.uri()),
         timeout: Duration::from_secs(5),
+        temperature: None,
+        max_tokens: None,
     })
     .unwrap();
     let _ = client
@@ -291,6 +307,8 @@ async fn openai_list_models_parses_listing() {
         api_key: String::new(),
         base_url: Some(server.uri()),
         timeout: Duration::from_secs(5),
+        temperature: None,
+        max_tokens: None,
     })
     .unwrap();
     let list = client
@@ -321,6 +339,8 @@ async fn openai_list_models_404_returns_none() {
         api_key: String::new(),
         base_url: Some(server.uri()),
         timeout: Duration::from_secs(5),
+        temperature: None,
+        max_tokens: None,
     })
     .unwrap();
     let result = client.list_models(CancellationToken::new()).await;
@@ -347,7 +367,7 @@ async fn openai_in_stream_error_frame_yields_error_event() {
     );
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
         .mount(&server)
         .await;
 
@@ -355,6 +375,8 @@ async fn openai_in_stream_error_frame_yields_error_event() {
         api_key: String::new(),
         base_url: Some(server.uri()),
         timeout: Duration::from_secs(5),
+        temperature: None,
+        max_tokens: None,
     })
     .unwrap();
     let mut stream = client
@@ -389,5 +411,163 @@ async fn openai_in_stream_error_frame_yields_error_event() {
             .iter()
             .any(|e| matches!(e, ChatEvent::ContentDelta(_) | ChatEvent::ThinkingDelta(_))),
         "错误帧不应产出内容增量"
+    );
+}
+
+// ── 非 SSE 校验 / 版本段拼接 / 采样参数默认值 回归 ──────────────────────
+
+/// 流式请求收到 HTTP 200 的普通 JSON(非 SSE)→ `stream()` 必须
+/// 显式返回 `LlmError::Provider`(消息含「非 SSE」与响应体预览),
+/// 不再让流以「成功但零内容」静默收场。
+#[tokio::test]
+async fn openai_non_sse_200_response_yields_explicit_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            br#"{"choices":[{"message":{"content":"hello"}}]}"#.to_vec(),
+            "application/json",
+        ))
+        .mount(&server)
+        .await;
+    let client = OpenAIClient::new(OpenAIConfig {
+        api_key: "test-key".into(),
+        base_url: Some(server.uri()),
+        timeout: Duration::from_secs(5),
+        temperature: None,
+        max_tokens: None,
+    })
+    .expect("client");
+    let result = client
+        .stream(basic_request(), CancellationToken::new())
+        .await;
+    let Err(err) = result else {
+        panic!("非 SSE 响应必须返回错误");
+    };
+    match err {
+        LlmError::Provider { status, message } => {
+            assert_eq!(status, 200);
+            assert!(message.contains("非 SSE"), "{message}");
+            assert!(message.contains("choices"), "应带响应体预览: {message}");
+        }
+        other => panic!("期望 Provider 错误,得到 {other:?}"),
+    }
+}
+
+/// `[openai] temperature` / `max_tokens` 段配置作为默认值进请求体
+/// (请求侧显式值优先:`max_tokens` 显式 256 不得被配置覆盖)。
+#[tokio::test]
+async fn openai_config_temperature_and_max_tokens_fill_request_body() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+            "text/event-stream",
+        ))
+        .mount(&server)
+        .await;
+    let client = OpenAIClient::new(OpenAIConfig {
+        api_key: "test-key".into(),
+        base_url: Some(server.uri()),
+        timeout: Duration::from_secs(5),
+        temperature: Some(0.3),
+        max_tokens: Some(777),
+    })
+    .expect("client");
+    let mut stream = client
+        .stream(basic_request(), CancellationToken::new())
+        .await
+        .expect("stream");
+    while let Some(ev) = stream.next().await {
+        ev.expect("event");
+    }
+    let received = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&received[0].body).unwrap();
+    // f32 序列化有精度噪声(0.3f32 → 0.3000000119…),按容差比较。
+    let temp = body["temperature"].as_f64().expect("temperature 应为数值");
+    assert!(
+        (temp - 0.3).abs() < 1e-3,
+        "配置的 temperature 应进请求体: {body}"
+    );
+    assert_eq!(body["max_tokens"], 256, "请求侧显式值优先于配置默认");
+}
+
+/// 请求侧未带 temperature / max_tokens 时,配置默认值生效。
+#[tokio::test]
+async fn openai_config_defaults_apply_when_request_omits_params() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+            "text/event-stream",
+        ))
+        .mount(&server)
+        .await;
+    let client = OpenAIClient::new(OpenAIConfig {
+        api_key: "test-key".into(),
+        base_url: Some(server.uri()),
+        timeout: Duration::from_secs(5),
+        temperature: Some(0.9),
+        max_tokens: Some(123),
+    })
+    .expect("client");
+    let mut request = basic_request();
+    request.temperature = None;
+    request.max_tokens = None;
+    let mut stream = client
+        .stream(request, CancellationToken::new())
+        .await
+        .expect("stream");
+    while let Some(ev) = stream.next().await {
+        ev.expect("event");
+    }
+    let received = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&received[0].body).unwrap();
+    let temp = body["temperature"].as_f64().expect("temperature 应为数值");
+    assert!((temp - 0.9).abs() < 1e-3, "{body}");
+    assert_eq!(body["max_tokens"], 123);
+}
+
+/// base_url 已含版本段(智谱式 `/api/paas/v4`)→ 只追加
+/// `/chat/completions`,不再拼出 `/v4/v1/...`。
+#[tokio::test]
+async fn openai_base_url_with_version_segment_not_duplicated() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/paas/v4/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+            "text/event-stream",
+        ))
+        .mount(&server)
+        .await;
+    let client = OpenAIClient::new(OpenAIConfig {
+        api_key: "test-key".into(),
+        base_url: Some(format!("{}/api/paas/v4", server.uri())),
+        timeout: Duration::from_secs(5),
+        temperature: None,
+        max_tokens: None,
+    })
+    .expect("client");
+    let mut stream = client
+        .stream(basic_request(), CancellationToken::new())
+        .await
+        .expect("stream");
+    while let Some(ev) = stream.next().await {
+        ev.expect("event");
+    }
+    // 命中了 /api/paas/v4/chat/completions(wiremock 404 会让 stream 报错,
+    // 走不到这里);再确认没有请求打到 /v1/... 重复段。
+    let received = server.received_requests().await.unwrap();
+    let urls: Vec<String> = received
+        .iter()
+        .map(|r| r.url.as_str().to_string())
+        .collect();
+    assert!(
+        urls.iter()
+            .all(|u| u.contains("/api/paas/v4/chat/completions")),
+        "全部请求应打到版本段路径: {urls:?}"
     );
 }

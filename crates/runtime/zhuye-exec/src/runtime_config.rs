@@ -4,6 +4,7 @@
 //! 这些都是纯配置整形辅助函数,从 `lib.rs` 的 `async_main` 启动路径
 //! 原样抽出。
 
+use std::io::IsTerminal;
 use std::sync::Arc;
 
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
@@ -24,7 +25,11 @@ pub(crate) fn init_tracing(analytics: Option<&zhuye_config::AnalyticsSection>) {
 
     let env_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn,zhuye=info"));
-    let fmt_layer = fmt::layer().with_writer(std::io::stderr);
+    // stderr 非 tty(被 SDK / scheduler 管道捕获)时不输出 ANSI
+    // 颜色码 —— 此前常驻服务进程每次 spawn serve 都收到带色码的日志,
+    // 混入日志聚合后不可读。tty 交互场景保持彩色。
+    let ansi = std::io::stderr().is_terminal();
+    let fmt_layer = fmt::layer().with_writer(std::io::stderr).with_ansi(ansi);
     // 仅在 OTLP 启用时挂 OpenTelemetryLayer,避免空 subscriber 增加开销。
     let otel_layer = otel_guard
         .as_ref()

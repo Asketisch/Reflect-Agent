@@ -11,7 +11,7 @@
 | **能力覆盖层**(主) | `tests/functional/` | **Rust 代码在真产物上的行为**(原始 JSONL wire) | ❌ | 54 条 |
 | CLI 参数面 | `tests/rust/*.sh` | 17 个子命令的参数矩阵与输出契约 | ❌ | 320+ 断言 |
 | SDK 绑定层 | `tests/sdk-python/`、`tests/sdk-ts/` | 两个**客户端自己**的行为 | ✅ | Python 10 条 / TS 10 条 |
-| SDK 单测 | `sdks/*/tests/` | SDK 纯逻辑(mock serve),随包发布 | ✅ | Python 15 / TS 18 条 |
+| SDK 单测 | `sdks/*/tests/` | SDK 纯逻辑(mock serve),随包发布 | ✅ | Python 18 / TS 21 条 |
 | crate 单测 | `crates/**/tests/` | 内部单元与集成 | — | 既有 |
 | **实模型演练层**(可选) | `tests/live/` | **真实模型**下的引擎行为(协议形状) | ❌ | 12 条 |
 
@@ -40,6 +40,7 @@
 | 编排(子代理/讨论/任务/团队/流水线/goal) | O1–O5 | cli_modules、cli_deep | — | ✅ | — |
 | CLI 能力面 | C1–C6 | cli_deep(194 断言) | — | — | — |
 | 模型发现(清单接口 / 免费判定 / 动态 model) | — | models_* | — | ✅ | — |
+| 缺陷修复回归(预算耗尽显性化 / 配置隔离 / 工具裁切 / 提示词关闭 / mock 显性化) | ✔(12 条,见 `test_bugfixes.py`) | config(show 的 ZHUYE_HOME 断言) | — | ✅(provider 层非 SSE 校验 / 版本段拼接 / 采样参数默认值有 wiremock 回归) | — |
 
 ## 2. 能力覆盖层明细(`tests/functional/`)
 
@@ -116,6 +117,34 @@ rewind 物理截断(记录减少 + `.rewind-<ts>.bak` 备份)/ `zhuye session ls
 子代理 `call_explorer`(子代理执行 → 回执进历史)/ 讨论编排(transcript +
 Result + rounds_completed)/ 任务与团队(create → ls)/ 流水线错误路径
 (no runner / team not found)/ goal 模式与其他 op 共存。
+
+### 缺陷修复回归(`test_bugfixes.py`)
+- **预算耗尽显性化(P-13)**:迭代预算 / token 预算耗尽且**零文本**时,
+  turn 在 `turn_complete` 之前显式发 `error` 事件,字段级断言
+  `code == "iteration_budget_exhausted"` / `"token_budget_exhausted"`、
+  `details.iterations`、error 先于 turn_complete、turn status 仍为
+  `max_iterations` / `token_budget_exceeded`;反向守护:预算耗尽但强制
+  收口产出了文本(合法完成)**不得**误报 error。
+- **配置隔离(P-06)**:`ZHUYE_HOME` 目录下的 config.toml 被 `config show`
+  读到(`trigger_tokens=7777` 命中、`$HOME` 那份的 1111 不出现)——
+  配置与 session-notes 同一套 `ZHUYE_HOME` 语义。
+- **工具裁切(P-09)**:`[active] tools` 白名单 → 引擎发给模型的工具集恰为
+  白名单(mock `request_echo` 观测,字段级);`[active] disallowed_tools`
+  黑名单 → bash 消失、read 与客户端远程工具保留;无配置 → 内置工具
+  默认全量暴露(向后兼容)。
+- **提示词关闭(P-08)**:`.zhuye/prompts/default.md` 覆盖 `## system.plan-mode`
+  为 `off` → 引擎 system prompt 不含 `## Plan Mode` / `ExitPlanMode`,
+  自定义 `## system.main` 全文生效;未覆盖时 Plan Mode 段保持既有行为。
+- **mock 配置错误显性化(P-02)**:mock 脚本全部行解析失败 / 路径不存在 → 首次模型调用
+  发 `error` 事件 `code == "INVALID_REQUEST"`,message 含失败原因,
+  不再静默回退固定回复。
+- **mock 回复可辨识(P-01/P-05)**:无脚本回退文案自带「mock 固定回复」可辨识标记。
+- **model 前缀剥离(P-10)**:`ZHUYE_MODEL=openai/m1` 前缀识别与剥离(config 层
+  单测 `strip_known_provider_prefix` + CLI `config show` 有效模型联动)。
+- provider 层的 **P-11**(非 SSE 响应显式报错)/ **P-16**(base_url 版本段
+  拼接)/ **P-12**(temperature / max_tokens 段配置)落在
+  `zhuye-llm` 的 wiremock 回归(openai_non_sse_* / join_endpoint_* /
+  openai_config_temperature_*),不在离线 serve 套件(无真实网关)。
 
 ### C 组 CLI 能力面(`test_cli.py`)
 `serve` 三个恢复入口 / `exec` 输出每行是合法 JSON 且含 turn 事件 /
@@ -197,6 +226,55 @@ Result + rounds_completed)/ 任务与团队(create → ls)/ 流水线错误路�
 - D12:SDK 随包分发平台二进制(参考 Codex / ruff 模式)—— npm 主包按平台安装 `zhuye-<slug>` 子包(optional dependencies,清单由 CI 动态生成),Python 切 maturin 出平台 wheel(二进制以 `zhuye/bin/` 包数据单份携带);双 SDK 二进制解析链统一为 `options.bin → ZHUYE_BIN → 内嵌二进制 → PATH`,平台不匹配回退 PATH;安装冒烟与发布后 registry 验证升级为断言内嵌二进制 `--version` 可执行。
 - Python 3.10 兼容性:移除 Python 3.11 才提供的 `typing.NotRequired` 依赖,用 `TypedDict` 继承区分必填与可选字段,保持零运行时依赖。
 
+### 缺陷修复记录(2026-10,实测问题清单全 17 项)
+
+- **P-01/P-05**:mock 默认回退文案自带「mock 固定回复」标记,离线测试
+  不再假绿。
+- **P-02**:mock 脚本路径不存在 / 全部行解析失败 → 首次模型调用显式
+  `INVALID_REQUEST`(engine → `EventMsg::Error` → SDK 异常),不再静默
+  降级。
+- **P-03**:serve 的 tracing 日志在 stderr 非 tty 时不再输出 ANSI 色码;
+  双 SDK 支持 stderr 接管(Python `on_stderr` 回调 / `forward_stderr=False`,
+  TS `onStderr` 回调),不再硬编码直通宿主 stderr。
+- **P-06**:`ZHUYE_HOME/config.toml` 成为配置读取的第一优先路径
+  (`config show/ls/set`、serve、doctor、login、mcp、plugin 全部经
+  `default_config_path`),配置与数据目录同一套 `ZHUYE_HOME` 语义。
+- **P-08**:`## system.plan-mode` / `## runtime.active-mode` 覆盖为
+  `off`(或 none/disabled/false)即整段关闭 —— 非编码场景不再每请求背
+  ~2.3KB 编码代理人格(docs/prompts.md 已记载)。
+- **P-09**:新增 `[active] tools` / `[active] disallowed_tools` 主 agent
+  工具裁切(与 `.zhuye/agents/*.md` 同语义:白名单 ∩ / 黑名单 ∪),
+  serve / SDK 接入方无需写 agent 文件即可摘掉内置工具。
+- **P-10**:`ZHUYE_MODEL` 带已知 provider 前缀(mock/openai/anthropic/
+  ollama 及别名)时剥前缀;未知前缀(OpenRouter 式 vendor/model)保留。
+- **P-11**:流式请求收到非 SSE 响应(HTTP 200 普通 JSON)→ provider 显式
+  返回 `LlmError::Provider`(带 content-type 与响应体预览)→
+  `EventMsg::Error`,不再伪装成「模型没说话」(wiremock 回归)。
+- **P-12**:provider 段新增 `temperature` / `max_tokens` 配置项
+  (`[openai]` / `[anthropic]` / `[ollama]`;Responses 映射为
+  `max_output_tokens`,Ollama 映射为 `options.num_predict`),请求侧
+  显式值优先(wiremock 回归)。
+- **P-13**:迭代预算 / token 预算耗尽且零文本 → 引擎显式发
+  `iteration_budget_exhausted` / `token_budget_exhausted` 带码 error 事件,
+  SDK `prompt()` 升为异常,可衔接 failover;与「模型正常空回复」不再
+  不可区分。
+- **P-15**:双 SDK `prompt()` 聚合器在收到全量 `agent_message` 时清空
+  delta 缓冲(全量为权威快照),混合下发形态不再产生重复文本。
+- **P-16**:base_url 已含版本段(`/v1`、`/api/paas/v4` 等)时不再重复
+  追加 `/v1`;OpenAI / Anthropic / Responses / models 端点统一走
+  `join_versioned_endpoint`(wiremock + 单测回归)。
+- **P-07**:握手期子进程死亡 → Python 轮询 `poll()` 立刻抛错、TS 经
+  `ready` promise 在首次使用时立刻抛错,均携带退出码与 **stderr 尾部**
+  (真实原因);不再傻等满握手超时报泛化的 timed out。
+- **P-04**:CLI `--help` 文案清除「v1.3 SDK / v0.4 / v0.5 / v1.6」等内部
+  迭代版本标签(用户可见面与发布版本对齐;代码注释内的历史标注保留)。
+- **P-14(观察项,不修)**:多轮后 assistant(tool_call) 被引擎合并为
+  单条 assistant + 连续 tool 结果 —— 这是引擎既有持久化/回放形态,
+  改动会波及 resume 与 cache 语义;已在缺陷修复回归组记录口径,依赖消息边界的
+  网关(prompt cache / 审计重放)若有强诉求再立项。
+- **P-17(适配层职责,不修)**:api_key 走 TOML / env 的转义责任在
+  接入方(zhuye 不代写 config.toml);docs/sdk.md 已补充结构化接入提示。
+
 ### 实模型层观测到的上游限制(非 Zhuye 缺陷)
 
 以下来自 `tests/live/` 对真实免费池的观测,**不计入缺陷**,但影响实模型层的
@@ -220,7 +298,8 @@ Result + rounds_completed)/ 任务与团队(create → ls)/ 流水线错误路�
 | `functional/test_persistence.py` | 8 条(P1–P5) |
 | `functional/test_orchestration.py` | 5 条(O5) |
 | `functional/test_cli.py` | 6 条(C6) |
-| **能力覆盖层合计** | **63 条** |
+| `functional/test_bugfixes.py` | 12 条(缺陷修复回归) |
+| **能力覆盖层合计** | **75 条** |
 | `live/test_live_basic.py` | 4 条(L1–L4) |
 | `live/test_live_tools.py` | 3 条(T1–T3) |
 | `live/test_live_persistence.py` | 3 条(P1–P2、X1) |
