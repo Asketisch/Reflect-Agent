@@ -174,22 +174,46 @@ export class ZhuyeAgent {
     // 子进程意外退出 → 通知所有 close 监听者(submit / prompt 等
     // 仍 await 中的 promise 借此抛错 / 收尾)。
     child.on('exit', (code, signal) => {
-      const tail = stderrTail.length
-        ? ` stderr tail: ${stderrTailText(stderrTail)}`
-        : '';
+      // 阶段标记必须在 exit 时刻捕获:等待 stderr 排空期间握手状态
+      // 可能被翻转,措辞判定要以死亡时的阶段为准。
+      const wasHandshake = !handshakeSettled;
       // 握手期死亡与运行期死亡措辞区分,方便排障定位。
-      const err = handshakeSettled
-        ? new Error(
-            `zhuye serve exited unexpectedly (code=${code} signal=${signal ?? 'none'})${tail}`,
-          )
-        : new Error(
-            `zhuye serve exited during handshake (code=${code} signal=${signal ?? 'none'})${tail}`,
-          );
-      if (!handshakeSettled) {
-        handshakeSettled = true;
-        readyReject(err);
+      const buildErr = () => {
+        const tail = stderrTail.length
+          ? ` stderr tail: ${stderrTailText(stderrTail)}`
+          : '';
+        return wasHandshake
+          ? new Error(
+              `zhuye serve exited during handshake (code=${code} signal=${signal ?? 'none'})${tail}`,
+            )
+          : new Error(
+              `zhuye serve exited unexpectedly (code=${code} signal=${signal ?? 'none'})${tail}`,
+            );
+      };
+      if (!wasHandshake) {
+        agent.handleServeExit(buildErr());
+        return;
       }
-      agent.handleServeExit(err);
+      // 竞态:子进程写 stderr 后立刻退出时,`exit` 事件可能先于
+      // stderr 的 `data` 事件投递(管道排空晚于进程退出),此刻同步读
+      // stderrTail 会拿到空尾、丢失真实原因。握手失败不在毫秒级关键
+      // 路径上 —— 等 `close`(stdio 全部关闭,stderr 必已投递)或至多
+      // 500ms 兜底,再构建错误。
+      let drainSettled = false;
+      const finish = () => {
+        if (drainSettled) return;
+        drainSettled = true;
+        // 等待期间 stdout 缓冲可能投递了 session_configured:握手实际
+        // 成功则让路,不再以失败拒绝。
+        if (handshakeSettled) return;
+        handshakeSettled = true;
+        const err = buildErr();
+        readyReject(err);
+        agent.handleServeExit(err);
+      };
+      child.once('close', finish);
+      const drainTimer = setTimeout(finish, 500);
+      drainTimer.unref?.();
     });
     // spawn 失败(典型:二进制路径不存在,ENOENT):ChildProcess 的
     // error 事件没有监听者会以 uncaught exception 打爆宿主进程;这里
