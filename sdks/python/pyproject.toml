@@ -1,6 +1,6 @@
 [project]
 name = "zhuye"
-version = "0.1.6"
+version = "0.1.7"
 description = "ZhuYe Agent SDK for Python: spawn `zhuye serve` and drive it over JSONL stdio."
 requires-python = ">=3.10"
 license = { text = "MIT" }
